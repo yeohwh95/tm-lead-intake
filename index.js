@@ -143,9 +143,7 @@ function parseLeads(raw){
   return Array.isArray(obj) ? obj : (obj.leads || [obj]);
 }
 
-function leadBlock(lead, num){
-  const [team, pool] = poolForBrand(lead.brand);
-  const assign = pool.length ? `${pool[0]} (${team})` : '— (staff to pick)';
+function leadBlock(lead, num, assign){
   const digits = (lead.phone || '').replace(/\D/g, '');
   return [
     `${num ? '*' + num + '.* ' : ''}👤 ${lead.name || '—'}`,
@@ -159,7 +157,13 @@ function leadBlock(lead, num){
 }
 function cardsMessage(src, leads){
   const head = `🧪 ${leads.length} LEAD${leads.length > 1 ? 'S' : ''} PARSED — ${src} (test only, not saved to Lark)`;
-  const blocks = leads.map((l, i) => leadBlock(l, leads.length > 1 ? i + 1 : null));
+  const turn = {};   // take-turns rotation WITHIN this batch (per team pool)
+  const blocks = leads.map((l, i) => {
+    const [team, pool] = poolForBrand(l.brand);
+    let assign = '— (staff to pick)';
+    if (pool.length) { const idx = turn[team] || 0; assign = `${pool[idx % pool.length]} (${team})`; turn[team] = idx + 1; }
+    return leadBlock(l, leads.length > 1 ? i + 1 : null, assign);
+  });
   return head + '\n\n' + blocks.join('\n\n');
 }
 
