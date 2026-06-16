@@ -1,26 +1,223 @@
-// TM Motor Lead Intake — foundation receiver
-// Captures everything dropped in the WhatsApp intake group (text + media metadata),
-// logs it (Render logs) + keeps a recent list at GET /. Phase 2 adds AI parse → Lark.
+// TM Motor Lead Intake — receiver + AI parser (TEST MODE)
+// Reads text / PDF / Excel / image dropped in the WA group, asks Claude to
+// extract lead fields, and replies a parse-card BACK INTO THE SAME CHAT.
+// Lark write is OFF until LIVE_LARK=1. Nothing is written to Lark in test mode.
+
 const http = require('http');
-const recent = [];
-function summarize(p){
-  try { return JSON.stringify(p, (k,v)=> (typeof v==='string' && v.length>400)?`[${v.length} chars omitted]`:v).slice(0,4000); }
-  catch { return String(p).slice(0,2000); }
+let XLSX = null; try { XLSX = require('xlsx'); } catch { /* excel disabled if dep missing */ }
+
+const WASENDER_BASE  = 'https://www.wasenderapi.com/api';
+const UA             = 'Mozilla/5.0';
+const WASENDER_TOKEN = process.env.WASENDER_TOKEN || '';
+const ANTHROPIC_KEY  = process.env.ANTHROPIC_API_KEY || '';
+const MODEL          = process.env.MODEL || 'claude-sonnet-4-6';
+const LIVE_LARK      = process.env.LIVE_LARK === '1';   // stays OFF for testing
+
+const recent = [];                 // in-memory debug log (wiped on restart)
+function log(...a){ console.log(new Date().toISOString(), ...a); }
+function remember(o){ recent.unshift({ at: new Date().toISOString(), ...o }); if (recent.length > 50) recent.pop(); }
+
+// ---- rotation preview (NON-persisting in test mode; just shows who'd be next) ----
+const POOLS = {
+  KS:       ['Nabil','Jebat','Allysa','Azwin','Amirul','Nazrin'],   // Lambretta/Thunder (Klang+Shah Alam)
+  HQ:       ['Adib','Syahrin','Fitri','Fazwan','Azrul','Amir'],     // HQ / Suzuki
+  Honda:    ['Bella','Syaza','Anis','Syafa'],                       // Honda Kapar
+  ShahAlam: ['Amirul','Nazrin','Aso'],                             // KTM / Zontes
+};
+function poolForBrand(brand){
+  const b = (brand || '').toLowerCase();
+  if (b === 'honda') return ['Honda', POOLS.Honda];
+  if (b === 'hq' || b === 'suzuki') return ['HQ', POOLS.HQ];
+  if (b === 'lambretta' || b === 'thunder') return ['Klang/Shah Alam', POOLS.KS];
+  if (b === 'ktm' || b === 'zontes') return ['Shah Alam', POOLS.ShahAlam];
+  return [null, []];
 }
-http.createServer((req,res)=>{
-  if(req.method==='POST'){
-    let body=''; req.on('data',c=>body+=c);
-    req.on('end',()=>{
-      let p; try{p=JSON.parse(body)}catch{p={raw:body.slice(0,1500)}}
-      const s=summarize(p);
-      recent.unshift({at:new Date().toISOString(),summary:s}); if(recent.length>50) recent.pop();
-      console.log('=== CAPTURE',new Date().toISOString(),'===\n'+s+'\n');
-      res.writeHead(200,{'Content-Type':'application/json'}); res.end('{"ok":true}');
-    });
-  } else if(req.url==='/health'){ res.writeHead(200); res.end('ok'); }
-  else {
-    res.writeHead(200,{'Content-Type':'text/html; charset=utf-8'});
-    res.end('<h2>TM Motor Lead Intake — foundation ✅</h2><p>Captures so far: '+recent.length+'</p>'+
-      recent.map(e=>'<hr><b>'+e.at+'</b><pre>'+e.summary.replace(/[<>]/g,m=>m=='<'?'&lt;':'&gt;')+'</pre>').join(''));
+
+// ---- WaSender helpers ----
+async function waSend(to, text){
+  if (!WASENDER_TOKEN) { log('waSend skipped — no WASENDER_TOKEN'); return; }
+  const r = await fetch(WASENDER_BASE + '/send-message', {
+    method: 'POST',
+    headers: { 'Authorization': 'Bearer ' + WASENDER_TOKEN, 'Content-Type': 'application/json', 'User-Agent': UA },
+    body: JSON.stringify({ to, text }),
+  });
+  if (!r.ok) log('waSend HTTP', r.status, (await r.text()).slice(0, 200));
+}
+
+// Server-side decrypt (Strategy 2): POST the media message object → publicUrl → download bytes
+async function decryptMedia(mediaObj){
+  const r = await fetch(WASENDER_BASE + '/decrypt-media', {
+    method: 'POST',
+    headers: { 'Authorization': 'Bearer ' + WASENDER_TOKEN, 'Content-Type': 'application/json', 'User-Agent': UA },
+    body: JSON.stringify(mediaObj),
+  });
+  const txt = await r.text();
+  let j = {}; try { j = JSON.parse(txt); } catch {}
+  const url = j.publicUrl || j.url || (j.data && (j.data.publicUrl || j.data.url)) || '';
+  log('decrypt-media status', r.status, 'url?', !!url, 'body', txt.slice(0, 200));
+  if (!url) throw new Error('decrypt-media gave no url (HTTP ' + r.status + ')');
+  const bin = await fetch(url, { headers: { 'User-Agent': UA } });
+  if (!bin.ok) throw new Error('media download HTTP ' + bin.status);
+  return Buffer.from(await bin.arrayBuffer());
+}
+
+// ---- extract the inbound message into a normalized shape ----
+function pickMessages(data){
+  let m = data.messages;
+  if (Array.isArray(m)) m = m[0];
+  return m || {};
+}
+function unwrap(msg){
+  if (msg.documentWithCaptionMessage?.message) return msg.documentWithCaptionMessage.message;
+  if (msg.viewOnceMessage?.message) return msg.viewOnceMessage.message;
+  if (msg.ephemeralMessage?.message) return msg.ephemeralMessage.message;
+  return msg;
+}
+function extract(payload){
+  const data = payload.data || {};
+  const m = pickMessages(data);
+  const key = m.key || {};
+  if (key.fromMe) return null;                          // ignore our own sends
+  const chatId = key.remoteJid || '';
+  const sender = m.pushName || key.participantPn || key.participant || '';
+  const msg = unwrap(m.message || {});
+  if (msg.imageMessage) {
+    const im = msg.imageMessage;
+    return { chatId, sender, kind: 'image', mediaObj: im, caption: im.caption || '', mime: (im.mimetype || 'image/jpeg').split(';')[0] };
   }
-}).listen(process.env.PORT||3000,()=>console.log('TM lead-intake foundation listening'));
+  if (msg.documentMessage) {
+    const dm = msg.documentMessage;
+    return { chatId, sender, kind: 'document', mediaObj: dm, caption: dm.caption || '', mime: dm.mimetype || '', fileName: dm.fileName || '' };
+  }
+  const text = msg.conversation || msg.extendedTextMessage?.text || '';
+  if (text) return { chatId, sender, kind: 'text', text };
+  return null;
+}
+
+function excelToText(buf){
+  if (!XLSX) return '[xlsx parser unavailable]';
+  const wb = XLSX.read(buf, { type: 'buffer' });
+  return wb.SheetNames.map(n => '# Sheet: ' + n + '\n' + XLSX.utils.sheet_to_csv(wb.Sheets[n])).join('\n\n');
+}
+
+// ---- Claude extraction ----
+const EXTRACT_INSTRUCTION =
+`From the content above, extract ALL motorcycle sales leads.
+Return ONLY a JSON object, no prose:
+{"leads":[{"name":"","phone":"+60...","interest":"","brand":"","origin":""}]}
+Rules:
+- phone: normalize to Malaysian +60 format, digits only after +60, no spaces. If no phone, use "".
+- interest: bike model or enquiry topic, short lowercase (e.g. "cbr250","africa twin","pricing"). If none -> "No question".
+- brand: exactly one of HQ, Honda, Lambretta, Thunder, Suzuki, KTM. If unclear -> "".
+- origin: best guess of FB Ads, Tiktok Get Leads, Tiktok DM, Mudah, FB/IG comments, Whatsapp. Default "Whatsapp".
+- name: customer name if present, else "".
+Return JSON only.`;
+
+async function claudeExtract(contentBlocks){
+  if (!ANTHROPIC_KEY) throw new Error('NO_KEY');
+  const r = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: { 'x-api-key': ANTHROPIC_KEY, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
+    body: JSON.stringify({ model: MODEL, max_tokens: 1500, messages: [{ role: 'user', content: contentBlocks }] }),
+  });
+  const j = await r.json();
+  if (!r.ok) throw new Error('Claude HTTP ' + r.status + ' ' + JSON.stringify(j).slice(0, 200));
+  return (j.content || []).map(c => c.text || '').join('');
+}
+function parseLeads(raw){
+  let s = (raw || '').trim().replace(/^```(json)?/i, '').replace(/```$/,'').trim();
+  const a = s.indexOf('{'); const b = s.lastIndexOf('}');
+  if (a >= 0 && b > a) s = s.slice(a, b + 1);
+  const obj = JSON.parse(s);
+  return Array.isArray(obj) ? obj : (obj.leads || [obj]);
+}
+
+function card(src, lead){
+  const [team, pool] = poolForBrand(lead.brand);
+  const assign = pool.length ? `${pool[0]} (${team} — rotation preview)` : '— (brand unknown, staff to pick)';
+  return [
+    `🧪 LEAD PARSED — test only (not saved to Lark)`,
+    `Source: ${src}`,
+    ``,
+    `👤 Name: ${lead.name || '—'}   (display only)`,
+    `📱 Phone: ${lead.phone || '—  ⚠️ no phone found'}`,
+    `🏍️ Want: ${lead.interest || 'No question'}`,
+    `🏷️ Brand: ${lead.brand || '—'}`,
+    `📍 Origin: ${lead.origin || 'Whatsapp'}`,
+    `➡️ Would assign: ${assign}`,
+    `Stage: Pending customer reply`,
+  ].join('\n');
+}
+
+async function handle(payload){
+  const info = extract(payload);
+  if (!info) return;
+  log('inbound', info.kind, 'from', info.sender, 'chat', info.chatId);
+  let src = 'Text', blocks = [];
+  try {
+    if (info.kind === 'text') {
+      src = 'Text';
+      blocks = [{ type: 'text', text: 'Lead message:\n' + info.text }];
+    } else if (info.kind === 'image') {
+      src = 'Image';
+      const buf = await decryptMedia(info.mediaObj);
+      blocks = [
+        { type: 'image', source: { type: 'base64', media_type: info.mime || 'image/jpeg', data: buf.toString('base64') } },
+        { type: 'text', text: 'Caption: ' + (info.caption || '(none)') },
+      ];
+    } else if (info.kind === 'document') {
+      const buf = await decryptMedia(info.mediaObj);
+      const tag = (info.mime + ' ' + (info.fileName || '')).toLowerCase();
+      if (/pdf/.test(tag)) {
+        src = 'PDF';
+        blocks = [{ type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: buf.toString('base64') } }];
+      } else if (/sheet|excel|xlsx|xls|csv|spreadsheet/.test(tag)) {
+        src = 'Excel';
+        blocks = [{ type: 'text', text: 'Spreadsheet (CSV export):\n' + excelToText(buf).slice(0, 20000) }];
+      } else {
+        src = 'Document';
+        blocks = [{ type: 'text', text: 'Document caption: ' + (info.caption || '(none)') + '\n(unsupported type ' + info.mime + ')' }];
+      }
+    }
+    blocks.push({ type: 'text', text: EXTRACT_INSTRUCTION });
+    const raw = await claudeExtract(blocks);
+    const leads = parseLeads(raw);
+    remember({ src, sender: info.sender, leads });
+    if (!leads.length) { await waSend(info.chatId, `🧪 ${src}: read OK but found no lead in it.`); return; }
+    if (leads.length === 1) {
+      await waSend(info.chatId, card(src, leads[0]));
+    } else {
+      const head = `🧪 ${leads.length} LEADS PARSED from ${src} — test only (not saved)\n`;
+      const lines = leads.map((l, i) => `${i + 1}. ${l.phone || '—'} | ${l.interest || 'No question'} | ${l.brand || '—'} | ${l.origin || 'Whatsapp'}`).join('\n');
+      await waSend(info.chatId, head + lines);
+    }
+  } catch (e) {
+    const msg = String(e.message || e);
+    log('handle error', msg);
+    if (msg === 'NO_KEY') await waSend(info.chatId, '🧪 Got your ' + src + ' — but the AI key for this project isn\'t set yet. Ping Benjamin to add ANTHROPIC_API_KEY.');
+    else await waSend(info.chatId, '⚠️ Test parser couldn\'t read that ' + src + ': ' + msg.slice(0, 180));
+  }
+}
+
+// ---- HTTP ----
+http.createServer((req, res) => {
+  if (req.method === 'POST') {
+    let body = '';
+    req.on('data', c => body += c);
+    req.on('end', () => {
+      let p; try { p = JSON.parse(body); } catch { p = { raw: body.slice(0, 1500) }; }
+      remember({ event: p.event, summary: JSON.stringify(p).slice(0, 800) });
+      log('CAPTURE', p.event || '(no event)');
+      res.writeHead(200, { 'Content-Type': 'application/json' }); res.end('{"ok":true}');
+      handle(p).catch(e => log('async handle error', String(e.message || e)));
+    });
+  } else if (req.url === '/health') {
+    res.writeHead(200, { 'Content-Type': 'text/plain' }); res.end('ok');
+  } else {
+    const items = recent.map(r => `<b>${r.at}</b> <i>${r.src || r.event || ''}</i><pre>${(r.leads ? JSON.stringify(r.leads, null, 1) : r.summary || '').replace(/</g,'&lt;')}</pre>`).join('<hr>');
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+    res.end(`<h2>TM Motor Lead Intake — parser (TEST MODE)</h2>
+<p>Lark write: <b>${LIVE_LARK ? 'LIVE ⚠️' : 'OFF (test)'}</b> · AI key: <b>${ANTHROPIC_KEY ? 'set' : 'NOT set'}</b> · WaSender: <b>${WASENDER_TOKEN ? 'set' : 'NOT set'}</b> · model: ${MODEL}</p>
+<p>Captures: ${recent.length}</p><hr>${items}`);
+  }
+}).listen(process.env.PORT || 3000, () => log('TM lead-intake parser (test mode) listening'));
