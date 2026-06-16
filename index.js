@@ -19,6 +19,9 @@ const INTAKE_GROUP_JID = process.env.INTAKE_GROUP_JID || '';
 // FAN-OUT (KoonKen/FSS pattern): this Render bot is the PRIMARY webhook. It forwards every
 // raw payload + original headers to the VPS console inbox so TM shows in the WhatsApp QA console.
 const INBOX_FORWARD_URL = process.env.INBOX_FORWARD_URL || '';
+// WaSender signs with its own secret; the console channel expects a different one. Re-sign the
+// forward with the console channel's secret so signature verification passes (no VPS restart needed).
+const INBOX_FORWARD_SECRET = process.env.INBOX_FORWARD_SECRET || '';
 
 const recent = [];                 // in-memory debug log (wiped on restart)
 function log(...a){ console.log(new Date().toISOString(), ...a); }
@@ -219,6 +222,7 @@ function forwardToInbox(rawBody, headers) {
   if (!INBOX_FORWARD_URL) return;
   const fwd = {};
   for (const k in headers) { const lk = k.toLowerCase(); if (lk !== 'host' && lk !== 'content-length') fwd[k] = headers[k]; }
+  if (INBOX_FORWARD_SECRET) fwd['x-webhook-signature'] = INBOX_FORWARD_SECRET;  // re-sign for the console channel
   fetch(INBOX_FORWARD_URL, { method: 'POST', headers: fwd, body: rawBody })
     .then(r => log('[inbox-fwd]', r.status, '->', INBOX_FORWARD_URL))
     .catch(e => log('[inbox-fwd] failed:', String(e.message || e)));
