@@ -122,8 +122,8 @@ Rules:
 - phone: normalize to Malaysian +60 format, digits only after +60, no spaces. If no phone, use "".
 - interest: bike model or enquiry topic, short lowercase (e.g. "cbr250","africa twin","pricing"). If none -> "No question".
 - brand: exactly one of HQ, Honda, Lambretta, Thunder, Suzuki, KTM. If unclear -> "".
-- origin: read the lead's source from the data/filename. If it says "Organic" -> "Tiktok Get Leads". If it's a paid/sponsored TikTok ad -> "Ads Tiktok". Other sources: "Tiktok DM", "FB Ads", "FB/IG comments", "Mudah". Default to "Ads Tiktok" for TikTok lead-form exports.
-- name: customer name if present, else "".
+- origin: identify the lead's SOURCE. A TikTok direct-message / chat-conversation screenshot (shows a DM thread, @handle, "Message request accepted") -> "Tiktok DM". The word "Organic" in the data -> "Tiktok Get Leads". A paid/sponsored TikTok ad OR a TikTok lead-form export -> "Ads Tiktok". A WhatsApp chat screenshot -> "Whatsapp". Facebook/Instagram -> "FB Ads" or "FB/IG comments". Mudah -> "Mudah".
+- name: the customer's name. For a chat/DM screenshot, use the contact's display name or @handle shown at the top (e.g. "mas.saifuddin"). Else "".
 Return JSON only.`;
 
 async function aiExtract(blocks){
