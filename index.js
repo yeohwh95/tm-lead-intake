@@ -1,5 +1,5 @@
 // TM Motor Lead Intake — receiver + AI parser (TEST MODE)
-// Reads text / PDF / Excel / image dropped in the WA group, asks Claude to
+// Reads text / PDF / Excel / image dropped in the WA group, asks GPT-4o to
 // extract lead fields, and replies a parse-card BACK INTO THE SAME CHAT.
 // Lark write is OFF until LIVE_LARK=1. Nothing is written to Lark in test mode.
 
@@ -9,8 +9,8 @@ let XLSX = null; try { XLSX = require('xlsx'); } catch { /* excel disabled if de
 const WASENDER_BASE  = 'https://www.wasenderapi.com/api';
 const UA             = 'Mozilla/5.0';
 const WASENDER_TOKEN = process.env.WASENDER_TOKEN || '';
-const ANTHROPIC_KEY  = process.env.ANTHROPIC_API_KEY || '';
-const MODEL          = process.env.MODEL || 'claude-sonnet-4-6';
+const OPENAI_KEY     = process.env.OPENAI_API_KEY || '';
+const MODEL          = process.env.MODEL || 'gpt-4o';
 const LIVE_LARK      = process.env.LIVE_LARK === '1';   // stays OFF for testing
 
 const recent = [];                 // in-memory debug log (wiped on restart)
@@ -100,10 +100,10 @@ function excelToText(buf){
   return wb.SheetNames.map(n => '# Sheet: ' + n + '\n' + XLSX.utils.sheet_to_csv(wb.Sheets[n])).join('\n\n');
 }
 
-// ---- Claude extraction ----
+// ---- OpenAI extraction (GPT-4o: vision for images, native PDF, text for excel/plain) ----
 const EXTRACT_INSTRUCTION =
 `From the content above, extract ALL motorcycle sales leads.
-Return ONLY a JSON object, no prose:
+Return ONLY a JSON object (no prose):
 {"leads":[{"name":"","phone":"+60...","interest":"","brand":"","origin":""}]}
 Rules:
 - phone: normalize to Malaysian +60 format, digits only after +60, no spaces. If no phone, use "".
@@ -113,16 +113,16 @@ Rules:
 - name: customer name if present, else "".
 Return JSON only.`;
 
-async function claudeExtract(contentBlocks){
-  if (!ANTHROPIC_KEY) throw new Error('NO_KEY');
-  const r = await fetch('https://api.anthropic.com/v1/messages', {
+async function aiExtract(blocks){
+  if (!OPENAI_KEY) throw new Error('NO_KEY');
+  const r = await fetch('https://api.openai.com/v1/chat/completions', {
     method: 'POST',
-    headers: { 'x-api-key': ANTHROPIC_KEY, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
-    body: JSON.stringify({ model: MODEL, max_tokens: 1500, messages: [{ role: 'user', content: contentBlocks }] }),
+    headers: { 'Authorization': 'Bearer ' + OPENAI_KEY, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ model: MODEL, max_tokens: 1500, response_format: { type: 'json_object' }, messages: [{ role: 'user', content: blocks }] }),
   });
   const j = await r.json();
-  if (!r.ok) throw new Error('Claude HTTP ' + r.status + ' ' + JSON.stringify(j).slice(0, 200));
-  return (j.content || []).map(c => c.text || '').join('');
+  if (!r.ok) throw new Error('OpenAI HTTP ' + r.status + ' ' + JSON.stringify(j.error || j).slice(0, 200));
+  return j.choices?.[0]?.message?.content || '';
 }
 function parseLeads(raw){
   let s = (raw || '').trim().replace(/^```(json)?/i, '').replace(/```$/,'').trim();
@@ -162,25 +162,25 @@ async function handle(payload){
       src = 'Image';
       const buf = await decryptMedia(info.mediaObj);
       blocks = [
-        { type: 'image', source: { type: 'base64', media_type: info.mime || 'image/jpeg', data: buf.toString('base64') } },
-        { type: 'text', text: 'Caption: ' + (info.caption || '(none)') },
+        { type: 'text', text: 'Lead shown in this image. Caption: ' + (info.caption || '(none)') },
+        { type: 'image_url', image_url: { url: `data:${info.mime || 'image/jpeg'};base64,${buf.toString('base64')}` } },
       ];
     } else if (info.kind === 'document') {
       const buf = await decryptMedia(info.mediaObj);
       const tag = (info.mime + ' ' + (info.fileName || '')).toLowerCase();
       if (/pdf/.test(tag)) {
         src = 'PDF';
-        blocks = [{ type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: buf.toString('base64') } }];
+        blocks = [{ type: 'file', file: { filename: info.fileName || 'lead.pdf', file_data: `data:application/pdf;base64,${buf.toString('base64')}` } }];
       } else if (/sheet|excel|xlsx|xls|csv|spreadsheet/.test(tag)) {
         src = 'Excel';
-        blocks = [{ type: 'text', text: 'Spreadsheet (CSV export):\n' + excelToText(buf).slice(0, 20000) }];
+        blocks = [{ type: 'text', text: 'Spreadsheet (CSV export):\n' + excelToText(buf).slice(0, 24000) }];
       } else {
         src = 'Document';
         blocks = [{ type: 'text', text: 'Document caption: ' + (info.caption || '(none)') + '\n(unsupported type ' + info.mime + ')' }];
       }
     }
     blocks.push({ type: 'text', text: EXTRACT_INSTRUCTION });
-    const raw = await claudeExtract(blocks);
+    const raw = await aiExtract(blocks);
     const leads = parseLeads(raw);
     remember({ src, sender: info.sender, leads });
     if (!leads.length) { await waSend(info.chatId, `🧪 ${src}: read OK but found no lead in it.`); return; }
@@ -194,7 +194,7 @@ async function handle(payload){
   } catch (e) {
     const msg = String(e.message || e);
     log('handle error', msg);
-    if (msg === 'NO_KEY') await waSend(info.chatId, '🧪 Got your ' + src + ' — but the AI key for this project isn\'t set yet. Ping Benjamin to add ANTHROPIC_API_KEY.');
+    if (msg === 'NO_KEY') await waSend(info.chatId, '🧪 Got your ' + src + ' — but the AI key for this project isn\'t set yet. Ping Benjamin.');
     else await waSend(info.chatId, '⚠️ Test parser couldn\'t read that ' + src + ': ' + msg.slice(0, 180));
   }
 }
@@ -217,7 +217,7 @@ http.createServer((req, res) => {
     const items = recent.map(r => `<b>${r.at}</b> <i>${r.src || r.event || ''}</i><pre>${(r.leads ? JSON.stringify(r.leads, null, 1) : r.summary || '').replace(/</g,'&lt;')}</pre>`).join('<hr>');
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
     res.end(`<h2>TM Motor Lead Intake — parser (TEST MODE)</h2>
-<p>Lark write: <b>${LIVE_LARK ? 'LIVE ⚠️' : 'OFF (test)'}</b> · AI key: <b>${ANTHROPIC_KEY ? 'set' : 'NOT set'}</b> · WaSender: <b>${WASENDER_TOKEN ? 'set' : 'NOT set'}</b> · model: ${MODEL}</p>
+<p>Lark write: <b>${LIVE_LARK ? 'LIVE ⚠️' : 'OFF (test)'}</b> · AI key: <b>${OPENAI_KEY ? 'set' : 'NOT set'}</b> · WaSender: <b>${WASENDER_TOKEN ? 'set' : 'NOT set'}</b> · model: ${MODEL}</p>
 <p>Captures: ${recent.length}</p><hr>${items}`);
   }
 }).listen(process.env.PORT || 3000, () => log('TM lead-intake parser (test mode) listening'));
