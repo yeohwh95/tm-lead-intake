@@ -69,7 +69,9 @@ async function decryptMedia(fullMessage){
   if (!url) throw new Error('decrypt-media gave no url (HTTP ' + r.status + ')');
   const bin = await fetch(url, { headers: { 'User-Agent': UA } });
   if (!bin.ok) throw new Error('media download HTTP ' + bin.status);
-  return Buffer.from(await bin.arrayBuffer());
+  const buf = Buffer.from(await bin.arrayBuffer());
+  log('media downloaded', buf.length, 'bytes', 'ct=' + (bin.headers.get('content-type') || '?'));
+  return buf;
 }
 
 // ---- extract the inbound message into a normalized shape ----
@@ -126,21 +128,27 @@ Return JSON only.`;
 
 async function aiExtract(blocks){
   if (!OPENAI_KEY) throw new Error('NO_KEY');
-  const r = await fetch('https://api.openai.com/v1/chat/completions', {
-    method: 'POST',
-    headers: { 'Authorization': 'Bearer ' + OPENAI_KEY, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ model: MODEL, max_tokens: 1500, response_format: { type: 'json_object' }, messages: [{ role: 'user', content: blocks }] }),
-  });
-  const j = await r.json();
-  if (!r.ok) throw new Error('OpenAI HTTP ' + r.status + ' ' + JSON.stringify(j.error || j).slice(0, 200));
-  return j.choices?.[0]?.message?.content || '';
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    const r = await fetch('https://api.openai.com/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'Authorization': 'Bearer ' + OPENAI_KEY, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: MODEL, max_tokens: 1500, response_format: { type: 'json_object' }, messages: [{ role: 'user', content: blocks }] }),
+    });
+    const j = await r.json();
+    if (!r.ok) throw new Error('OpenAI HTTP ' + r.status + ' ' + JSON.stringify(j.error || j).slice(0, 200));
+    const content = j.choices?.[0]?.message?.content || '';
+    log('openai finish=' + j.choices?.[0]?.finish_reason + ' len=' + content.length + (attempt > 1 ? ' (retry)' : ''));
+    if (content.trim()) return content;     // got something
+  }                                          // else retry once (transient empty)
+  return '';
 }
 function parseLeads(raw){
   let s = (raw || '').trim().replace(/^```(json)?/i, '').replace(/```$/,'').trim();
+  if (!s) { log('parseLeads: empty response'); return []; }
   const a = s.indexOf('{'); const b = s.lastIndexOf('}');
   if (a >= 0 && b > a) s = s.slice(a, b + 1);
-  const obj = JSON.parse(s);
-  return Array.isArray(obj) ? obj : (obj.leads || [obj]);
+  try { const obj = JSON.parse(s); return Array.isArray(obj) ? obj : (obj.leads || [obj]); }
+  catch (e) { log('parseLeads failed:', s.slice(0, 150)); return []; }
 }
 
 function leadBlock(lead, num, assign){
