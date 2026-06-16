@@ -16,6 +16,9 @@ const LIVE_LARK      = process.env.LIVE_LARK === '1';   // stays OFF for testing
 // is a LIVE number (in real groups + receives real customer DMs) — replying anywhere
 // else would spam customers. Empty = reply nowhere (still captures for the inbox).
 const INTAKE_GROUP_JID = process.env.INTAKE_GROUP_JID || '';
+// FAN-OUT (KoonKen/FSS pattern): this Render bot is the PRIMARY webhook. It forwards every
+// raw payload + original headers to the VPS console inbox so TM shows in the WhatsApp QA console.
+const INBOX_FORWARD_URL = process.env.INBOX_FORWARD_URL || '';
 
 const recent = [];                 // in-memory debug log (wiped on restart)
 function log(...a){ console.log(new Date().toISOString(), ...a); }
@@ -210,12 +213,24 @@ async function handle(payload){
   }
 }
 
+// Fan-out: forward raw payload + ORIGINAL headers (incl. x-webhook-signature) to the VPS console inbox.
+// Must keep original headers or the console rejects with 401 Invalid signature.
+function forwardToInbox(rawBody, headers) {
+  if (!INBOX_FORWARD_URL) return;
+  const fwd = {};
+  for (const k in headers) { const lk = k.toLowerCase(); if (lk !== 'host' && lk !== 'content-length') fwd[k] = headers[k]; }
+  fetch(INBOX_FORWARD_URL, { method: 'POST', headers: fwd, body: rawBody })
+    .then(r => log('[inbox-fwd]', r.status, '->', INBOX_FORWARD_URL))
+    .catch(e => log('[inbox-fwd] failed:', String(e.message || e)));
+}
+
 // ---- HTTP ----
 http.createServer((req, res) => {
   if (req.method === 'POST') {
     let body = '';
     req.on('data', c => body += c);
     req.on('end', () => {
+      forwardToInbox(body, req.headers);   // fan-out to console inbox (fire-and-forget)
       let p; try { p = JSON.parse(body); } catch { p = { raw: body.slice(0, 1500) }; }
       remember({ event: p.event, summary: JSON.stringify(p).slice(0, 800) });
       log('CAPTURE', p.event || '(no event)');
