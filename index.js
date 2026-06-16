@@ -120,7 +120,7 @@ Rules:
 - phone: normalize to Malaysian +60 format, digits only after +60, no spaces. If no phone, use "".
 - interest: bike model or enquiry topic, short lowercase (e.g. "cbr250","africa twin","pricing"). If none -> "No question".
 - brand: exactly one of HQ, Honda, Lambretta, Thunder, Suzuki, KTM. If unclear -> "".
-- origin: best guess of FB Ads, Tiktok Get Leads, Tiktok DM, Mudah, FB/IG comments, Whatsapp. Default "Whatsapp".
+- origin: read the lead's source from the data/filename. If it says "Organic" -> "Tiktok Get Leads". If it's a paid/sponsored TikTok ad -> "Ads Tiktok". Other sources: "Tiktok DM", "FB Ads", "FB/IG comments", "Mudah". Default to "Ads Tiktok" for TikTok lead-form exports.
 - name: customer name if present, else "".
 Return JSON only.`;
 
