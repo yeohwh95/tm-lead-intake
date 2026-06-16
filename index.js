@@ -148,7 +148,7 @@ function leadBlock(lead, num, assign){
   return [
     `${num ? '*' + num + '.* ' : ''}👤 ${lead.name || '—'}`,
     `📱 ${lead.phone || '— ⚠️ no phone found'}`,
-    `🏍️ Wants: ${lead.interest || 'No question'}`,
+    `🏍️ Wants: ${lead.interest || lead.name || 'No question'}`,
     `🏷️ Brand: ${lead.brand || '—'}`,
     `📍 From: ${lead.origin || 'Whatsapp'}`,
     `➡️ Assign: ${assign}`,
