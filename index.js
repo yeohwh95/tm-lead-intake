@@ -55,15 +55,16 @@ async function waSend(to, text){
 }
 
 // Server-side decrypt (Strategy 2): POST the media message object → publicUrl → download bytes
-async function decryptMedia(mediaObj){
+async function decryptMedia(fullMessage){
+  // WaSender wants the FULL webhook envelope: { data: { messages: <the data.messages object> } }
   const r = await fetch(WASENDER_BASE + '/decrypt-media', {
     method: 'POST',
     headers: { 'Authorization': 'Bearer ' + WASENDER_TOKEN, 'Content-Type': 'application/json', 'User-Agent': UA },
-    body: JSON.stringify(mediaObj),
+    body: JSON.stringify({ data: { messages: fullMessage } }),
   });
   const txt = await r.text();
   let j = {}; try { j = JSON.parse(txt); } catch {}
-  const url = j.publicUrl || j.url || (j.data && (j.data.publicUrl || j.data.url)) || '';
+  const url = j.publicUrl || j.url || j.fileUrl || j.tempUrl || (j.data && (j.data.publicUrl || j.data.url)) || '';
   log('decrypt-media status', r.status, 'url?', !!url, 'body', txt.slice(0, 200));
   if (!url) throw new Error('decrypt-media gave no url (HTTP ' + r.status + ')');
   const bin = await fetch(url, { headers: { 'User-Agent': UA } });
@@ -93,11 +94,11 @@ function extract(payload){
   const msg = unwrap(m.message || {});
   if (msg.imageMessage) {
     const im = msg.imageMessage;
-    return { chatId, sender, kind: 'image', mediaObj: im, caption: im.caption || '', mime: (im.mimetype || 'image/jpeg').split(';')[0] };
+    return { chatId, sender, kind: 'image', mediaObj: im, fullMessage: m, caption: im.caption || '', mime: (im.mimetype || 'image/jpeg').split(';')[0] };
   }
   if (msg.documentMessage) {
     const dm = msg.documentMessage;
-    return { chatId, sender, kind: 'document', mediaObj: dm, caption: dm.caption || '', mime: dm.mimetype || '', fileName: dm.fileName || '' };
+    return { chatId, sender, kind: 'document', mediaObj: dm, fullMessage: m, caption: dm.caption || '', mime: dm.mimetype || '', fileName: dm.fileName || '' };
   }
   const text = msg.conversation || msg.extendedTextMessage?.text || '';
   if (text) return { chatId, sender, kind: 'text', text };
@@ -177,13 +178,13 @@ async function handle(payload){
       blocks = [{ type: 'text', text: 'Lead message:\n' + info.text }];
     } else if (info.kind === 'image') {
       src = 'Image';
-      const buf = await decryptMedia(info.mediaObj);
+      const buf = await decryptMedia(info.fullMessage);
       blocks = [
         { type: 'text', text: 'Lead shown in this image. Caption: ' + (info.caption || '(none)') },
         { type: 'image_url', image_url: { url: `data:${info.mime || 'image/jpeg'};base64,${buf.toString('base64')}` } },
       ];
     } else if (info.kind === 'document') {
-      const buf = await decryptMedia(info.mediaObj);
+      const buf = await decryptMedia(info.fullMessage);
       const tag = (info.mime + ' ' + (info.fileName || '')).toLowerCase();
       if (/pdf/.test(tag)) {
         src = 'PDF';
