@@ -12,6 +12,10 @@ const WASENDER_TOKEN = process.env.WASENDER_TOKEN || '';
 const OPENAI_KEY     = process.env.OPENAI_API_KEY || '';
 const MODEL          = process.env.MODEL || 'gpt-4o';
 const LIVE_LARK      = process.env.LIVE_LARK === '1';   // stays OFF for testing
+// SAFETY: the bot ONLY replies inside this one intake group. The TM Motor number
+// is a LIVE number (in real groups + receives real customer DMs) — replying anywhere
+// else would spam customers. Empty = reply nowhere (still captures for the inbox).
+const INTAKE_GROUP_JID = process.env.INTAKE_GROUP_JID || '';
 
 const recent = [];                 // in-memory debug log (wiped on restart)
 function log(...a){ console.log(new Date().toISOString(), ...a); }
@@ -152,7 +156,14 @@ function card(src, lead){
 async function handle(payload){
   const info = extract(payload);
   if (!info) return;
-  log('inbound', info.kind, 'from', info.sender, 'chat', info.chatId);
+  const isGroup = info.chatId.endsWith('@g.us');
+  log('inbound', info.kind, 'from', info.sender, 'chat', info.chatId, isGroup ? '(group)' : '(personal)');
+  remember({ event: 'inbound', src: info.kind, summary: `chat=${info.chatId} ${isGroup ? 'GROUP' : 'personal'} from=${info.sender}` });
+  // SAFETY GATE: only ever act/reply inside the designated intake group.
+  if (!INTAKE_GROUP_JID || info.chatId !== INTAKE_GROUP_JID) {
+    log('SKIP — not intake group (chat=' + info.chatId + ', intake=' + (INTAKE_GROUP_JID || 'UNSET') + ') — captured only, no reply');
+    return;
+  }
   let src = 'Text', blocks = [];
   try {
     if (info.kind === 'text') {
@@ -218,6 +229,7 @@ http.createServer((req, res) => {
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
     res.end(`<h2>TM Motor Lead Intake — parser (TEST MODE)</h2>
 <p>Lark write: <b>${LIVE_LARK ? 'LIVE ⚠️' : 'OFF (test)'}</b> · AI key: <b>${OPENAI_KEY ? 'set' : 'NOT set'}</b> · WaSender: <b>${WASENDER_TOKEN ? 'set' : 'NOT set'}</b> · model: ${MODEL}</p>
+<p>Reply lock — intake group: <b>${INTAKE_GROUP_JID || 'UNSET (replies to NOBODY — safe)'}</b></p>
 <p>Captures: ${recent.length}</p><hr>${items}`);
   }
 }).listen(process.env.PORT || 3000, () => log('TM lead-intake parser (test mode) listening'));
