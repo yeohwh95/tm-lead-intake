@@ -143,21 +143,24 @@ function parseLeads(raw){
   return Array.isArray(obj) ? obj : (obj.leads || [obj]);
 }
 
-function card(src, lead){
+function leadBlock(lead, num){
   const [team, pool] = poolForBrand(lead.brand);
-  const assign = pool.length ? `${pool[0]} (${team} — rotation preview)` : '— (brand unknown, staff to pick)';
+  const assign = pool.length ? `${pool[0]} (${team})` : '— (staff to pick)';
+  const digits = (lead.phone || '').replace(/\D/g, '');
   return [
-    `🧪 LEAD PARSED — test only (not saved to Lark)`,
-    `Source: ${src}`,
-    ``,
-    `👤 Name: ${lead.name || '—'}   (display only)`,
-    `📱 Phone: ${lead.phone || '—  ⚠️ no phone found'}`,
-    `🏍️ Want: ${lead.interest || 'No question'}`,
+    `${num ? '*' + num + '.* ' : ''}👤 ${lead.name || '—'}`,
+    `📱 ${lead.phone || '— ⚠️ no phone found'}`,
+    `🏍️ Wants: ${lead.interest || 'No question'}`,
     `🏷️ Brand: ${lead.brand || '—'}`,
-    `📍 Origin: ${lead.origin || 'Whatsapp'}`,
-    `➡️ Would assign: ${assign}`,
-    `Stage: Pending customer reply`,
-  ].join('\n');
+    `📍 From: ${lead.origin || 'Whatsapp'}`,
+    `➡️ Assign: ${assign}`,
+    digits ? `👉 https://wa.me/${digits}` : '',
+  ].filter(Boolean).join('\n');
+}
+function cardsMessage(src, leads){
+  const head = `🧪 ${leads.length} LEAD${leads.length > 1 ? 'S' : ''} PARSED — ${src} (test only, not saved to Lark)`;
+  const blocks = leads.map((l, i) => leadBlock(l, leads.length > 1 ? i + 1 : null));
+  return head + '\n\n' + blocks.join('\n\n');
 }
 
 async function handle(payload){
@@ -197,18 +200,13 @@ async function handle(payload){
         blocks = [{ type: 'text', text: 'Document caption: ' + (info.caption || '(none)') + '\n(unsupported type ' + info.mime + ')' }];
       }
     }
+    if (info.fileName) blocks.push({ type: 'text', text: `Source file name: "${info.fileName}". If it names a brand (Lambretta / Honda / Thunder / HQ / Suzuki / KTM), use that as the brand for ALL leads.` });
     blocks.push({ type: 'text', text: EXTRACT_INSTRUCTION });
     const raw = await aiExtract(blocks);
     const leads = parseLeads(raw);
     remember({ src, sender: info.sender, leads });
     if (!leads.length) { await waSend(info.chatId, `🧪 ${src}: read OK but found no lead in it.`); return; }
-    if (leads.length === 1) {
-      await waSend(info.chatId, card(src, leads[0]));
-    } else {
-      const head = `🧪 ${leads.length} LEADS PARSED from ${src} — test only (not saved)\n`;
-      const lines = leads.map((l, i) => `${i + 1}. ${l.phone || '—'} | ${l.interest || 'No question'} | ${l.brand || '—'} | ${l.origin || 'Whatsapp'}`).join('\n');
-      await waSend(info.chatId, head + lines);
-    }
+    await waSend(info.chatId, cardsMessage(src, leads));
   } catch (e) {
     const msg = String(e.message || e);
     log('handle error', msg);
