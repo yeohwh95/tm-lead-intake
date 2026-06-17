@@ -83,8 +83,21 @@ function pickMessages(data){
 function unwrap(msg){
   if (msg.documentWithCaptionMessage?.message) return msg.documentWithCaptionMessage.message;
   if (msg.viewOnceMessage?.message) return msg.viewOnceMessage.message;
+  if (msg.viewOnceMessageV2?.message) return msg.viewOnceMessageV2.message;
   if (msg.ephemeralMessage?.message) return msg.ephemeralMessage.message;
+  if (msg.editedMessage?.message) return msg.editedMessage.message;
   return msg;
+}
+// Dig recursively through ANY wrapper to find media (self-sent images can be nested differently).
+function findMedia(msg, depth){
+  if (!msg || typeof msg !== 'object' || (depth || 0) > 6) return null;
+  if (msg.imageMessage) return { kind: 'image', obj: msg.imageMessage };
+  if (msg.documentMessage) return { kind: 'document', obj: msg.documentMessage };
+  if (msg.documentWithCaptionMessage?.message?.documentMessage) return { kind: 'document', obj: msg.documentWithCaptionMessage.message.documentMessage };
+  for (const k of ['documentWithCaptionMessage','viewOnceMessage','viewOnceMessageV2','ephemeralMessage','editedMessage']) {
+    if (msg[k]?.message) { const r = findMedia(msg[k].message, (depth || 0) + 1); if (r) return r; }
+  }
+  return null;
 }
 function extract(payload){
   const data = payload.data || {};
@@ -93,17 +106,19 @@ function extract(payload){
   const chatId = key.remoteJid || '';
   if (!chatId) return null;
   const sender = m.pushName || key.participantPn || key.participant || '';
-  const msg = unwrap(m.message || {});
+  const rawMsg = m.message || {};
+  const msg = unwrap(rawMsg);
   const text0 = msg.conversation || msg.extendedTextMessage?.text || '';
   // Staff also send leads FROM the Tmm Marketing number itself → process those too.
   // But NEVER react to our own bot cards/errors (they start with 🧪 / ⚠️) — prevents a loop.
   if (key.fromMe && /^\s*(🧪|⚠️)/.test(text0)) return null;
-  if (msg.imageMessage) {
-    const im = msg.imageMessage;
+  const media = findMedia(rawMsg);     // bulletproof: finds media no matter how it's wrapped
+  if (media?.kind === 'image') {
+    const im = media.obj;
     return { chatId, sender, kind: 'image', mediaObj: im, fullMessage: m, caption: im.caption || '', mime: (im.mimetype || 'image/jpeg').split(';')[0] };
   }
-  if (msg.documentMessage) {
-    const dm = msg.documentMessage;
+  if (media?.kind === 'document') {
+    const dm = media.obj;
     return { chatId, sender, kind: 'document', mediaObj: dm, fullMessage: m, caption: dm.caption || '', mime: dm.mimetype || '', fileName: dm.fileName || '' };
   }
   if (text0) return { chatId, sender, kind: 'text', text: text0 };
@@ -245,7 +260,7 @@ async function handle(payload){
       if (info.kind !== 'text') await waSend(info.chatId, `🧪 ${src}: read OK but no lead found.`);
       return;
     }
-    await waSend(info.chatId, cardsMessage(src, leads, fileOverrides(info.fileName)));
+    await waSend(info.chatId, cardsMessage(src, leads, fileOverrides(info.fileName || info.caption)));
   } catch (e) {
     const msg = String(e.message || e);
     log('handle error', msg);
