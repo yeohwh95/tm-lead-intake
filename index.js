@@ -309,6 +309,11 @@ function renderCard(src, leads, live){
 }
 
 async function handle(payload){
+  // messages.upsert is for INBOX CAPTURE ONLY (manual hand-typed replies → already forwarded to
+  // the console). NEVER process it here: it REPLAYS on session reconnect → duplicate Lark writes +
+  // repeat salesperson notifies (the cbr-600 spam, 2026-06-17). Lead processing happens ONLY on the
+  // original messages-group.received / messages-personal.received delivery.
+  if (payload.event === 'messages.upsert') return;
   const info = extract(payload);
   if (!info) {
     try { const mm = pickMessages(payload.data || {}); log('NO-EXTRACT event=' + payload.event + ' fromMe=' + (mm.key && mm.key.fromMe) + ' jid=' + (mm.key && mm.key.remoteJid) + ' msgKeys=' + JSON.stringify(Object.keys(unwrap(mm.message || {})))); } catch (e) {}
