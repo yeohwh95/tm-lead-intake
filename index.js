@@ -44,15 +44,36 @@ function poolForBrand(brand){
   return [null, []];
 }
 
-// ---- WaSender helpers ----
-async function waSend(to, text){
-  if (!WASENDER_TOKEN) { log('waSend skipped — no WASENDER_TOKEN'); return; }
-  const r = await fetch(WASENDER_BASE + '/send-message', {
-    method: 'POST',
-    headers: { 'Authorization': 'Bearer ' + WASENDER_TOKEN, 'Content-Type': 'application/json', 'User-Agent': UA },
-    body: JSON.stringify({ to, text }),
-  });
-  if (!r.ok) log('waSend HTTP', r.status, (await r.text()).slice(0, 200));
+// ---- WaSender send: SERIALIZED + 5s-spaced + retry-on-429 ----
+// The session has account-protection (1 msg / 5 sec). All sends go through one chain
+// so they never fire faster than the limit, and 429s are retried — nothing dropped.
+const SEND_GAP = 5200;
+let _sendChain = Promise.resolve();
+let _lastSend = 0;
+function waSend(to, text){
+  _sendChain = _sendChain.then(async () => {
+    if (!WASENDER_TOKEN) { log('waSend skipped — no token'); return; }
+    const wait = SEND_GAP - (Date.now() - _lastSend);
+    if (wait > 0) await new Promise(r => setTimeout(r, wait));
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      const r = await fetch(WASENDER_BASE + '/send-message', {
+        method: 'POST',
+        headers: { 'Authorization': 'Bearer ' + WASENDER_TOKEN, 'Content-Type': 'application/json', 'User-Agent': UA },
+        body: JSON.stringify({ to, text }),
+      });
+      _lastSend = Date.now();
+      if (r.status === 429) {
+        let ra = 5; try { ra = JSON.parse(await r.text()).retry_after || 5; } catch {}
+        log('waSend 429 → retry after', ra, 's (attempt ' + attempt + ')');
+        await new Promise(res => setTimeout(res, (ra + 0.6) * 1000));
+        continue;
+      }
+      if (!r.ok) log('waSend HTTP', r.status, (await r.text()).slice(0, 150));
+      return;
+    }
+    log('waSend gave up after 3 attempts to', to);
+  }).catch(e => log('send chain err', String(e.message || e)));
+  return _sendChain;
 }
 
 // Server-side decrypt (Strategy 2): POST the media message object → publicUrl → download bytes
@@ -243,13 +264,23 @@ async function larkWriteLead(l){
 }
 
 // ---- Notify the assigned salesperson via TM Motor Marketing WaSender ----
-function notifyText(l){
-  const digits = (l.phone || '').replace(/\D/g, '');
-  return [`🔔 *New Lead — ${l.brand || 'TM Motoworld'}*`, ``, `👤 ${l.name || '—'}`, `🎯 Wants: ${l.want}`, `📍 From: ${l.origin}`, digits ? `👉 https://wa.me/${digits}` : ''].filter(Boolean).join('\n');
+// Consolidated: ONE message per salesperson (even if they got several leads in one drop).
+function notifyText(leads){
+  if (leads.length === 1) {
+    const l = leads[0]; const d = (l.phone || '').replace(/\D/g, '');
+    return [`🔔 *New Lead — ${l.brand || 'TM Motoworld'}*`, ``, `👤 ${l.name || '—'}`, `🎯 Wants: ${l.want}`, `📍 From: ${l.origin}`, d ? `👉 https://wa.me/${d}` : ''].filter(Boolean).join('\n');
+  }
+  const head = `🔔 *${leads.length} New Leads*`;
+  const blocks = leads.map((l, i) => {
+    const d = (l.phone || '').replace(/\D/g, '');
+    return [`*${i + 1}.* 👤 ${l.name || '—'}`, `🎯 ${l.want} · ${l.brand || ''} · ${l.origin}`, d ? `👉 https://wa.me/${d}` : ''].filter(Boolean).join('\n');
+  });
+  return head + '\n\n' + blocks.join('\n\n');
 }
-async function notifySalesperson(l){
-  if (!l.staff?.phone) return false;
-  await waSend((l.staff.phone || '').replace(/\D/g, ''), notifyText(l));
+async function notifyStaff(leads){
+  const phone = (leads[0].staff?.phone || '').replace(/\D/g, '');
+  if (!phone) return false;
+  await waSend(phone, notifyText(leads));
   return true;
 }
 
@@ -329,12 +360,11 @@ async function handle(payload){
     }
     const enriched = assignLeads(leads, fileOverrides(info.fileName || info.caption));
     if (LIVE_LARK) {
-      for (let i = 0; i < enriched.length; i++) {
-        const l = enriched[i];
-        try { await larkWriteLead(l); } catch (e) { l.larkErr = String(e.message || e).slice(0, 60); log('lark write err', l.larkErr); }
-        try { await notifySalesperson(l); } catch (e) { log('notify err', String(e.message || e).slice(0, 60)); }
-        if (i < enriched.length - 1) await new Promise(r => setTimeout(r, 1500)); // WaSender rate-limit spacing
-      }
+      for (const l of enriched) { try { await larkWriteLead(l); } catch (e) { l.larkErr = String(e.message || e).slice(0, 60); log('lark write err', l.larkErr); } }
+      // one consolidated notify per salesperson (the send queue handles 5s spacing + 429 retry)
+      const byStaff = {};
+      for (const l of enriched) { const ph = l.staff?.phone; if (ph) (byStaff[ph] = byStaff[ph] || []).push(l); }
+      for (const ph in byStaff) { try { await notifyStaff(byStaff[ph]); } catch (e) { log('notify err', String(e.message || e).slice(0, 60)); } }
     }
     await waSend(info.chatId, renderCard(src, enriched, LIVE_LARK));
   } catch (e) {
