@@ -28,12 +28,12 @@ const SEEN = new Set();             // processed message ids (webhook-retry dedu
 function log(...a){ console.log(new Date().toISOString(), ...a); }
 function remember(o){ recent.unshift({ at: new Date().toISOString(), ...o }); if (recent.length > 50) recent.pop(); }
 
-// ---- rotation preview (NON-persisting in test mode; just shows who'd be next) ----
+// ---- Rotation pools (updated roster 2026-06-17) ----
 const POOLS = {
-  KS:       ['Nabil','Jebat','Allysa','Azwin','Amirul','Nazrin'],   // Lambretta/Thunder (Klang+Shah Alam)
-  HQ:       ['Adib','Syahrin','Fitri','Fazwan','Azrul','Amir'],     // HQ / Suzuki
-  Honda:    ['Bella','Syaza','Anis','Syafa'],                       // Honda Kapar
-  ShahAlam: ['Amirul','Nazrin','Aso'],                             // KTM / Zontes
+  KS:       ['Jebat','Nabil','Allysa','Azwin','Jue','Amirul','Nazrin','Aso','Roy'],  // Lambretta/Thunder (Klang + Shah Alam)
+  HQ:       ['Adib','Syahrin','Fazwan','Azrul','Amir'],            // HQ / Suzuki
+  Honda:    ['Bella','Syaza','Anis','Syafa','Zeera'],              // Honda Kapar
+  ShahAlam: ['Amirul','Nazrin','Aso','Roy'],                      // KTM / Zontes
 };
 function poolForBrand(brand){
   const b = (brand || '').toLowerCase();
@@ -159,10 +159,11 @@ const EXTRACT_INSTRUCTION =
 Return ONLY a JSON object (no prose):
 {"leads":[{"name":"","phone":"+60...","interest":"","brand":"","origin":""}]}
 Rules:
+- TAG FORMAT: staff often add a short tag (as a text message or an image caption) in the order "ORIGIN BRAND (Salesperson)" — e.g. "TIKTOK DM Lambretta (Nabil)" or "TIKTOK DM HQ". When present, the LEADING words are the Origin, the BRAND word is the Brand, and "(Name)" is the salesperson. Use the tag's Origin + Brand for the lead(s); the screenshot/content gives the customer's phone + name. "Tiktok DM HQ" = Origin "Tiktok DM" + Brand "HQ" (HQ is the BRAND, not part of the origin).
 - phone: normalize to Malaysian +60 format, digits only after +60, no spaces. If no phone, use "".
 - interest: bike model or enquiry topic, short lowercase (e.g. "cbr250","africa twin","pricing"). If none -> "No question".
-- brand: exactly one of HQ, Honda, Lambretta, Thunder, Suzuki, KTM. If unclear -> "".
-- origin: identify the lead's SOURCE. MUST be EXACTLY one of: "Tiktok DM", "Tiktok Get Leads", "TIKTOK LIVE (Get leads)", "Ads Tiktok", "Whatsapp", "FB Ads", "FB/IG comments", "Mudah", "On Site Event", "Bike Continent META". Map: TikTok DM/chat-conversation screenshot (@handle, "Message request accepted") -> "Tiktok DM"; the word "Organic" in the data -> "Tiktok Get Leads"; paid TikTok ad OR TikTok lead-form export -> "Ads Tiktok"; WhatsApp chat screenshot -> "Whatsapp"; Facebook lead ad -> "FB Ads"; FB/IG comment -> "FB/IG comments"; Mudah -> "Mudah"; walk-in / showroom / roadshow / event -> "On Site Event".
+- brand: exactly one of HQ, Honda, Lambretta, Thunder, Suzuki, KTM, Zontes. **HQ is a real brand (TM's house brand) — if the tag/data says HQ, use "HQ", NEVER substitute "Suzuki".** If unclear -> "".
+- origin: identify the lead's SOURCE. MUST be EXACTLY one of: "Tiktok DM", "Tiktok Get Leads", "TIKTOK LIVE (Get leads)", "Ads Tiktok", "Whatsapp", "FB Ads", "FB/IG comments", "Mudah", "On Site Event", "Bike Continent META". Map: a tag starting "TIKTOK DM" OR a TikTok DM/chat-conversation screenshot (@handle, "Message request accepted") -> "Tiktok DM"; the word "Organic" in the data -> "Tiktok Get Leads"; paid TikTok ad OR TikTok lead-form export -> "Ads Tiktok"; WhatsApp chat screenshot -> "Whatsapp"; Facebook lead ad -> "FB Ads"; FB/IG comment -> "FB/IG comments"; Mudah -> "Mudah"; walk-in / showroom / roadshow / event -> "On Site Event".
 - name: the customer's name. For a chat/DM screenshot, use the contact's display name or @handle shown at the top (e.g. "mas.saifuddin"). Else "".
 Return JSON only.`;
 
@@ -202,7 +203,7 @@ const STAFF = {
   Aso:     { phone: '+60127674828', openId: 'ou_efa269adc38cbfd4cc6419a15255ee8c' },
   Adib:    { phone: '+60178869542', openId: 'ou_c3dc42b76aedbfbf5d406df4562a9fd7' },
   Syahrin: { phone: '+60163488335', openId: 'ou_1fffee0c651b479629d7c3af5b4d80dd' },
-  Fitri:   { phone: '+60108093259', openId: 'ou_9dbd12586dfb70716c3ee77aefe010ed' },
+  Jue:     { phone: '+60129653259', openId: '' },   // Klang — open_id TBD (notify by phone)
   Fazwan:  { phone: '+60128174828', openId: 'ou_b2e70278502e53975a69a9049cbabaf6' },
   Azrul:   { phone: '+60102323259', openId: 'ou_b500e95837ece7bac07399e839425548' },
   Amir:    { phone: '+60103793259', openId: 'ou_424396071c66958527e9cabd5c3ba902' },
@@ -210,6 +211,8 @@ const STAFF = {
   Anis:    { phone: '+60129323259', openId: 'ou_5cc5c7b01105cf5703dd6353cb612a1b' },
   Syafa:   { phone: '+60122623259', openId: 'ou_d072f303baf1800574bbae4f33f61aec' },
   Syaza:   { phone: '+60123773259', openId: '' },   // open_id ambiguous → notify by phone, Lark Salesman blank
+  Roy:     { phone: '+60122653259', openId: '' },   // Shah Alam — open_id TBD
+  Zeera:   { phone: '+601118583259', openId: '' },  // Honda — open_id TBD (account was closed; confirm)
 };
 
 // ---- Deterministic filename/caption flags ----
