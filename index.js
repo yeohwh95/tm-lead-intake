@@ -125,7 +125,7 @@ Rules:
 - phone: normalize to Malaysian +60 format, digits only after +60, no spaces. If no phone, use "".
 - interest: bike model or enquiry topic, short lowercase (e.g. "cbr250","africa twin","pricing"). If none -> "No question".
 - brand: exactly one of HQ, Honda, Lambretta, Thunder, Suzuki, KTM. If unclear -> "".
-- origin: identify the lead's SOURCE. MUST be EXACTLY one of: "Tiktok DM", "Tiktok Get Leads", "Ads Tiktok", "Whatsapp", "FB Ads", "FB/IG comments", "Mudah", "On Site Event", "Bike Continent META". Map: TikTok DM/chat-conversation screenshot (@handle, "Message request accepted") -> "Tiktok DM"; the word "Organic" OR "Live" / "TikTok Live" in the data/filename -> "Tiktok Get Leads"; paid TikTok ad OR TikTok lead-form export -> "Ads Tiktok"; WhatsApp chat screenshot -> "Whatsapp"; Facebook lead ad -> "FB Ads"; FB/IG comment -> "FB/IG comments"; Mudah -> "Mudah"; walk-in / showroom / roadshow / event -> "On Site Event".
+- origin: identify the lead's SOURCE. MUST be EXACTLY one of: "Tiktok DM", "Tiktok Get Leads", "TIKTOK LIVE (Get leads)", "Ads Tiktok", "Whatsapp", "FB Ads", "FB/IG comments", "Mudah", "On Site Event", "Bike Continent META". Map: TikTok DM/chat-conversation screenshot (@handle, "Message request accepted") -> "Tiktok DM"; the word "Organic" in the data -> "Tiktok Get Leads"; paid TikTok ad OR TikTok lead-form export -> "Ads Tiktok"; WhatsApp chat screenshot -> "Whatsapp"; Facebook lead ad -> "FB Ads"; FB/IG comment -> "FB/IG comments"; Mudah -> "Mudah"; walk-in / showroom / roadshow / event -> "On Site Event".
 - name: the customer's name. For a chat/DM screenshot, use the contact's display name or @handle shown at the top (e.g. "mas.saifuddin"). Else "".
 Return JSON only.`;
 
@@ -166,26 +166,31 @@ function leadBlock(lead, num, assign){
     digits ? `👉 https://wa.me/${digits}` : '',
   ].filter(Boolean).join('\n');
 }
-// Filename override: `get lead honda +LIVE (BELLA).csv` → assign ALL its leads to Bella.
+// Deterministic filename flags: `get lead honda +LIVE (BELLA).csv`
+//   `(Name)`        → force-assign ALL leads to that salesperson
+//   `LIVE`/`+LIVE`  → Origin = "TIKTOK LIVE (Get leads)" for ALL leads
 const ALL_NAMES = [...new Set(Object.values(POOLS).flat())];
-function forcedAssignee(fileName){
-  const m = (fileName || '').match(/\(([^)]+)\)/);
-  if (!m) return '';
-  const want = m[1].trim().toLowerCase();
-  return ALL_NAMES.find(n => n.toLowerCase() === want) || '';   // only honor a real roster name
+function fileOverrides(fileName){
+  const f = (fileName || '');
+  const am = f.match(/\(([^)]+)\)/);
+  const assignee = am ? (ALL_NAMES.find(n => n.toLowerCase() === am[1].trim().toLowerCase()) || '') : '';
+  const origin = /(^|\+|\s)live\b/i.test(f) ? 'TIKTOK LIVE (Get leads)' : '';
+  return { assignee, origin };
 }
-function cardsMessage(src, leads, forced){
+function cardsMessage(src, leads, ov){
+  ov = ov || {};
   const head = `🧪 ${leads.length} LEAD${leads.length > 1 ? 'S' : ''} PARSED — ${src} (test only, not saved to Lark)`;
   const turn = {};   // take-turns rotation WITHIN this batch (per team pool)
   const blocks = leads.map((l, i) => {
     let assign;
-    if (forced) { assign = `${forced} (file override)`; }
+    if (ov.assignee) { assign = `${ov.assignee} (file override)`; }
     else {
       const [team, pool] = poolForBrand(l.brand);
       if (pool.length) { const idx = turn[team] || 0; assign = `${pool[idx % pool.length]} (${team})`; turn[team] = idx + 1; }
       else assign = '— (staff to pick)';
     }
-    return leadBlock(l, leads.length > 1 ? i + 1 : null, assign);
+    const lead = ov.origin ? { ...l, origin: ov.origin } : l;
+    return leadBlock(lead, leads.length > 1 ? i + 1 : null, assign);
   });
   return head + '\n\n' + blocks.join('\n\n');
 }
@@ -237,7 +242,7 @@ async function handle(payload){
       if (info.kind !== 'text') await waSend(info.chatId, `🧪 ${src}: read OK but no lead found.`);
       return;
     }
-    await waSend(info.chatId, cardsMessage(src, leads, forcedAssignee(info.fileName)));
+    await waSend(info.chatId, cardsMessage(src, leads, fileOverrides(info.fileName)));
   } catch (e) {
     const msg = String(e.message || e);
     log('handle error', msg);
