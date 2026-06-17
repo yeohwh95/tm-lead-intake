@@ -166,13 +166,25 @@ function leadBlock(lead, num, assign){
     digits ? `👉 https://wa.me/${digits}` : '',
   ].filter(Boolean).join('\n');
 }
-function cardsMessage(src, leads){
+// Filename override: `get lead honda +LIVE (BELLA).csv` → assign ALL its leads to Bella.
+const ALL_NAMES = [...new Set(Object.values(POOLS).flat())];
+function forcedAssignee(fileName){
+  const m = (fileName || '').match(/\(([^)]+)\)/);
+  if (!m) return '';
+  const want = m[1].trim().toLowerCase();
+  return ALL_NAMES.find(n => n.toLowerCase() === want) || '';   // only honor a real roster name
+}
+function cardsMessage(src, leads, forced){
   const head = `🧪 ${leads.length} LEAD${leads.length > 1 ? 'S' : ''} PARSED — ${src} (test only, not saved to Lark)`;
   const turn = {};   // take-turns rotation WITHIN this batch (per team pool)
   const blocks = leads.map((l, i) => {
-    const [team, pool] = poolForBrand(l.brand);
-    let assign = '— (staff to pick)';
-    if (pool.length) { const idx = turn[team] || 0; assign = `${pool[idx % pool.length]} (${team})`; turn[team] = idx + 1; }
+    let assign;
+    if (forced) { assign = `${forced} (file override)`; }
+    else {
+      const [team, pool] = poolForBrand(l.brand);
+      if (pool.length) { const idx = turn[team] || 0; assign = `${pool[idx % pool.length]} (${team})`; turn[team] = idx + 1; }
+      else assign = '— (staff to pick)';
+    }
     return leadBlock(l, leads.length > 1 ? i + 1 : null, assign);
   });
   return head + '\n\n' + blocks.join('\n\n');
@@ -225,7 +237,7 @@ async function handle(payload){
       if (info.kind !== 'text') await waSend(info.chatId, `🧪 ${src}: read OK but no lead found.`);
       return;
     }
-    await waSend(info.chatId, cardsMessage(src, leads));
+    await waSend(info.chatId, cardsMessage(src, leads, forcedAssignee(info.fileName)));
   } catch (e) {
     const msg = String(e.message || e);
     log('handle error', msg);
