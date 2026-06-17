@@ -90,10 +90,14 @@ function extract(payload){
   const data = payload.data || {};
   const m = pickMessages(data);
   const key = m.key || {};
-  if (key.fromMe) return null;                          // ignore our own sends
   const chatId = key.remoteJid || '';
+  if (!chatId) return null;
   const sender = m.pushName || key.participantPn || key.participant || '';
   const msg = unwrap(m.message || {});
+  const text0 = msg.conversation || msg.extendedTextMessage?.text || '';
+  // Staff also send leads FROM the Tmm Marketing number itself → process those too.
+  // But NEVER react to our own bot cards/errors (they start with 🧪 / ⚠️) — prevents a loop.
+  if (key.fromMe && /^\s*(🧪|⚠️)/.test(text0)) return null;
   if (msg.imageMessage) {
     const im = msg.imageMessage;
     return { chatId, sender, kind: 'image', mediaObj: im, fullMessage: m, caption: im.caption || '', mime: (im.mimetype || 'image/jpeg').split(';')[0] };
@@ -102,8 +106,7 @@ function extract(payload){
     const dm = msg.documentMessage;
     return { chatId, sender, kind: 'document', mediaObj: dm, fullMessage: m, caption: dm.caption || '', mime: dm.mimetype || '', fileName: dm.fileName || '' };
   }
-  const text = msg.conversation || msg.extendedTextMessage?.text || '';
-  if (text) return { chatId, sender, kind: 'text', text };
+  if (text0) return { chatId, sender, kind: 'text', text: text0 };
   return null;
 }
 
@@ -217,7 +220,11 @@ async function handle(payload){
     const raw = await aiExtract(blocks);
     const leads = parseLeads(raw);
     remember({ src, sender: info.sender, leads });
-    if (!leads.length) { await waSend(info.chatId, `🧪 ${src}: read OK but found no lead in it.`); return; }
+    if (!leads.length) {
+      // media drop with no lead → brief note (it was intentional); plain chatter text → STAY SILENT
+      if (info.kind !== 'text') await waSend(info.chatId, `🧪 ${src}: read OK but no lead found.`);
+      return;
+    }
     await waSend(info.chatId, cardsMessage(src, leads));
   } catch (e) {
     const msg = String(e.message || e);
