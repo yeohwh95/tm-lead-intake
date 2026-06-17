@@ -24,6 +24,7 @@ const INBOX_FORWARD_URL = process.env.INBOX_FORWARD_URL || '';
 const INBOX_FORWARD_SECRET = process.env.INBOX_FORWARD_SECRET || '';
 
 const recent = [];                 // in-memory debug log (wiped on restart)
+const SEEN = new Set();             // processed message ids (webhook-retry dedup)
 function log(...a){ console.log(new Date().toISOString(), ...a); }
 function remember(o){ recent.unshift({ at: new Date().toISOString(), ...o }); if (recent.length > 50) recent.pop(); }
 
@@ -169,43 +170,106 @@ function parseLeads(raw){
   catch (e) { log('parseLeads failed:', s.slice(0, 150)); return []; }
 }
 
-function leadBlock(lead, num, assign){
-  const digits = (lead.phone || '').replace(/\D/g, '');
-  return [
-    `${num ? '*' + num + '.* ' : ''}👤 ${lead.name || '—'}`,
-    `📱 ${lead.phone || '— ⚠️ no phone found'}`,
-    `🏍️ Wants: ${(lead.interest && !/^\s*no question\s*$/i.test(lead.interest)) ? lead.interest : (lead.name || 'No question')}`,
-    `🏷️ Brand: ${lead.brand || '—'}`,
-    `📍 From: ${lead.origin || 'Whatsapp'}`,
-    `➡️ Assign: ${assign}`,
-    digits ? `👉 https://wa.me/${digits}` : '',
-  ].filter(Boolean).join('\n');
-}
-// Deterministic filename flags: `get lead honda +LIVE (BELLA).csv`
-//   `(Name)`        → force-assign ALL leads to that salesperson
-//   `LIVE`/`+LIVE`  → Origin = "TIKTOK LIVE (Get leads)" for ALL leads
-const ALL_NAMES = [...new Set(Object.values(POOLS).flat())];
-function fileOverrides(fileName){
-  const f = (fileName || '');
+// ---- Sales roster: name → { phone (+60), openId (Lark user) } ----
+const STAFF = {
+  Nabil:   { phone: '+60124164828', openId: 'ou_6c31983140832afd10f1be158a61aba5' },
+  Jebat:   { phone: '+60128674828', openId: 'ou_3276531fa0510063706e4aa76e6d6fd9' },
+  Allysa:  { phone: '+60123343259', openId: 'ou_abe4769c33d0d322724c5df2960591fe' },
+  Azwin:   { phone: '+60124828409', openId: 'ou_c7a471f86ee48ad13b318522dce7c256' },
+  Amirul:  { phone: '+60108997920', openId: 'ou_432a506d92bc820cdb833eb171dbbc48' },
+  Nazrin:  { phone: '+60123984828', openId: 'ou_4616a5479a2e66eb916b03b2b80c9fab' },
+  Aso:     { phone: '+60127674828', openId: 'ou_efa269adc38cbfd4cc6419a15255ee8c' },
+  Adib:    { phone: '+60178869542', openId: 'ou_c3dc42b76aedbfbf5d406df4562a9fd7' },
+  Syahrin: { phone: '+60163488335', openId: 'ou_1fffee0c651b479629d7c3af5b4d80dd' },
+  Fitri:   { phone: '+60108093259', openId: 'ou_9dbd12586dfb70716c3ee77aefe010ed' },
+  Fazwan:  { phone: '+60128174828', openId: 'ou_b2e70278502e53975a69a9049cbabaf6' },
+  Azrul:   { phone: '+60102323259', openId: 'ou_b500e95837ece7bac07399e839425548' },
+  Amir:    { phone: '+60103793259', openId: 'ou_424396071c66958527e9cabd5c3ba902' },
+  Bella:   { phone: '+60109693259', openId: 'ou_d15465dabf45e876b2bae7660d6ef7bd' },
+  Anis:    { phone: '+60129323259', openId: 'ou_5cc5c7b01105cf5703dd6353cb612a1b' },
+  Syafa:   { phone: '+60122623259', openId: 'ou_d072f303baf1800574bbae4f33f61aec' },
+  Syaza:   { phone: '+60123773259', openId: '' },   // open_id ambiguous → notify by phone, Lark Salesman blank
+};
+
+// ---- Deterministic filename/caption flags ----
+const ALL_NAMES = Object.keys(STAFF);
+function fileOverrides(name){
+  const f = (name || '');
   const am = f.match(/\(([^)]+)\)/);
   const assignee = am ? (ALL_NAMES.find(n => n.toLowerCase() === am[1].trim().toLowerCase()) || '') : '';
   const origin = /(^|\+|\s)live\b/i.test(f) ? 'TIKTOK LIVE (Get leads)' : '';
   return { assignee, origin };
 }
-function cardsMessage(src, leads, ov){
+
+// ---- Assignment (persistent take-turns across drops; resets only on deploy) ----
+const ROT = {};
+function assignLeads(leads, ov){
   ov = ov || {};
-  const head = `🧪 ${leads.length} LEAD${leads.length > 1 ? 'S' : ''} PARSED — ${src} (test only, not saved to Lark)`;
-  const turn = {};   // take-turns rotation WITHIN this batch (per team pool)
+  return leads.map(l => {
+    let assignee = ov.assignee || '';
+    if (!assignee) { const [team, pool] = poolForBrand(l.brand); if (pool.length) { const idx = ROT[team] || 0; assignee = pool[idx % pool.length]; ROT[team] = idx + 1; } }
+    const staff = STAFF[assignee] || null;
+    const want = (l.interest && !/^\s*no question\s*$/i.test(l.interest)) ? l.interest : (l.name || 'No question');
+    const origin = ov.origin || l.origin || 'Whatsapp';
+    return { phone: l.phone || '', name: l.name || '', want, brand: l.brand || '', origin, assignee, staff, override: !!ov.assignee };
+  });
+}
+
+// ---- Lark write ----
+const LARK_BASE = 'https://open.larksuite.com/open-apis';
+const LARK_APP_ID = process.env.LARK_APP_ID || '';
+const LARK_APP_SECRET = process.env.LARK_APP_SECRET || '';
+const LARK_APP_TOKEN = process.env.LARK_APP_TOKEN || '';
+const LARK_TABLE_ID = process.env.LARK_TABLE_ID || '';
+let _lt = { t: '', exp: 0 };
+async function larkToken(){
+  if (_lt.t && Date.now() < _lt.exp) return _lt.t;
+  const r = await fetch(LARK_BASE + '/auth/v3/tenant_access_token/internal/', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ app_id: LARK_APP_ID, app_secret: LARK_APP_SECRET }) });
+  const j = await r.json();
+  if (!j.tenant_access_token) throw new Error('lark token: ' + JSON.stringify(j).slice(0, 120));
+  _lt = { t: j.tenant_access_token, exp: Date.now() + ((j.expire || 7200) - 120) * 1000 };
+  return _lt.t;
+}
+async function larkWriteLead(l){
+  const tok = await larkToken();
+  const fields = { 'Phone number': l.phone || '', 'Customer want': l.want || 'No question', 'Stage': 'Passed lead' };
+  if (l.brand) fields['Brand'] = l.brand;
+  if (l.origin) fields['Origin'] = l.origin;
+  if (l.staff?.openId) fields['Salesman'] = [{ id: l.staff.openId }];
+  const r = await fetch(`${LARK_BASE}/bitable/v1/apps/${LARK_APP_TOKEN}/tables/${LARK_TABLE_ID}/records`, { method: 'POST', headers: { 'Authorization': 'Bearer ' + tok, 'Content-Type': 'application/json' }, body: JSON.stringify({ fields }) });
+  const j = await r.json();
+  if (j.code !== 0) throw new Error('lark code ' + j.code + ' ' + (j.msg || ''));
+  return j.data?.record?.record_id;
+}
+
+// ---- Notify the assigned salesperson via TM Motor Marketing WaSender ----
+function notifyText(l){
+  const digits = (l.phone || '').replace(/\D/g, '');
+  return [`🔔 *New Lead — ${l.brand || 'TM Motoworld'}*`, ``, `👤 ${l.name || '—'}`, `🎯 Wants: ${l.want}`, `📍 From: ${l.origin}`, digits ? `👉 https://wa.me/${digits}` : ''].filter(Boolean).join('\n');
+}
+async function notifySalesperson(l){
+  if (!l.staff?.phone) return false;
+  await waSend((l.staff.phone || '').replace(/\D/g, ''), notifyText(l));
+  return true;
+}
+
+// ---- Group card (live wording when Lark is on) ----
+function renderCard(src, leads, live){
+  const head = live
+    ? `✅ ${leads.length} LEAD${leads.length > 1 ? 'S' : ''} — ${src} → saved to Lark + salesperson notified`
+    : `🧪 ${leads.length} LEAD${leads.length > 1 ? 'S' : ''} PARSED — ${src} (test only, not saved to Lark)`;
   const blocks = leads.map((l, i) => {
-    let assign;
-    if (ov.assignee) { assign = `${ov.assignee} (file override)`; }
-    else {
-      const [team, pool] = poolForBrand(l.brand);
-      if (pool.length) { const idx = turn[team] || 0; assign = `${pool[idx % pool.length]} (${team})`; turn[team] = idx + 1; }
-      else assign = '— (staff to pick)';
-    }
-    const lead = ov.origin ? { ...l, origin: ov.origin } : l;
-    return leadBlock(lead, leads.length > 1 ? i + 1 : null, assign);
+    const digits = (l.phone || '').replace(/\D/g, '');
+    const aTxt = l.staff ? `${l.assignee}${l.override ? ' (file override)' : ''}` : (l.assignee ? `${l.assignee} (no phone on file)` : '— (staff to pick)');
+    return [
+      `${leads.length > 1 ? '*' + (i + 1) + '.* ' : ''}👤 ${l.name || '—'}`,
+      `📱 ${l.phone || '— ⚠️ no phone found'}`,
+      `🏍️ Wants: ${l.want}`,
+      `🏷️ Brand: ${l.brand || '—'}`,
+      `📍 From: ${l.origin}`,
+      `➡️ Assign: ${aTxt}${live && l.larkErr ? ' ⚠️Lark:' + l.larkErr : ''}`,
+      digits ? `👉 https://wa.me/${digits}` : '',
+    ].filter(Boolean).join('\n');
   });
   return head + '\n\n' + blocks.join('\n\n');
 }
@@ -224,6 +288,9 @@ async function handle(payload){
     log('SKIP — not intake group (chat=' + info.chatId + ', intake=' + (INTAKE_GROUP_JID || 'UNSET') + ') — captured only, no reply');
     return;
   }
+  // DEDUP: a retried webhook must not double-parse / double-write to Lark.
+  const mid = (pickMessages(payload.data || {}).key || {}).id || '';
+  if (mid) { if (SEEN.has(mid)) { log('dup skip', mid); return; } SEEN.add(mid); if (SEEN.size > 3000) SEEN.clear(); }
   let src = 'Text', blocks = [];
   try {
     if (info.kind === 'text') {
@@ -260,7 +327,16 @@ async function handle(payload){
       if (info.kind !== 'text') await waSend(info.chatId, `🧪 ${src}: read OK but no lead found.`);
       return;
     }
-    await waSend(info.chatId, cardsMessage(src, leads, fileOverrides(info.fileName || info.caption)));
+    const enriched = assignLeads(leads, fileOverrides(info.fileName || info.caption));
+    if (LIVE_LARK) {
+      for (let i = 0; i < enriched.length; i++) {
+        const l = enriched[i];
+        try { await larkWriteLead(l); } catch (e) { l.larkErr = String(e.message || e).slice(0, 60); log('lark write err', l.larkErr); }
+        try { await notifySalesperson(l); } catch (e) { log('notify err', String(e.message || e).slice(0, 60)); }
+        if (i < enriched.length - 1) await new Promise(r => setTimeout(r, 1500)); // WaSender rate-limit spacing
+      }
+    }
+    await waSend(info.chatId, renderCard(src, enriched, LIVE_LARK));
   } catch (e) {
     const msg = String(e.message || e);
     log('handle error', msg);
