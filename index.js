@@ -50,16 +50,17 @@ function poolForBrand(brand){
 const SEND_GAP = 5200;
 let _sendChain = Promise.resolve();
 let _lastSend = 0;
-function waSend(to, text){
+function waSend(to, text, imageUrl){
   _sendChain = _sendChain.then(async () => {
     if (!WASENDER_TOKEN) { log('waSend skipped — no token'); return; }
     const wait = SEND_GAP - (Date.now() - _lastSend);
     if (wait > 0) await new Promise(r => setTimeout(r, wait));
+    const payload = imageUrl ? { to, imageUrl, text } : { to, text };
     for (let attempt = 1; attempt <= 3; attempt++) {
       const r = await fetch(WASENDER_BASE + '/send-message', {
         method: 'POST',
         headers: { 'Authorization': 'Bearer ' + WASENDER_TOKEN, 'Content-Type': 'application/json', 'User-Agent': UA },
-        body: JSON.stringify({ to, text }),
+        body: JSON.stringify(payload),
       });
       _lastSend = Date.now();
       if (r.status === 429) {
@@ -89,6 +90,7 @@ async function decryptMedia(fullMessage){
   const url = j.publicUrl || j.url || j.fileUrl || j.tempUrl || (j.data && (j.data.publicUrl || j.data.url)) || '';
   log('decrypt-media status', r.status, 'url?', !!url, 'body', txt.slice(0, 200));
   if (!url) throw new Error('decrypt-media gave no url (HTTP ' + r.status + ')');
+  decryptMedia.lastUrl = url;   // public URL (valid ~1h) — reused to forward the screenshot to the salesperson
   const bin = await fetch(url, { headers: { 'User-Agent': UA } });
   if (!bin.ok) throw new Error('media download HTTP ' + bin.status);
   const buf = Buffer.from(await bin.arrayBuffer());
@@ -161,7 +163,7 @@ Return ONLY a JSON object (no prose):
 Rules:
 - TAG FORMAT: staff often add a short tag (as a text message or an image caption) in the order "ORIGIN BRAND (Salesperson)" — e.g. "TIKTOK DM Lambretta (Nabil)" or "TIKTOK DM HQ". When present, the LEADING words are the Origin, the BRAND word is the Brand, and "(Name)" is the salesperson. Use the tag's Origin + Brand for the lead(s); the screenshot/content gives the customer's phone + name. "Tiktok DM HQ" = Origin "Tiktok DM" + Brand "HQ" (HQ is the BRAND, not part of the origin).
 - phone: normalize to Malaysian +60 format, digits only after +60, no spaces. If no phone, use "".
-- interest: bike model or enquiry topic, short lowercase (e.g. "cbr250","africa twin","pricing"). If none -> "No question".
+- interest: ALWAYS capture the specific BIKE MODEL when one is mentioned (e.g. "cbr250","aveta nova 250","africa twin"). If the customer asks the PRICE of a model, set interest to the model + " (pricing)" e.g. "aveta nova 250 (pricing)" — NEVER just "pricing" when a model is named. Only use a bare topic like "pricing" / "loan" when NO model is mentioned at all. If nothing -> "No question". Keep short lowercase.
 - brand: exactly one of HQ, Honda, Lambretta, Thunder, Suzuki, KTM, Zontes. **HQ is a real brand (TM's house brand) — if the tag/data says HQ, use "HQ", NEVER substitute "Suzuki".** If unclear -> "".
 - origin: identify the lead's SOURCE. MUST be EXACTLY one of: "Tiktok DM", "Tiktok Get Leads", "TIKTOK LIVE (Get leads)", "Ads Tiktok", "Whatsapp", "FB Ads", "FB/IG comments", "Mudah", "On Site Event", "Bike Continent META". Map: a tag starting "TIKTOK DM" OR a TikTok DM/chat-conversation screenshot (@handle, "Message request accepted") -> "Tiktok DM"; the word "Organic" in the data -> "Tiktok Get Leads"; paid TikTok ad OR TikTok lead-form export -> "Ads Tiktok"; WhatsApp chat screenshot -> "Whatsapp"; Facebook lead ad -> "FB Ads"; FB/IG comment -> "FB/IG comments"; Mudah -> "Mudah"; walk-in / showroom / roadshow / event -> "On Site Event".
 - name: the customer's name. For a chat/DM screenshot, use the contact's display name or @handle shown at the top (e.g. "mas.saifuddin"). Else "".
@@ -217,12 +219,27 @@ const STAFF = {
 
 // ---- Deterministic filename/caption flags ----
 const ALL_NAMES = Object.keys(STAFF);
+// Fuzzy roster match: staff spell names loosely (nabeel→Nabil, allysa/alisa, etc.)
+function matchStaff(raw){
+  const w = (raw || '').trim().toLowerCase();
+  if (!w) return { name: '', requested: '' };
+  let hit = ALL_NAMES.find(n => n.toLowerCase() === w);                 // exact
+  if (!hit) hit = ALL_NAMES.find(n => n.toLowerCase().startsWith(w) || w.startsWith(n.toLowerCase())); // prefix either way
+  if (!hit) {                                                          // edit-distance ≤2 (nabeel↔nabil)
+    const lev = (a,b)=>{const m=[...Array(a.length+1)].map((_,i)=>[i,...Array(b.length).fill(0)]);for(let j=1;j<=b.length;j++)m[0][j]=j;for(let i=1;i<=a.length;i++)for(let j=1;j<=b.length;j++)m[i][j]=Math.min(m[i-1][j]+1,m[i][j-1]+1,m[i-1][j-1]+(a[i-1]===b[j-1]?0:1));return m[a.length][b.length];};
+    let best='',bd=99; for(const n of ALL_NAMES){const dd=lev(w,n.toLowerCase()); if(dd<bd){bd=dd;best=n;}}
+    if (bd<=2) hit = best;
+  }
+  return { name: hit || '', requested: raw.trim() };
+}
 function fileOverrides(name){
   const f = (name || '');
   const am = f.match(/\(([^)]+)\)/);
-  const assignee = am ? (ALL_NAMES.find(n => n.toLowerCase() === am[1].trim().toLowerCase()) || '') : '';
+  const m = am ? matchStaff(am[1]) : { name: '', requested: '' };
+  const assignee = m.name;
+  const requestedName = m.requested && !m.name ? m.requested : '';   // named someone we couldn't match → flag it
   const origin = /(^|\+|\s)live\b/i.test(f) ? 'TIKTOK LIVE (Get leads)' : '';
-  return { assignee, origin };
+  return { assignee, origin, requestedName };
 }
 
 // ---- Assignment (persistent take-turns across drops; resets only on deploy) ----
@@ -235,7 +252,7 @@ function assignLeads(leads, ov){
     const staff = STAFF[assignee] || null;
     const want = (l.interest && !/^\s*no question\s*$/i.test(l.interest)) ? l.interest : (l.name || 'No question');
     const origin = ov.origin || l.origin || 'Whatsapp';
-    return { phone: l.phone || '', name: l.name || '', want, brand: l.brand || '', origin, assignee, staff, override: !!ov.assignee };
+    return { phone: l.phone || '', name: l.name || '', want, brand: l.brand || '', origin, assignee, staff, override: !!ov.assignee, requestedName: ov.requestedName || '' };
   });
 }
 
@@ -280,10 +297,12 @@ function notifyText(leads){
   });
   return head + '\n\n' + blocks.join('\n\n');
 }
-async function notifyStaff(leads){
+async function notifyStaff(leads, screenshotUrl){
   const phone = (leads[0].staff?.phone || '').replace(/\D/g, '');
   if (!phone) return false;
-  await waSend(phone, notifyText(leads));
+  // For a single image lead, send the actual screenshot + details so the salesperson sees the full convo.
+  if (screenshotUrl && leads.length === 1) await waSend(phone, notifyText(leads), screenshotUrl);
+  else await waSend(phone, notifyText(leads));
   return true;
 }
 
@@ -294,7 +313,9 @@ function renderCard(src, leads, live){
     : `🧪 ${leads.length} LEAD${leads.length > 1 ? 'S' : ''} PARSED — ${src} (test only, not saved to Lark)`;
   const blocks = leads.map((l, i) => {
     const digits = (l.phone || '').replace(/\D/g, '');
-    const aTxt = l.staff ? `${l.assignee}${l.override ? ' (file override)' : ''}` : (l.assignee ? `${l.assignee} (no phone on file)` : '— (staff to pick)');
+    const aTxt = l.staff
+      ? `${l.assignee}${l.override ? ' (file override)' : ''}${l.requestedName ? ` ⚠️"${l.requestedName}" not in roster→rotation` : ''}`
+      : (l.assignee ? `${l.assignee} (no phone on file)` : '— (staff to pick)');
     return [
       `${leads.length > 1 ? '*' + (i + 1) + '.* ' : ''}👤 ${l.name || '—'}`,
       `📱 ${l.phone || '— ⚠️ no phone found'}`,
@@ -338,9 +359,11 @@ async function handle(payload){
     } else if (info.kind === 'image') {
       src = 'Image';
       const buf = await decryptMedia(info.fullMessage);
+      info.screenshotUrl = decryptMedia.lastUrl || '';   // forward this screenshot to the salesperson
+      const hint = info.caption ? `\nThe sender's caption is "${info.caption}" — this IS a real lead (a chat/DM screenshot). Look CAREFULLY for the customer's phone number (a Malaysian number, often in a small grey chat bubble) and the bike model. Extract them.` : '';
       blocks = [
-        { type: 'text', text: 'Lead shown in this image. Caption: ' + (info.caption || '(none)') },
-        { type: 'image_url', image_url: { url: `data:${info.mime || 'image/jpeg'};base64,${buf.toString('base64')}` } },
+        { type: 'text', text: 'A motorcycle sales lead is shown in this image (a chat/DM screenshot). Caption: ' + (info.caption || '(none)') + hint },
+        { type: 'image_url', image_url: { url: `data:${info.mime || 'image/jpeg'};base64,${buf.toString('base64')}`, detail: 'high' } },
       ];
     } else if (info.kind === 'document') {
       const buf = await decryptMedia(info.fullMessage);
@@ -358,8 +381,14 @@ async function handle(payload){
     }
     if (info.fileName) blocks.push({ type: 'text', text: `Source file name: "${info.fileName}". If it names a brand (Lambretta / Honda / Thunder / HQ / Suzuki / KTM), use that as the brand for ALL leads.` });
     blocks.push({ type: 'text', text: EXTRACT_INSTRUCTION });
-    const raw = await aiExtract(blocks);
-    const leads = parseLeads(raw);
+    let leads = parseLeads(await aiExtract(blocks));
+    // Bug-1 fix: an IMAGE with a lead caption (e.g. "tiktok dm lambretta") but no lead found = likely a
+    // vision miss (phone in a small bubble). Retry ONCE with an insistent prompt before giving up.
+    if (!leads.length && info.kind === 'image' && info.caption) {
+      log('image vision miss — retrying with insistent prompt');
+      const retry = [...blocks, { type: 'text', text: 'You returned no lead, but a lead IS present (the caption confirms it). Re-examine the image carefully — find the Malaysian phone number (often in a small grey chat bubble) and the bike model. Return the lead JSON now.' }];
+      leads = parseLeads(await aiExtract(retry));
+    }
     remember({ src, sender: info.sender, leads });
     if (!leads.length) {
       // media drop with no lead → brief note (it was intentional); plain chatter text → STAY SILENT
@@ -372,7 +401,7 @@ async function handle(payload){
       // one consolidated notify per salesperson (the send queue handles 5s spacing + 429 retry)
       const byStaff = {};
       for (const l of enriched) { const ph = l.staff?.phone; if (ph) (byStaff[ph] = byStaff[ph] || []).push(l); }
-      for (const ph in byStaff) { try { await notifyStaff(byStaff[ph]); } catch (e) { log('notify err', String(e.message || e).slice(0, 60)); } }
+      for (const ph in byStaff) { try { await notifyStaff(byStaff[ph], info.screenshotUrl); } catch (e) { log('notify err', String(e.message || e).slice(0, 60)); } }
     }
     await waSend(info.chatId, renderCard(src, enriched, LIVE_LARK));
   } catch (e) {
