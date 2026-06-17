@@ -125,7 +125,7 @@ Rules:
 - phone: normalize to Malaysian +60 format, digits only after +60, no spaces. If no phone, use "".
 - interest: bike model or enquiry topic, short lowercase (e.g. "cbr250","africa twin","pricing"). If none -> "No question".
 - brand: exactly one of HQ, Honda, Lambretta, Thunder, Suzuki, KTM. If unclear -> "".
-- origin: identify the lead's SOURCE. A TikTok direct-message / chat-conversation screenshot (shows a DM thread, @handle, "Message request accepted") -> "Tiktok DM". The word "Organic" in the data -> "Tiktok Get Leads". A paid/sponsored TikTok ad OR a TikTok lead-form export -> "Ads Tiktok". A WhatsApp chat screenshot -> "Whatsapp". Facebook/Instagram -> "FB Ads" or "FB/IG comments". Mudah -> "Mudah".
+- origin: identify the lead's SOURCE. MUST be EXACTLY one of: "Tiktok DM", "Tiktok Get Leads", "Ads Tiktok", "Whatsapp", "FB Ads", "FB/IG comments", "Mudah", "On Site Event", "Bike Continent META". Map: TikTok DM/chat-conversation screenshot (@handle, "Message request accepted") -> "Tiktok DM"; the word "Organic" OR "Live" / "TikTok Live" in the data/filename -> "Tiktok Get Leads"; paid TikTok ad OR TikTok lead-form export -> "Ads Tiktok"; WhatsApp chat screenshot -> "Whatsapp"; Facebook lead ad -> "FB Ads"; FB/IG comment -> "FB/IG comments"; Mudah -> "Mudah"; walk-in / showroom / roadshow / event -> "On Site Event".
 - name: the customer's name. For a chat/DM screenshot, use the contact's display name or @handle shown at the top (e.g. "mas.saifuddin"). Else "".
 Return JSON only.`;
 
