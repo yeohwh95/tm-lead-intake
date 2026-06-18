@@ -9,6 +9,17 @@ let XLSX = null; try { XLSX = require('xlsx'); } catch { /* excel disabled if de
 const WASENDER_BASE  = 'https://www.wasenderapi.com/api';
 const UA             = 'Mozilla/5.0';
 const WASENDER_TOKEN = process.env.WASENDER_TOKEN || '';
+// "no lead found" alert → internal work group "AI Agent Project TM Motoworld" via the PA number (own token).
+const REVIEW_GROUP_JID = process.env.REVIEW_GROUP_JID || '';     // 120363409140518905@g.us
+const REVIEW_TOKEN     = process.env.REVIEW_TOKEN || '';         // PA WaSender token (different number)
+async function alertReview(text){
+  if (!REVIEW_GROUP_JID || !REVIEW_TOKEN) return;
+  try {
+    await fetch(WASENDER_BASE + '/send-message', { method:'POST',
+      headers:{ 'Authorization':'Bearer '+REVIEW_TOKEN, 'Content-Type':'application/json', 'User-Agent':UA },
+      body: JSON.stringify({ to: REVIEW_GROUP_JID, text }) });
+  } catch (e) { log('alertReview failed', String(e.message||e)); }
+}
 const OPENAI_KEY     = process.env.OPENAI_API_KEY || '';
 const MODEL          = process.env.MODEL || 'gpt-4o';
 const LIVE_LARK      = process.env.LIVE_LARK === '1';   // stays OFF for testing
@@ -392,7 +403,12 @@ async function handle(payload){
     remember({ src, sender: info.sender, leads });
     if (!leads.length) {
       // media drop with no lead → brief note (it was intentional); plain chatter text → STAY SILENT
-      if (info.kind !== 'text') await waSend(info.chatId, `🧪 ${src}: read OK but no lead found.`);
+      if (info.kind !== 'text') {
+        await waSend(info.chatId, `🧪 ${src}: read OK but no lead found.`);
+        // possible MISSED LEAD → instant alert to the internal work group
+        const t = new Date().toLocaleString('en-MY', { timeZone: 'Asia/Kuala_Lumpur', hour12: false });
+        await alertReview(`⚠️ *Possible missed lead* — ${src} couldn't auto-read\n👤 From: ${info.sender || '—'}\n🕘 ${t} MYT\n👉 Recheck / resend the image in the Lead Intake group.`);
+      }
       return;
     }
     const enriched = assignLeads(leads, fileOverrides(info.fileName || info.caption));
