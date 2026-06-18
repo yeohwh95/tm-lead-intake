@@ -205,16 +205,16 @@ const STAFF = {
   Aso:     { phone: '+60127674828', openId: 'ou_efa269adc38cbfd4cc6419a15255ee8c' },
   Adib:    { phone: '+60178869542', openId: 'ou_c3dc42b76aedbfbf5d406df4562a9fd7' },
   Syahrin: { phone: '+60163488335', openId: 'ou_1fffee0c651b479629d7c3af5b4d80dd' },
-  Jue:     { phone: '+60129653259', openId: '' },   // Klang — open_id TBD (notify by phone)
+  Jue:     { phone: '+60129653259', openId: 'ou_eb6d76e226cf5297e4e973be34f28e78' },   // Klang
   Fazwan:  { phone: '+60128174828', openId: 'ou_b2e70278502e53975a69a9049cbabaf6' },
   Azrul:   { phone: '+60102323259', openId: 'ou_b500e95837ece7bac07399e839425548' },
   Amir:    { phone: '+60103793259', openId: 'ou_424396071c66958527e9cabd5c3ba902' },
   Bella:   { phone: '+60109693259', openId: 'ou_d15465dabf45e876b2bae7660d6ef7bd' },
   Anis:    { phone: '+60129323259', openId: 'ou_5cc5c7b01105cf5703dd6353cb612a1b' },
   Syafa:   { phone: '+60122623259', openId: 'ou_d072f303baf1800574bbae4f33f61aec' },
-  Syaza:   { phone: '+60123773259', openId: '' },   // open_id ambiguous → notify by phone, Lark Salesman blank
-  Roy:     { phone: '+60122653259', openId: '' },   // Shah Alam — open_id TBD
-  Zeera:   { phone: '+601118583259', openId: '' },  // Honda — open_id TBD (account was closed; confirm)
+  Syaza:   { phone: '+60123773259', openId: 'ou_88cd7c9e006835a4300c5104f19185f5' },   // Honda (Syaza Rahman — PIC-confirmed 2026-06-18)
+  Roy:     { phone: '+60122653259', openId: 'ou_6bf42b3e72ca59355e8278d71ae10123' },   // Shah Alam (Roy Abdullah)
+  Zeera:   { phone: '+601118583259', openId: 'ou_47e1634c959f08b7bb43f2ba87cf400b' },  // Honda (Hazirah Zulaika Binti Mohd Asri — reactivated acct, NOT old ou_7cde)
 };
 
 // ---- Deterministic filename/caption flags ----
