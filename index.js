@@ -33,6 +33,9 @@ const INBOX_FORWARD_URL = process.env.INBOX_FORWARD_URL || '';
 // WaSender signs with its own secret; the console channel expects a different one. Re-sign the
 // forward with the console channel's secret so signature verification passes (no VPS restart needed).
 const INBOX_FORWARD_SECRET = process.env.INBOX_FORWARD_SECRET || '';
+// 2nd fan-out: forward raw payload to the website-upload service (Mudah bike posts → WooCommerce draft).
+// Fire-and-forget; the woo service itself filters to the HQ Mudah group. Never blocks lead flow.
+const WOO_FORWARD_URL = process.env.WOO_FORWARD_URL || '';
 
 const recent = [];                 // in-memory debug log (wiped on restart)
 const SEEN = new Set();             // processed message ids (webhook-retry dedup)
@@ -375,7 +378,10 @@ async function handle(payload){
       const hint = info.caption ? `\nThe sender's caption is "${info.caption}" — this IS a real lead (a chat/DM screenshot). Look CAREFULLY for the customer's phone number (a Malaysian number, often in a small grey chat bubble) and the bike model. Extract them.` : '';
       blocks = [
         { type: 'text', text: 'A motorcycle sales lead is shown in this image (a chat/DM screenshot). Caption: ' + (info.caption || '(none)') + hint },
-        { type: 'image_url', image_url: { url: `data:${info.mime || 'image/jpeg'};base64,${buf.toString('base64')}`, detail: 'high' } },
+        // VISION FIX (2026-06-19): feed OpenAI the WaSender public URL (clean image it fetches itself).
+        // The local decrypted buffer was occasionally malformed → GPT returned EMPTY on perfectly-readable
+        // lead screenshots (e.g. Koj3y_ Lambretta 250). Base64 buffer kept only as a fallback.
+        { type: 'image_url', image_url: { url: decryptMedia.lastUrl || `data:${info.mime || 'image/jpeg'};base64,${buf.toString('base64')}`, detail: 'high' } },
       ];
     } else if (info.kind === 'document') {
       const buf = await decryptMedia(info.fullMessage);
@@ -444,6 +450,14 @@ function forwardToInbox(rawBody, headers) {
     .catch(e => log('[inbox-fwd] failed:', String(e.message || e)));
 }
 
+// Fan-out #2: forward raw payload to the website-upload service (Mudah posts → WooCommerce draft).
+function forwardToWoo(rawBody) {
+  if (!WOO_FORWARD_URL) return;
+  fetch(WOO_FORWARD_URL, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: rawBody })
+    .then(r => log('[woo-fwd]', r.status))
+    .catch(e => log('[woo-fwd] failed:', String(e.message || e)));
+}
+
 // ---- HTTP ----
 http.createServer((req, res) => {
   if (req.method === 'POST') {
@@ -451,6 +465,7 @@ http.createServer((req, res) => {
     req.on('data', c => body += c);
     req.on('end', () => {
       forwardToInbox(body, req.headers);   // fan-out to console inbox (fire-and-forget)
+      forwardToWoo(body);                  // fan-out #2 to website-upload service (fire-and-forget)
       let p; try { p = JSON.parse(body); } catch { p = { raw: body.slice(0, 1500) }; }
       remember({ event: p.event, summary: JSON.stringify(p).slice(0, 800) });
       log('CAPTURE', p.event || '(no event)');
