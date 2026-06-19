@@ -154,7 +154,8 @@ function extract(payload){
   }
   if (media?.kind === 'document') {
     const dm = media.obj;
-    return { chatId, sender, kind: 'document', mediaObj: dm, fullMessage: m, caption: dm.caption || '', mime: dm.mimetype || '', fileName: dm.fileName || '' };
+    // WhatsApp puts the name in fileName OR title depending on the client — read both.
+    return { chatId, sender, kind: 'document', mediaObj: dm, fullMessage: m, caption: dm.caption || '', mime: dm.mimetype || '', fileName: dm.fileName || dm.title || '' };
   }
   if (text0) return { chatId, sender, kind: 'text', text: text0 };
   return null;
@@ -390,7 +391,10 @@ async function handle(payload){
         blocks = [{ type: 'text', text: 'Document caption: ' + (info.caption || '(none)') + '\n(unsupported type ' + info.mime + ')' }];
       }
     }
-    if (info.fileName) blocks.push({ type: 'text', text: `Source file name: "${info.fileName}". If it names a brand (Lambretta / Honda / Thunder / HQ / Suzuki / KTM), use that as the brand for ALL leads.` });
+    if (info.fileName || info.caption) {
+      log('document name="' + (info.fileName||'') + '" caption="' + (info.caption||'') + '"');   // debug: confirm name is captured
+      blocks.push({ type: 'text', text: `Source file name: "${info.fileName||''}". Caption: "${info.caption||''}". If EITHER names a brand (Lambretta / Honda / Thunder / HQ / Suzuki / KTM / Zontes), use that as the brand for ALL leads.` });
+    }
     blocks.push({ type: 'text', text: EXTRACT_INSTRUCTION });
     let leads = parseLeads(await aiExtract(blocks));
     // Bug-1 fix: an IMAGE with a lead caption (e.g. "tiktok dm lambretta") but no lead found = likely a
