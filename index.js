@@ -360,6 +360,23 @@ function renderCard(src, leads, live){
   return compact.join('\n');
 }
 
+// Missing-info ask (Option A — notify only): a small drop saved a lead with NO brand → ask the group to fill it.
+async function askMissing(chatId, leads){
+  const miss = leads.filter(l => !(l.brand || '').trim());
+  if (!miss.length) return;
+  const L = ['❓ *Missing info — please help fill it in*'];
+  for (const l of miss){
+    L.push('');
+    L.push('👤 ' + (l.name || '—') + ' · ' + (l.phone || 'no phone'));
+    L.push('🏍️ Wants: ' + l.want);
+    L.push('📍 ' + l.origin + (l.assignee ? (' · ' + l.assignee) : ''));
+    L.push('⚠️ *Brand unknown* — what bike / brand is this?');
+  }
+  L.push('');
+  L.push('👉 Reply here, or update the Brand in Lark.');
+  await waSend(chatId, L.join('\n'));
+}
+
 async function handle(payload){
   // messages.upsert is for INBOX CAPTURE ONLY (manual hand-typed replies → already forwarded to
   // the console). NEVER process it here: it REPLAYS on session reconnect → duplicate Lark writes +
@@ -443,6 +460,7 @@ async function handle(payload){
     }
     // GROUP confirmation FIRST → instant feedback in the group, BEFORE the per-salesperson DMs queue (5s each)
     await waSend(info.chatId, renderCard(src, enriched, LIVE_LARK));
+    if (enriched.length <= 3) await askMissing(info.chatId, enriched);   // ❓ small drop with blank Brand → ask the group (Option A)
     if (LIVE_LARK) {
       // one consolidated notify per salesperson (the send queue handles 5s spacing + 429 retry)
       const byStaff = {};
