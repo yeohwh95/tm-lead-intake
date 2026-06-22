@@ -69,6 +69,7 @@ function waSend(to, text, imageUrl){
     if (!WASENDER_TOKEN) { log('waSend skipped — no token'); return; }
     const wait = SEND_GAP - (Date.now() - _lastSend);
     if (wait > 0) await new Promise(r => setTimeout(r, wait));
+    if (text && text.length > 4096) text = text.slice(0, 4080) + '\n…';   // WhatsApp hard 4096-char limit — never 422
     const payload = imageUrl ? { to, imageUrl, text } : { to, text };
     for (let attempt = 1; attempt <= 3; attempt++) {
       const r = await fetch(WASENDER_BASE + '/send-message', {
@@ -254,7 +255,12 @@ function fileOverrides(name){
   const assignee = m.name;
   const requestedName = m.requested && !m.name ? m.requested : '';   // named someone we couldn't match → flag it
   const origin = /(^|\+|\s)live\b/i.test(f) ? 'TIKTOK LIVE (Get leads)' : '';
-  return { assignee, origin, requestedName };
+  // BRAND from filename/caption ("get lead lambretta", "ads tiktok thunder", "tiktok dm hq") → force on all leads in the file.
+  const BRAND_DISPLAY = { lambretta:'Lambretta', thunder:'Thunder', honda:'Honda', suzuki:'Suzuki', ktm:'KTM', zontes:'Zontes', hq:'HQ' };
+  const lf = f.toLowerCase();
+  const bkey = Object.keys(BRAND_DISPLAY).find(b => new RegExp('\\b' + b + '\\b').test(lf)) || '';
+  const brand = bkey ? BRAND_DISPLAY[bkey] : '';
+  return { assignee, origin, requestedName, brand };
 }
 
 // ---- Assignment (persistent take-turns across drops; resets only on deploy) ----
@@ -262,6 +268,7 @@ const ROT = {};
 function assignLeads(leads, ov){
   ov = ov || {};
   return leads.map(l => {
+    if (ov.brand) l.brand = ov.brand;   // filename/caption brand wins → fills the gap so the lead gets a pool + salesman
     let assignee = ov.assignee || '';
     if (!assignee) { const [team, pool] = poolForBrand(l.brand); if (pool.length) { const idx = ROT[team] || 0; assignee = pool[idx % pool.length]; ROT[team] = idx + 1; } }
     const staff = STAFF[assignee] || null;
@@ -341,7 +348,16 @@ function renderCard(src, leads, live){
       digits ? `👉 https://wa.me/${digits}` : '',
     ].filter(Boolean).join('\n');
   });
-  return head + '\n\n' + blocks.join('\n\n');
+  const full = head + '\n\n' + blocks.join('\n\n');
+  if (full.length <= 3900) return full;
+  // BIG batch → compact summary (WhatsApp caps messages at 4096 chars; the full per-lead card would 422 → no reply)
+  const byAssignee = {}; let unassigned = 0;
+  for (const l of leads) { if (l.assignee) byAssignee[l.assignee] = (byAssignee[l.assignee] || 0) + 1; else unassigned++; }
+  const lines = Object.entries(byAssignee).sort((a, b) => b[1] - a[1]).map(([n, c]) => `• ${n}: ${c}`);
+  const compact = [head, '', '*Assigned:*', ...lines];
+  if (unassigned) compact.push(`⚠️ ${unassigned} unassigned (no brand → staff to pick)`);
+  compact.push('', '👉 Full details in Lark CRM.');
+  return compact.join('\n');
 }
 
 async function handle(payload){
