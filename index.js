@@ -440,12 +440,15 @@ async function handle(payload){
     const enriched = assignLeads(leads, fileOverrides(info.fileName || info.caption));
     if (LIVE_LARK) {
       for (const l of enriched) { try { await larkWriteLead(l); } catch (e) { l.larkErr = String(e.message || e).slice(0, 60); log('lark write err', l.larkErr); } }
+    }
+    // GROUP confirmation FIRST → instant feedback in the group, BEFORE the per-salesperson DMs queue (5s each)
+    await waSend(info.chatId, renderCard(src, enriched, LIVE_LARK));
+    if (LIVE_LARK) {
       // one consolidated notify per salesperson (the send queue handles 5s spacing + 429 retry)
       const byStaff = {};
       for (const l of enriched) { const ph = l.staff?.phone; if (ph) (byStaff[ph] = byStaff[ph] || []).push(l); }
       for (const ph in byStaff) { try { await notifyStaff(byStaff[ph], info.screenshotUrl); } catch (e) { log('notify err', String(e.message || e).slice(0, 60)); } }
     }
-    await waSend(info.chatId, renderCard(src, enriched, LIVE_LARK));
   } catch (e) {
     const msg = String(e.message || e);
     log('handle error', msg);
