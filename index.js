@@ -265,12 +265,17 @@ function fileOverrides(name){
 
 // ---- Assignment (persistent take-turns across drops; resets only on deploy) ----
 const ROT = {};
-function assignLeads(leads, ov){
-  ov = ov || {};
+function assignLeads(leads, ov, unavail){
+  ov = ov || {}; unavail = unavail || new Set();
   return leads.map(l => {
     if (ov.brand) l.brand = ov.brand;   // filename/caption brand wins → fills the gap so the lead gets a pool + salesman
     let assignee = ov.assignee || '';
-    if (!assignee) { const [team, pool] = poolForBrand(l.brand); if (pool.length) { const idx = ROT[team] || 0; assignee = pool[idx % pool.length]; ROT[team] = idx + 1; } }
+    if (!assignee) {
+      const [team, pool] = poolForBrand(l.brand);
+      const avail = pool.filter(n => !unavail.has(n.toLowerCase()));   // skip anyone marked "NO" in the Lark availability sheet
+      const usePool = avail.length ? avail : pool;                     // if the whole pool is OFF, fall back to all (never drop a lead)
+      if (usePool.length) { const idx = ROT[team] || 0; assignee = usePool[idx % usePool.length]; ROT[team] = idx + 1; }
+    }
     const staff = STAFF[assignee] || null;
     const want = (l.interest && !/^\s*no question\s*$/i.test(l.interest)) ? l.interest : (l.name || 'No question');
     const origin = ov.origin || l.origin || 'Whatsapp';
@@ -292,6 +297,25 @@ async function larkToken(){
   if (!j.tenant_access_token) throw new Error('lark token: ' + JSON.stringify(j).slice(0, 120));
   _lt = { t: j.tenant_access_token, exp: Date.now() + ((j.expire || 7200) - 120) * 1000 };
   return _lt.t;
+}
+
+// ---- Salesman availability (Lark Sheet) → set of names marked "NO" (skip them in rotation). Cached 5 min. ----
+const AVAIL_SHEET = process.env.AVAIL_SHEET || 'YjLTslshkhRGeXt9V5DlJi8cgdl';
+let _unavail = new Set(), _unavailTs = 0;
+async function getUnavailable(){
+  if (Date.now() - _unavailTs < 5 * 60 * 1000) return _unavail;
+  try {
+    const tok = await larkToken();
+    const meta = await (await fetch(`${LARK_BASE}/sheets/v3/spreadsheets/${AVAIL_SHEET}/sheets/query`, { headers: { 'Authorization': 'Bearer ' + tok } })).json();
+    const sid = meta.data.sheets[0].sheet_id;
+    const vals = await (await fetch(`${LARK_BASE}/sheets/v2/spreadsheets/${AVAIL_SHEET}/values/${sid}!A1:B60`, { headers: { 'Authorization': 'Bearer ' + tok } })).json();
+    const rows = (vals.data && vals.data.valueRange && vals.data.valueRange.values) || [];
+    const un = new Set();
+    for (const row of rows) { const name = row[0], av = row[1]; if (name && /^\s*no\s*$/i.test(String(av || ''))) un.add(String(name).trim().toLowerCase()); }
+    _unavail = un; _unavailTs = Date.now();
+    log('availability refreshed — OFF:', [...un].join(', ') || '(none)');
+  } catch (e) { log('getUnavailable err', String(e.message || e)); }
+  return _unavail;
 }
 async function larkWriteLead(l){
   const tok = await larkToken();
@@ -454,7 +478,8 @@ async function handle(payload){
       }
       return;
     }
-    const enriched = assignLeads(leads, fileOverrides(info.fileName || info.caption));
+    const unavail = await getUnavailable();   // salesmen marked "NO" in the Lark availability sheet → skipped in rotation
+    const enriched = assignLeads(leads, fileOverrides(info.fileName || info.caption), unavail);
     if (LIVE_LARK) {
       for (const l of enriched) { try { await larkWriteLead(l); } catch (e) { l.larkErr = String(e.message || e).slice(0, 60); log('lark write err', l.larkErr); } }
     }
