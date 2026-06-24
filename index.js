@@ -317,6 +317,37 @@ async function getUnavailable(){
   } catch (e) { log('getUnavailable err', String(e.message || e)); }
   return _unavail;
 }
+
+// ---- Availability toggle WATCHER → announce in the AI Agent internal group (polls every 2 min) ----
+let _availSnap = null;   // name -> 'YES'/'NO' (last full state); null until baselined
+async function readAvail(){
+  const tok = await larkToken();
+  const meta = await (await fetch(`${LARK_BASE}/sheets/v3/spreadsheets/${AVAIL_SHEET}/sheets/query`, { headers: { 'Authorization': 'Bearer ' + tok } })).json();
+  const sid = meta.data.sheets[0].sheet_id;
+  const vals = await (await fetch(`${LARK_BASE}/sheets/v2/spreadsheets/${AVAIL_SHEET}/values/${sid}!A1:B60`, { headers: { 'Authorization': 'Bearer ' + tok } })).json();
+  const rows = (vals.data && vals.data.valueRange && vals.data.valueRange.values) || [];
+  const m = {};
+  for (const row of rows) { const name = row[0], av = String(row[1] || '').trim().toUpperCase(); if (name && (av === 'YES' || av === 'NO')) m[String(name).trim()] = av; }
+  return m;
+}
+async function pollAvailability(){
+  try {
+    const cur = await readAvail();
+    if (!Object.keys(cur).length) return;                       // read failed/empty → skip (don't reset baseline)
+    if (_availSnap === null){ _availSnap = cur; log('availability baseline (' + Object.keys(cur).length + ' staff)'); return; }
+    const lines = [];
+    for (const name in cur){ if (_availSnap[name] && _availSnap[name] !== cur[name]) lines.push(cur[name] === 'NO' ? `🔴 ${name} → OFF (no new leads)` : `✅ ${name} → back ON`); }
+    if (lines.length){
+      const off = Object.keys(cur).filter(n => cur[n] === 'NO');
+      await alertReview('🔔 *Salesman availability changed*\n' + lines.join('\n') + (off.length ? `\n\nCurrently OFF: ${off.join(', ')}` : '\n\nEveryone available ✅'));
+      log('availability toggle:', lines.join(' | '));
+    }
+    _availSnap = cur;
+  } catch (e){ log('pollAvailability err', String(e.message || e)); }
+}
+setInterval(pollAvailability, 2 * 60 * 1000);
+setTimeout(pollAvailability, 8000);   // baseline shortly after startup
+
 async function larkWriteLead(l){
   const tok = await larkToken();
   const fields = { 'Phone number': l.phone || '', 'Customer want': l.want || 'No question', 'Stage': 'Passed lead' };
