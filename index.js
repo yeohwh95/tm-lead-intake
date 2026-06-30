@@ -84,12 +84,19 @@ function waSend(to, text, imageUrl){
         await new Promise(res => setTimeout(res, (ra + 0.6) * 1000));
         continue;
       }
-      if (!r.ok) log('waSend HTTP', r.status, (await r.text()).slice(0, 150));
-      return;
+      if (!r.ok) { log('waSend HTTP', r.status, (await r.text()).slice(0, 150)); return null; }
+      try { const j = await r.json(); return j.data?.msgId || j.data?.id || null; } catch { return null; }   // msgId → SLA deletes it on reassign
     }
     log('waSend gave up after 3 attempts to', to);
+    return null;
   }).catch(e => log('send chain err', String(e.message || e)));
   return _sendChain;
+}
+// delete a previously-sent WhatsApp message (used by SLA on reassign). Confirmed: DELETE /messages/{id}
+async function waDelete(msgId){
+  if (!msgId || !WASENDER_TOKEN) return;
+  try { await fetch(WASENDER_BASE + '/messages/' + msgId, { method: 'DELETE', headers: { 'Authorization': 'Bearer ' + WASENDER_TOKEN, 'User-Agent': UA } }); }
+  catch (e) { log('waDelete err', String(e.message || e)); }
 }
 
 // Server-side decrypt (Strategy 2): POST the media message object → publicUrl → download bytes
@@ -360,6 +367,32 @@ async function larkWriteLead(l){
   return j.data?.record?.record_id;
 }
 
+// ---- SLA: update a lead's Salesman field on reassign ----
+async function larkUpdateSalesman(recordId, openId){
+  if (!recordId || !openId) return;
+  const tok = await larkToken();
+  await fetch(`${LARK_BASE}/bitable/v1/apps/${LARK_APP_TOKEN}/tables/${LARK_TABLE_ID}/records/${recordId}`, { method: 'PUT', headers: { 'Authorization': 'Bearer ' + tok, 'Content-Type': 'application/json' }, body: JSON.stringify({ fields: { Salesman: [{ id: openId }] } }) });
+}
+// ---- SLA: pick the next rep in the brand's region pool (skip current + unavailable) ----
+async function pickNextRep(brand, currentKey){
+  const [team, pool] = poolForBrand(brand);
+  let unavail = new Set(); try { unavail = await getUnavailable(); } catch {}
+  const cands = pool.filter(n => n !== currentKey && !unavail.has(n.toLowerCase()) && STAFF[n]?.phone);
+  if (!cands.length) return null;
+  const idx = (ROT[team] || 0); ROT[team] = idx + 1;
+  const name = cands[idx % cands.length];
+  return { key: name, name, phone: STAFF[name].phone, openId: STAFF[name].openId };
+}
+// ---- SLA wiring (gated by SLA_ON=1 — dormant until activated) ----
+const SLA_ON = process.env.SLA_ON === '1';
+let sla = null;
+if (SLA_ON){
+  sla = require('./sla');
+  sla.init({ waSend, waDelete, larkUpdateSalesman, groupNotify: alertReview, pickNextRep, log });
+  setInterval(() => { try { sla.tick(); } catch (e) { log('sla tick err', String(e.message||e)); } }, 60 * 1000);
+  log('⏱️ SLA engine ON (Mon–Fri 9–6, 60min nudge → 75min reassign)');
+}
+
 // ---- Notify the assigned salesperson via TM Motor Marketing WaSender ----
 // Consolidated: ONE message per salesperson (even if they got several leads in one drop).
 function notifyText(leads){
@@ -376,11 +409,11 @@ function notifyText(leads){
 }
 async function notifyStaff(leads, screenshotUrl){
   const phone = (leads[0].staff?.phone || '').replace(/\D/g, '');
-  if (!phone) return false;
+  if (!phone) return null;
   // For a single image lead, send the actual screenshot + details so the salesperson sees the full convo.
-  if (screenshotUrl && leads.length === 1) await waSend(phone, notifyText(leads), screenshotUrl);
-  else await waSend(phone, notifyText(leads));
-  return true;
+  const txt = notifyText(leads) + (SLA_ON ? '\n\n✅ Reply *YES* once you have contacted this lead.' : '');
+  const mid = (screenshotUrl && leads.length === 1) ? await waSend(phone, txt, screenshotUrl) : await waSend(phone, txt);
+  return mid;   // msgId for the SLA (delete on reassign)
 }
 
 // ---- Group card (live wording when Lark is on) ----
@@ -446,6 +479,12 @@ async function handle(payload){
   const isGroup = info.chatId.endsWith('@g.us');
   log('inbound', info.kind, 'from', info.sender, 'chat', info.chatId, isGroup ? '(group)' : '(personal)');
   remember({ event: 'inbound', src: info.kind, summary: `chat=${info.chatId} ${isGroup ? 'GROUP' : 'personal'} from=${info.sender}` });
+  // SLA: a rep replying YES (personal DM to the TM number) confirms their pending leads.
+  if (sla && !isGroup && info.kind === 'text' && /\byes\b/i.test(info.text || '')) {
+    const fromPhone = (info.chatId.split('@')[0] || '').replace(/\D/g, '');
+    const matched = sla.onReply(fromPhone, info.text);
+    if (matched) { log('SLA: ' + matched + ' confirmed their leads (YES)'); return; }
+  }
   // SAFETY GATE: only ever act/reply inside the designated intake group.
   if (!INTAKE_GROUP_JID || info.chatId !== INTAKE_GROUP_JID) {
     log('SKIP — not intake group (chat=' + info.chatId + ', intake=' + (INTAKE_GROUP_JID || 'UNSET') + ') — captured only, no reply');
@@ -512,7 +551,7 @@ async function handle(payload){
     const unavail = await getUnavailable();   // salesmen marked "NO" in the Lark availability sheet → skipped in rotation
     const enriched = assignLeads(leads, fileOverrides(info.fileName || info.caption), unavail);
     if (LIVE_LARK) {
-      for (const l of enriched) { try { await larkWriteLead(l); } catch (e) { l.larkErr = String(e.message || e).slice(0, 60); log('lark write err', l.larkErr); } }
+      for (const l of enriched) { try { l.recordId = await larkWriteLead(l); } catch (e) { l.larkErr = String(e.message || e).slice(0, 60); log('lark write err', l.larkErr); } }
     }
     // GROUP confirmation FIRST → instant feedback in the group, BEFORE the per-salesperson DMs queue (5s each)
     await waSend(info.chatId, renderCard(src, enriched, LIVE_LARK));
@@ -521,7 +560,15 @@ async function handle(payload){
       // one consolidated notify per salesperson (the send queue handles 5s spacing + 429 retry)
       const byStaff = {};
       for (const l of enriched) { const ph = l.staff?.phone; if (ph) (byStaff[ph] = byStaff[ph] || []).push(l); }
-      for (const ph in byStaff) { try { await notifyStaff(byStaff[ph], info.screenshotUrl); } catch (e) { log('notify err', String(e.message || e).slice(0, 60)); } }
+      for (const ph in byStaff) {
+        try {
+          const dmMsgId = await notifyStaff(byStaff[ph], info.screenshotUrl);
+          if (sla) {   // T+0: start the SLA timer for this rep's lead(s)
+            const grp = byStaff[ph];
+            sla.register(grp[0].assignee, ph, grp.map(l => ({ recordId: l.recordId, summary: l.want, brand: l.brand, custName: l.name, custPhone: l.phone })), dmMsgId);
+          }
+        } catch (e) { log('notify err', String(e.message || e).slice(0, 60)); }
+      }
     }
   } catch (e) {
     const msg = String(e.message || e);
