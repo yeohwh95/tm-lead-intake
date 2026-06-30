@@ -483,7 +483,7 @@ async function handle(payload){
   if (sla && !isGroup && info.kind === 'text' && /\byes\b/i.test(info.text || '')) {
     const fromPhone = (info.chatId.split('@')[0] || '').replace(/\D/g, '');
     const matched = sla.onReply(fromPhone, info.text);
-    if (matched) { log('SLA: ' + matched + ' confirmed their leads (YES)'); return; }
+    if (matched) { log('SLA: ' + matched + ' confirmed their leads (YES)'); await waSend(fromPhone, '✅ Noted — thanks! Lead marked as contacted.'); return; }
   }
   // SAFETY GATE: only ever act/reply inside the designated intake group.
   if (!INTAKE_GROUP_JID || info.chatId !== INTAKE_GROUP_JID) {
