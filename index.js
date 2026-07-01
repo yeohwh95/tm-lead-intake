@@ -392,7 +392,18 @@ if (SLA_ON){
   sla = require('./sla');
   sla.init({ waSend, waDelete, larkUpdateSalesman, groupNotify: alertReview, pickNextRep, log });
   setInterval(() => { try { sla.tick(); } catch (e) { log('sla tick err', String(e.message||e)); } }, 60 * 1000);
-  log('⏱️ SLA engine ON (Mon–Fri 9–6, 60min nudge → 75min reassign)');
+  // AWARENESS: hourly SLA status to the AI Agent group (so we always SEE tracking is working)
+  setInterval(async () => {
+    try {
+      if (!sla.inHours(Date.now())) return;
+      const s = sla.stats();
+      if (!s.tracked) return;   // nothing tracked yet → skip
+      const ack = s.byStatus.contacted || 0, waiting = s.pending.length;
+      const list = s.pending.slice(0, 10).map(p => `• ${p.who} → ${p.rep} (${p.ageMin}m)`).join('\n');
+      await alertReview(`📊 *SLA status* (since last restart)\n🔔 ${s.tracked} assigned · ✅ ${ack} acknowledged · ⏳ ${waiting} waiting${waiting ? ':\n' + list : ''}\n\nauto-reassign: *${s.reassign}*`);
+    } catch (e) { log('sla summary err', String(e.message || e)); }
+  }, 60 * 60 * 1000);
+  log('⏱️ SLA engine ON — reassign ' + (process.env.SLA_REASSIGN === '1' ? 'ON' : 'PAUSED') + ', hourly group status');
 }
 
 // ---- Notify the assigned salesperson via TM Motor Marketing WaSender ----
