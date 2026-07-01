@@ -41,17 +41,49 @@ function register(repKey, repPhone, leads, dmMsgId) {
   persist();
 }
 
-// Rep replied YES (to the TM number) → confirm ALL their pending leads.
-function onReply(fromPhone, text) {
-  if (!/\byes\b/i.test(text || '')) return false;
+// Rep sent a message to the TM number.
+//   ANY message  → acknowledged → confirm ALL their pending leads (no reassign). Returns repKey.
+//   contains "pass" → they're handing it over → reassign each pending lead NOW. Returns 'pass'.
+//   (rep has no pending leads → ignore, returns false)
+async function onReply(fromPhone, text) {
   const digits = String(fromPhone).replace(/\D/g, '');
   for (const [repKey, r] of Object.entries(state.reps)) {
     if (String(r.phone).replace(/\D/g, '').slice(-9) !== digits.slice(-9)) continue;
-    let any = false;
-    for (const l of Object.values(r.leads)) if (l.status === 'pending') { l.status = 'contacted'; l.contactedAt = now(); any = true; }
-    if (any) { persist(); return repKey; }
+    const pending = Object.values(r.leads).filter(l => l.status === 'pending');
+    if (!pending.length) return false;
+    if (/\bpass\b/i.test(text || '')) {
+      for (const l of pending) await reassignLead(repKey, r, l, 'passed');
+      persist(); return 'pass';
+    }
+    for (const l of pending) { l.status = 'contacted'; l.contactedAt = now(); }   // any other message = acknowledged
+    persist(); return repKey;
   }
   return false;
+}
+
+// Move a lead to the next rep (used by T+75 timeout AND by an explicit "pass").
+async function reassignLead(repKey, r, l, reason) {
+  l.heldBy = l.heldBy || [];
+  if (!l.heldBy.includes(repKey)) l.heldBy.push(repKey);
+  // no-response: escalate after the first reassign (never bounce a customer endlessly)
+  if (reason === 'no_response' && l.reassignCount >= 1) {
+    l.status = 'escalated';
+    await safe(deps.groupNotify(`🚨 *Lead not picked up* — ${l.custName || l.custPhone} (${l.brand || 'TM'}) — no response after reassign. Needs a manager.`));
+    return;
+  }
+  await safe(deps.waDelete(l.dmMsgId));
+  if (r.summaryMsgId) { await safe(deps.waDelete(r.summaryMsgId)); r.summaryMsgId = null; }
+  const exclude = reason === 'passed' ? l.heldBy : [repKey];   // a passed lead skips everyone who already had it
+  const next = await deps.pickNextRep(l.brand, repKey, exclude);
+  if (!next) { l.status = 'escalated'; await safe(deps.groupNotify(`🚨 No available rep for ${l.custName || l.custPhone} (${l.brand || 'TM'})${reason === 'passed' ? ' (everyone passed)' : ''}. Needs a manager.`)); return; }
+  const verb = reason === 'passed' ? 'Passed' : 'Reassigned';
+  const newMsgId = await safe(deps.waSend(next.phone, `🔔 *${verb} Lead — ${l.brand || 'TM Motoworld'}*\n👤 ${l.custName || '—'}\n🎯 ${l.summary}\n${l.custPhone ? '👉 https://wa.me/' + l.custPhone.replace(/\D/g, '') : ''}\n\n✅ Reply anything once you've contacted them (or *PASS* to hand it over).`));
+  await safe(deps.larkUpdateSalesman(l.recordId, next.openId));
+  await safe(deps.groupNotify(`🔄 *${verb}* — ${l.custName || l.custPhone}: ${repKey} → ${next.name}${reason === 'passed' ? ' (rep passed)' : ' (no response 75 min)'}`));
+  delete r.leads[l.recordId];
+  const nr = state.reps[next.key] || (state.reps[next.key] = { phone: next.phone, leads: {}, summaryMsgId: null, remindedAt: 0 });
+  nr.phone = next.phone;
+  nr.leads[l.recordId] = { ...l, assignedAt: now(), dmMsgId: newMsgId, reassignCount: l.reassignCount + 1, status: 'pending', heldBy: l.heldBy };
 }
 
 // The 1-minute checker. Pure of side effects except via deps (all async).
@@ -62,31 +94,12 @@ async function tick() {
     const pending = Object.values(r.leads).filter(l => l.status === 'pending');
     if (!pending.length) continue;
 
-    // T+75 reassign / escalate — act per lead whose reassign-due timestamp is in hours
+    // T+75 reassign (no reply at all) — act per lead whose reassign-due timestamp is in hours
     for (const l of pending) {
       const dueAt = l.assignedAt + REASSIGN_MS;
       if (t < dueAt) continue;
       if (!inHours(dueAt)) { l.status = 'skipped_offhours'; continue; }   // 75-mark fell outside hours → skip
-      if (l.reassignCount >= 1) {
-        l.status = 'escalated';
-        await safe(deps.groupNotify(`🚨 *Lead not picked up* — ${l.custName || l.custPhone} (${l.brand || 'TM'}) had no response after reassign. Needs a manager.`));
-        continue;
-      }
-      // delete the old rep's DM + summary (dedupe deletes)
-      await safe(deps.waDelete(l.dmMsgId));
-      if (r.summaryMsgId) { await safe(deps.waDelete(r.summaryMsgId)); r.summaryMsgId = null; }
-      // pick next rep in the region pool (skip current + unavailable)
-      const next = await deps.pickNextRep(l.brand, repKey);
-      if (!next) { l.status = 'escalated'; await safe(deps.groupNotify(`🚨 No available rep to reassign ${l.custName || l.custPhone} (${l.brand || 'TM'}). Needs a manager.`)); continue; }
-      // DM the new rep + restart their timer
-      const newMsgId = await safe(deps.waSend(next.phone, `🔔 *Reassigned Lead — ${l.brand || 'TM Motoworld'}*\n👤 ${l.custName || '—'}\n🎯 ${l.summary}\n${l.custPhone ? '👉 https://wa.me/' + l.custPhone.replace(/\D/g, '') : ''}\n\n✅ Reply *YES* once you've contacted them.`));
-      await safe(deps.larkUpdateSalesman(l.recordId, next.openId));
-      await safe(deps.groupNotify(`🔄 *Reassigned* — ${l.custName || l.custPhone}: ${repKey} → ${next.name} (no response in 75 min)`));
-      // move the lead under the new rep
-      delete r.leads[l.recordId];
-      const nr = state.reps[next.key] || (state.reps[next.key] = { phone: next.phone, leads: {}, summaryMsgId: null, remindedAt: 0 });
-      nr.phone = next.phone;
-      nr.leads[l.recordId] = { ...l, assignedAt: t, dmMsgId: newMsgId, reassignCount: l.reassignCount + 1, status: 'pending' };
+      await reassignLead(repKey, r, l, 'no_response');
     }
 
     // T+60 nudge — one summary per rep listing their still-pending leads (once)
@@ -94,7 +107,7 @@ async function tick() {
     const ripe = stillPending.filter(l => (t - l.assignedAt) >= NUDGE_MS && inHours(l.assignedAt + NUDGE_MS));
     if (ripe.length && !r.summaryMsgId) {
       const list = stillPending.map((l, i) => `${i + 1}. ${l.custName || l.custPhone || '—'} · ${l.brand || ''} · ${l.summary}`).join('\n');
-      const mid = await safe(deps.waSend(r.phone, `⏰ *Uncontacted leads (${stillPending.length})*\n${list}\n\n✅ Reply *YES* once you've contacted them. Uncontacted leads will be reassigned in 15 min.`));
+      const mid = await safe(deps.waSend(r.phone, `⏰ *Not acknowledged yet (${stillPending.length})*\n${list}\n\n✅ Reply anything to confirm you've got them (or *PASS* to hand over). Otherwise reassigned in 15 min.`));
       r.summaryMsgId = mid; r.remindedAt = t;
     }
   }

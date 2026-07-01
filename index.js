@@ -374,10 +374,11 @@ async function larkUpdateSalesman(recordId, openId){
   await fetch(`${LARK_BASE}/bitable/v1/apps/${LARK_APP_TOKEN}/tables/${LARK_TABLE_ID}/records/${recordId}`, { method: 'PUT', headers: { 'Authorization': 'Bearer ' + tok, 'Content-Type': 'application/json' }, body: JSON.stringify({ fields: { Salesman: [{ id: openId }] } }) });
 }
 // ---- SLA: pick the next rep in the brand's region pool (skip current + unavailable) ----
-async function pickNextRep(brand, currentKey){
+async function pickNextRep(brand, currentKey, exclude){
+  const ex = new Set(exclude && exclude.length ? exclude : [currentKey]);
   const [team, pool] = poolForBrand(brand);
   let unavail = new Set(); try { unavail = await getUnavailable(); } catch {}
-  const cands = pool.filter(n => n !== currentKey && !unavail.has(n.toLowerCase()) && STAFF[n]?.phone);
+  const cands = pool.filter(n => !ex.has(n) && !unavail.has(n.toLowerCase()) && STAFF[n]?.phone);
   if (!cands.length) return null;
   const idx = (ROT[team] || 0); ROT[team] = idx + 1;
   const name = cands[idx % cands.length];
@@ -411,7 +412,7 @@ async function notifyStaff(leads, screenshotUrl){
   const phone = (leads[0].staff?.phone || '').replace(/\D/g, '');
   if (!phone) return null;
   // For a single image lead, send the actual screenshot + details so the salesperson sees the full convo.
-  const txt = notifyText(leads) + (SLA_ON ? '\n\n✅ Reply *YES* once you have contacted this lead.' : '');
+  const txt = notifyText(leads) + (SLA_ON ? '\n\n✅ Reply anything once you have contacted this lead (or *PASS* to hand it over).' : '');
   const mid = (screenshotUrl && leads.length === 1) ? await waSend(phone, txt, screenshotUrl) : await waSend(phone, txt);
   return mid;   // msgId for the SLA (delete on reassign)
 }
@@ -480,10 +481,11 @@ async function handle(payload){
   log('inbound', info.kind, 'from', info.sender, 'chat', info.chatId, isGroup ? '(group)' : '(personal)');
   remember({ event: 'inbound', src: info.kind, summary: `chat=${info.chatId} ${isGroup ? 'GROUP' : 'personal'} from=${info.sender}` });
   // SLA: a rep replying YES (personal DM to the TM number) confirms their pending leads.
-  if (sla && !isGroup && info.kind === 'text' && /\byes\b/i.test(info.text || '')) {
+  if (sla && !isGroup && info.kind === 'text') {
     const fromPhone = (info.chatId.split('@')[0] || '').replace(/\D/g, '');
-    const matched = sla.onReply(fromPhone, info.text);
-    if (matched) { log('SLA: ' + matched + ' confirmed their leads (YES)'); await waSend(fromPhone, '✅ Noted — thanks! Lead marked as contacted.'); return; }
+    const matched = await sla.onReply(fromPhone, info.text);
+    if (matched === 'pass') { log('SLA: rep passed their lead(s)'); await waSend(fromPhone, '🔄 Got it — passing this lead to another salesperson.'); return; }
+    if (matched) { log('SLA: ' + matched + ' acknowledged their lead(s)'); await waSend(fromPhone, '✅ Noted — thanks! Marked as acknowledged.'); return; }
   }
   // SAFETY GATE: only ever act/reply inside the designated intake group.
   if (!INTAKE_GROUP_JID || info.chatId !== INTAKE_GROUP_JID) {

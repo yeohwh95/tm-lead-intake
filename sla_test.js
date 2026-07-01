@@ -35,7 +35,7 @@ sla.init(deps, { now: () => clock });
 
   // T+61 → summary nudge to Ali
   clock += 31 * MIN; await sla.tick();
-  ok('T+61: summary nudge sent to Ali', calls.sent.length === 1 && /Uncontacted leads/.test(calls.sent[0].text));
+  ok('T+61: summary nudge sent to Ali', calls.sent.length === 1 && /Not acknowledged|reassigned in 15 min/i.test(calls.sent[0].text));
 
   // T+76 → reassign to Ahmad
   clock += 15 * MIN; await sla.tick();
@@ -52,12 +52,19 @@ sla.init(deps, { now: () => clock });
   ok('2nd miss: escalated to manager', calls.group.some(t => /not picked up|Needs a manager/i.test(t)));
   ok('2nd miss: status escalated', sla._state().reps.Ahmad.leads.rec1.status === 'escalated');
 
-  // YES path — fresh lead, rep confirms
+  // ACK path — ANY message confirms (not just "yes")
   sla.register('Bella', '+60133334444', [{ recordId: 'rec2', summary: 'Honda CB650', brand: 'Honda', custName: 'Siti', custPhone: '+60177776666' }], 9002);
-  const matched = sla.onReply('60133334444', 'yes done');
-  ok('YES confirms rep leads', matched === 'Bella' && sla._state().reps.Bella.leads.rec2.status === 'contacted');
+  const matched = await sla.onReply('60133334444', 'ok on it thanks');
+  ok('ANY message acknowledges (not just YES)', matched === 'Bella' && sla._state().reps.Bella.leads.rec2.status === 'contacted');
   clock += 80 * MIN; const before = calls.sent.length; await sla.tick();
-  ok('contacted lead never reassigns', calls.sent.length === before);
+  ok('acknowledged lead never reassigns', calls.sent.length === before);
+
+  // PASS path — "pass" reassigns immediately (not wait 75min)
+  sla.register('Jue', '+60155556666', [{ recordId: 'rec3', summary: 'KTM Duke', brand: 'KTM', custName: 'Ravi', custPhone: '+60166665555' }], 9003);
+  const gcBefore = calls.group.length;
+  const passRes = await sla.onReply('60155556666', 'pass');
+  ok('PASS reassigns immediately', passRes === 'pass' && !sla._state().reps.Jue?.leads?.rec3 && sla._state().reps.Ahmad?.leads?.rec3);
+  ok('PASS notified the group', calls.group.slice(gcBefore).some(t => /Passed/.test(t)));
 
   // off-hours: register at Sunday → skipped
   let clock2 = Date.UTC(2026, 5, 28, 4, 0, 0); // Sunday 12:00 MYT
