@@ -48,3 +48,12 @@ The 8787 console persists EVERY forwarded message per channel:
 - **Visibility:** `/sla` endpoint = live JSON (reassign on/off, tracked, byStatus, pending list). **Hourly group status** posted to the AI Agent group (assigned/acknowledged/waiting).
 - **Ephemeral store caveat (Rule 24):** `sla_store.json` is on Render's ephemeral disk → every deploy wipes in-flight leads. So a deploy = clean baseline (past leads "let go"). For durability, rehydrate-from-Lark on startup (TODO).
 - Files: `sla.js` (engine, 18/18 tests in `sla_test.js`) · wiring in `index.js` · `SLA-SPEC.md`.
+
+## 🟢 SLA → Lark columns (durable DB, live 2026-07-01)
+Lark ("Lead management" table `tblP12qfzg5jlyZ2`, app `JmtibHNxPal4A5sUepml6LK5gzg`) is now the durable SLA record — no longer only the ephemeral `sla_store.json`. 13 columns, all prefixed `SLA `. Written by:
+- **Assign (T+0)** `larkWriteLead` → `SLA Assigned At`, `SLA Original Salesman`, `SLA Status`=Pending (or Off-hours), `SLA Reassign Count`=0.
+- **Reply** `sla.onReply` → `SLA First Response At`, `SLA Response Action`=Keep/Pass, `SLA Status`=Acknowledged, `SLA Response Time (min)` (rep-fair: from *their* assign), `SLA Customer Wait (min)` (from first assign), `SLA Within SLA?` (≤60 min).
+- **Nudge (T+60)** `sla.tick` → `SLA Nudged At`.
+- **Reassign** `reassignLead` → `SLA Reassigned At/From`, `SLA Reassign Count`, `SLA Status`=Reassigned. No-response while PAUSED → `SLA Status`=No-Response (no move). Escalate → `SLA Escalated At`, Status=Escalated.
+- Field-write formats (verified): datetime = epoch **millis** (number), single-select = option **string**, checkbox = **bool**, number = int. Writes via `larkUpdateSLA(recordId, fields)` dep; `slaWrite()` is a no-op when the dep isn't injected (tests).
+- Auto-reassign still **PAUSED** (`SLA_REASSIGN` unset). Explicit rep "pass" still moves the lead (pre-existing).

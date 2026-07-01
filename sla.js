@@ -36,7 +36,7 @@ function register(repKey, repPhone, leads, dmMsgId) {
   r.phone = repPhone; r.lids = r.lids || [];
   for (const l of leads) {
     if (r.leads[l.recordId]) continue;
-    r.leads[l.recordId] = { recordId: l.recordId, summary: l.summary, brand: l.brand || '', custName: l.custName || '', custPhone: l.custPhone || '', assignedAt: now(), dmMsgId, status: 'pending', reassignCount: 0, contactedAt: 0 };
+    r.leads[l.recordId] = { recordId: l.recordId, summary: l.summary, brand: l.brand || '', custName: l.custName || '', custPhone: l.custPhone || '', assignedAt: now(), firstAssignedAt: now(), dmMsgId, status: 'pending', reassignCount: 0, contactedAt: 0 };
   }
   persist();
   (deps.log || console.log)('SLA register:', repKey, '←', leads.length, 'lead(s)');
@@ -56,15 +56,22 @@ async function onReply(fromPhone, text, repHint, fromJid) {
     if (!lidMatch && !phoneMatch && !nameMatch) continue;
     if (fromJid) { r.lids = r.lids || []; if (!r.lids.includes(fromJid)) r.lids.push(fromJid); }   // LEARN this rep's JID → instant match next time
     const pending = Object.values(r.leads).filter(l => l.status === 'pending');
-    if (!pending.length) return null;
+    if (!pending.length) return { repKey, action: 'noop' };   // matched a rep, but nothing waiting (already acked)
     if (/\bpass\b/i.test(text || '')) {
-      for (const l of pending) await reassignLead(repKey, r, l, 'passed');
-      persist(); return { repKey, action: 'pass' };
+      for (const l of pending) {
+        await slaWrite(l.recordId, { 'SLA First Response At': now(), 'SLA Response Action': 'Pass', 'SLA Response Time (min)': mins(now() - l.assignedAt) });
+        await reassignLead(repKey, r, l, 'passed');
+      }
+      persist(); return { repKey, action: 'pass', count: pending.length };
     }
-    for (const l of pending) { l.status = 'contacted'; l.contactedAt = now(); }   // any other message = acknowledged
-    persist(); return { repKey, action: 'ack' };
+    for (const l of pending) {   // any other message = acknowledged ("Keep")
+      l.status = 'contacted'; l.contactedAt = now();
+      const rt = mins(now() - l.assignedAt), cw = mins(now() - (l.firstAssignedAt || l.assignedAt));
+      await slaWrite(l.recordId, { 'SLA First Response At': now(), 'SLA Response Action': 'Keep', 'SLA Status': 'Acknowledged', 'SLA Response Time (min)': rt, 'SLA Customer Wait (min)': cw, 'SLA Within SLA?': rt <= 60 });
+    }
+    persist(); return { repKey, action: 'ack', count: pending.length };
   }
-  return null;
+  return null;   // no tracked rep matched this reply
 }
 
 // Move a lead to the next rep (used by T+75 timeout AND by an explicit "pass").
@@ -74,6 +81,7 @@ async function reassignLead(repKey, r, l, reason) {
   // SAFETY: auto-reassign on no-response is PAUSED unless SLA_REASSIGN=1. (Explicit "pass" always works.)
   if (reason === 'no_response' && process.env.SLA_REASSIGN !== '1') {
     l.status = 'flagged_noreassign';
+    await slaWrite(l.recordId, { 'SLA Status': 'No-Response' });
     await safe(deps.groupNotify(`⏰ ${l.custName || l.custPhone} (${l.brand || 'TM'}) — no reply in 75 min. Auto-reassign is PAUSED; ${repKey}, please follow up.`));
     (deps.log || console.log)('SLA no-response (reassign paused):', l.recordId, repKey);
     return;
@@ -81,6 +89,7 @@ async function reassignLead(repKey, r, l, reason) {
   // no-response: escalate after the first reassign (never bounce a customer endlessly)
   if (reason === 'no_response' && l.reassignCount >= 1) {
     l.status = 'escalated';
+    await slaWrite(l.recordId, { 'SLA Status': 'Escalated', 'SLA Escalated At': now() });
     await safe(deps.groupNotify(`🚨 *Lead not picked up* — ${l.custName || l.custPhone} (${l.brand || 'TM'}) — no response after reassign. Needs a manager.`));
     return;
   }
@@ -88,15 +97,16 @@ async function reassignLead(repKey, r, l, reason) {
   if (r.summaryMsgId) { await safe(deps.waDelete(r.summaryMsgId)); r.summaryMsgId = null; }
   const exclude = reason === 'passed' ? l.heldBy : [repKey];   // a passed lead skips everyone who already had it
   const next = await deps.pickNextRep(l.brand, repKey, exclude);
-  if (!next) { l.status = 'escalated'; await safe(deps.groupNotify(`🚨 No available rep for ${l.custName || l.custPhone} (${l.brand || 'TM'})${reason === 'passed' ? ' (everyone passed)' : ''}. Needs a manager.`)); return; }
+  if (!next) { l.status = 'escalated'; await slaWrite(l.recordId, { 'SLA Status': 'Escalated', 'SLA Escalated At': now() }); await safe(deps.groupNotify(`🚨 No available rep for ${l.custName || l.custPhone} (${l.brand || 'TM'})${reason === 'passed' ? ' (everyone passed)' : ''}. Needs a manager.`)); return; }
   const verb = reason === 'passed' ? 'Passed' : 'Reassigned';
   const newMsgId = await safe(deps.waSend(next.phone, `🔔 *${verb} Lead — ${l.brand || 'TM Motoworld'}*\n👤 ${l.custName || '—'}\n🎯 ${l.summary}\n${l.custPhone ? '👉 https://wa.me/' + l.custPhone.replace(/\D/g, '') : ''}\n\n✅ Reply anything once you've contacted them (or *PASS* to hand it over).`));
   await safe(deps.larkUpdateSalesman(l.recordId, next.openId));
+  await slaWrite(l.recordId, { 'SLA Status': 'Reassigned', 'SLA Reassigned At': now(), 'SLA Reassigned From': repKey, 'SLA Reassign Count': l.reassignCount + 1 });
   await safe(deps.groupNotify(`🔄 *${verb}* — ${l.custName || l.custPhone}: ${repKey} → ${next.name}${reason === 'passed' ? ' (rep passed)' : ' (no response 75 min)'}`));
   delete r.leads[l.recordId];
   const nr = state.reps[next.key] || (state.reps[next.key] = { phone: next.phone, leads: {}, summaryMsgId: null, remindedAt: 0 });
   nr.phone = next.phone;
-  nr.leads[l.recordId] = { ...l, assignedAt: now(), dmMsgId: newMsgId, reassignCount: l.reassignCount + 1, status: 'pending', heldBy: l.heldBy };
+  nr.leads[l.recordId] = { ...l, assignedAt: now(), firstAssignedAt: l.firstAssignedAt || l.assignedAt, dmMsgId: newMsgId, reassignCount: l.reassignCount + 1, status: 'pending', heldBy: l.heldBy };
 }
 
 // The 1-minute checker. Pure of side effects except via deps (all async).
@@ -122,12 +132,16 @@ async function tick() {
       const list = stillPending.map((l, i) => `${i + 1}. ${l.custName || l.custPhone || '—'} · ${l.brand || ''} · ${l.summary}`).join('\n');
       const mid = await safe(deps.waSend(r.phone, `⏰ *Not acknowledged yet (${stillPending.length})*\n${list}\n\n✅ Reply anything to confirm you've got them (or *PASS* to hand over). Otherwise reassigned in 15 min.`));
       r.summaryMsgId = mid; r.remindedAt = t;
+      for (const l of stillPending) await slaWrite(l.recordId, { 'SLA Nudged At': t });
     }
   }
   persist();
 }
 
 async function safe(p) { try { return await p; } catch (e) { (deps.log || console.error)('sla dep err', String(e && e.message || e)); return null; } }
+const mins = (ms) => Math.max(0, Math.round(ms / 60000));
+// Patch SLA columns on a lead's Lark row (no-op in tests where the dep isn't injected).
+async function slaWrite(recordId, fields) { if (deps.larkUpdateSLA && recordId) await safe(deps.larkUpdateSLA(recordId, fields)); }
 
 // Scoreboard for the daily report (yesterday's working day).
 function scoreboard(dayStartMs, dayEndMs) {

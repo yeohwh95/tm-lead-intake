@@ -362,6 +362,15 @@ async function larkWriteLead(l){
   if (l.brand) fields['Brand'] = l.brand;
   if (l.origin) fields['Origin'] = l.origin;
   if (l.staff?.openId) fields['Salesman'] = [{ id: l.staff.openId }];
+  // ---- SLA: stamp the assignment (T+0) so the lead is monitorable in Lark from creation ----
+  if (l.assignee) {
+    const nowMs = Date.now();
+    const inH = sla ? sla.inHours(nowMs) : true;
+    fields['SLA Assigned At'] = nowMs;
+    fields['SLA Original Salesman'] = l.assignee;
+    fields['SLA Status'] = inH ? 'Pending' : 'Off-hours';
+    fields['SLA Reassign Count'] = 0;
+  }
   const r = await fetch(`${LARK_BASE}/bitable/v1/apps/${LARK_APP_TOKEN}/tables/${LARK_TABLE_ID}/records`, { method: 'POST', headers: { 'Authorization': 'Bearer ' + tok, 'Content-Type': 'application/json' }, body: JSON.stringify({ fields }) });
   const j = await r.json();
   if (j.code !== 0) throw new Error('lark code ' + j.code + ' ' + (j.msg || ''));
@@ -373,6 +382,13 @@ async function larkUpdateSalesman(recordId, openId){
   if (!recordId || !openId) return;
   const tok = await larkToken();
   await fetch(`${LARK_BASE}/bitable/v1/apps/${LARK_APP_TOKEN}/tables/${LARK_TABLE_ID}/records/${recordId}`, { method: 'PUT', headers: { 'Authorization': 'Bearer ' + tok, 'Content-Type': 'application/json' }, body: JSON.stringify({ fields: { Salesman: [{ id: openId }] } }) });
+}
+
+// ---- SLA: patch any set of SLA columns on a lead row (response/reassign/nudge/escalate) ----
+async function larkUpdateSLA(recordId, fields){
+  if (!recordId || !fields || !Object.keys(fields).length) return;
+  const tok = await larkToken();
+  await fetch(`${LARK_BASE}/bitable/v1/apps/${LARK_APP_TOKEN}/tables/${LARK_TABLE_ID}/records/${recordId}`, { method: 'PUT', headers: { 'Authorization': 'Bearer ' + tok, 'Content-Type': 'application/json' }, body: JSON.stringify({ fields }) });
 }
 // ---- SLA: pick the next rep in the brand's region pool (skip current + unavailable) ----
 async function pickNextRep(brand, currentKey, exclude){
@@ -390,7 +406,7 @@ const SLA_ON = process.env.SLA_ON === '1';
 let sla = null;
 if (SLA_ON){
   sla = require('./sla');
-  sla.init({ waSend, waDelete, larkUpdateSalesman, groupNotify: alertReview, pickNextRep, log });
+  sla.init({ waSend, waDelete, larkUpdateSalesman, larkUpdateSLA, groupNotify: alertReview, pickNextRep, log });
   setInterval(() => { try { sla.tick(); } catch (e) { log('sla tick err', String(e.message||e)); } }, 60 * 1000);
   // AWARENESS: hourly SLA status to the AI Agent group (so we always SEE tracking is working)
   setInterval(async () => {
@@ -501,12 +517,11 @@ async function handle(payload){
     const repHint = matchStaff((info.sender || '').split(/\s+/)[0] || '').name;   // name fallback
     const text = info.kind === 'text' ? info.text : '';   // sticker/image reply = acknowledgement too (empty text)
     const res = await sla.onReply(realPhone, text, repHint, info.chatId);   // phone (real) → name → learned-lid
-    if (res) {
-      const to = (STAFF[res.repKey] && STAFF[res.repKey].phone) || info.chatId;
-      if (res.action === 'pass') { log('SLA: ' + res.repKey + ' passed their lead(s)'); await waSend(to, '🔄 Got it — passing this lead to another salesperson.'); }
-      else { log('SLA: ' + res.repKey + ' acknowledged their lead(s)'); await waSend(to, '✅ Noted — thanks! Marked as acknowledged.'); }
-      return;
-    }
+    // OBSERVABILITY: every potential rep reply logs a distinct line so we can SEE ack-tracking working.
+    if (res && res.action === 'pass') { const to = (STAFF[res.repKey] && STAFF[res.repKey].phone) || info.chatId; log('SLA ✅MATCH pass: ' + res.repKey + ' passed ' + (res.count||0) + ' lead(s) [phone=' + realPhone + ' name=' + repHint + ' jid=' + info.chatId + ']'); await waSend(to, '🔄 Got it — passing this lead to another salesperson.'); return; }
+    if (res && res.action === 'ack')  { const to = (STAFF[res.repKey] && STAFF[res.repKey].phone) || info.chatId; log('SLA ✅MATCH ack: ' + res.repKey + ' acknowledged ' + (res.count||0) + ' lead(s) [phone=' + realPhone + ' name=' + repHint + ' jid=' + info.chatId + ']'); await waSend(to, '✅ Noted — thanks! Marked as acknowledged.'); return; }
+    if (res && res.action === 'noop') { log('SLA ·match noop: ' + res.repKey + ' replied but has no pending leads (already acked?) [phone=' + realPhone + ' name=' + repHint + ' jid=' + info.chatId + ']'); }
+    else if (!res) { log('SLA ✖NO-MATCH: personal reply not tracked to any rep [phone=' + realPhone + ' name=' + repHint + ' jid=' + info.chatId + ' text="' + String(text).slice(0,40) + '"]'); }
   }
   // SAFETY GATE: only ever act/reply inside the designated intake group.
   if (!INTAKE_GROUP_JID || info.chatId !== INTAKE_GROUP_JID) {
