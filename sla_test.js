@@ -55,15 +55,20 @@ sla.init(deps, { now: () => clock });
   // ACK path — ANY message confirms (not just "yes")
   sla.register('Bella', '+60133334444', [{ recordId: 'rec2', summary: 'Honda CB650', brand: 'Honda', custName: 'Siti', custPhone: '+60177776666' }], 9002);
   const matched = await sla.onReply('60133334444', 'ok on it thanks');
-  ok('ANY message acknowledges (not just YES)', matched === 'Bella' && sla._state().reps.Bella.leads.rec2.status === 'contacted');
+  ok('ANY message acknowledges (not just YES)', matched && matched.action === 'ack' && matched.repKey === 'Bella' && sla._state().reps.Bella.leads.rec2.status === 'contacted');
   clock += 80 * MIN; const before = calls.sent.length; await sla.tick();
   ok('acknowledged lead never reassigns', calls.sent.length === before);
+
+  // NAME-match path — reply from a @lid JID (no phone), matched by NAME → still acknowledges (the real bug)
+  sla.register('Syaza', '+60123773259', [{ recordId: 'rec4', summary: 'Honda RS150', brand: 'Honda', custName: 'Lim', custPhone: '+60188887777' }], 9004);
+  const byName = await sla.onReply('', '👍', 'Syaza');   // empty phone (@lid), name hint only
+  ok('acknowledges by NAME when phone is a @lid', byName && byName.action === 'ack' && sla._state().reps.Syaza.leads.rec4.status === 'contacted');
 
   // PASS path — "pass" reassigns immediately (not wait 75min)
   sla.register('Jue', '+60155556666', [{ recordId: 'rec3', summary: 'KTM Duke', brand: 'KTM', custName: 'Ravi', custPhone: '+60166665555' }], 9003);
   const gcBefore = calls.group.length;
   const passRes = await sla.onReply('60155556666', 'pass');
-  ok('PASS reassigns immediately', passRes === 'pass' && !sla._state().reps.Jue?.leads?.rec3 && sla._state().reps.Ahmad?.leads?.rec3);
+  ok('PASS reassigns immediately', passRes && passRes.action === 'pass' && !sla._state().reps.Jue?.leads?.rec3 && sla._state().reps.Ahmad?.leads?.rec3);
   ok('PASS notified the group', calls.group.slice(gcBefore).some(t => /Passed/.test(t)));
 
   // off-hours: register at Sunday → skipped

@@ -481,11 +481,19 @@ async function handle(payload){
   log('inbound', info.kind, 'from', info.sender, 'chat', info.chatId, isGroup ? '(group)' : '(personal)');
   remember({ event: 'inbound', src: info.kind, summary: `chat=${info.chatId} ${isGroup ? 'GROUP' : 'personal'} from=${info.sender}` });
   // SLA: a rep replying YES (personal DM to the TM number) confirms their pending leads.
-  if (sla && !isGroup && info.kind === 'text') {
-    const fromPhone = (info.chatId.split('@')[0] || '').replace(/\D/g, '');
-    const matched = await sla.onReply(fromPhone, info.text);
-    if (matched === 'pass') { log('SLA: rep passed their lead(s)'); await waSend(fromPhone, '🔄 Got it — passing this lead to another salesperson.'); return; }
-    if (matched) { log('SLA: ' + matched + ' acknowledged their lead(s)'); await waSend(fromPhone, '✅ Noted — thanks! Marked as acknowledged.'); return; }
+  if (sla && !isGroup && (info.kind === 'text' || info.kind === 'image' || info.kind === 'document')) {
+    // Replies usually arrive from a @lid privacy JID (not the phone) → match the rep by their WhatsApp NAME.
+    const isLid = info.chatId.includes('@lid');
+    const fromPhone = isLid ? '' : (info.chatId.split('@')[0] || '').replace(/\D/g, '');
+    const repHint = matchStaff((info.sender || '').split(/\s+/)[0] || '').name;
+    const text = info.kind === 'text' ? info.text : '';   // sticker/image reply = acknowledgement too (empty text)
+    const res = await sla.onReply(fromPhone, text, repHint, info.chatId);   // pass the JID so the SLA learns it
+    if (res) {
+      const to = (STAFF[res.repKey] && STAFF[res.repKey].phone) || info.chatId;
+      if (res.action === 'pass') { log('SLA: ' + res.repKey + ' passed their lead(s)'); await waSend(to, '🔄 Got it — passing this lead to another salesperson.'); }
+      else { log('SLA: ' + res.repKey + ' acknowledged their lead(s)'); await waSend(to, '✅ Noted — thanks! Marked as acknowledged.'); }
+      return;
+    }
   }
   // SAFETY GATE: only ever act/reply inside the designated intake group.
   if (!INTAKE_GROUP_JID || info.chatId !== INTAKE_GROUP_JID) {

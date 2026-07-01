@@ -33,32 +33,38 @@ function register(repKey, repPhone, leads, dmMsgId) {
   if (!repKey || !leads || !leads.length) return;
   if (!inHours(now())) return;   // outside hours → no SLA (per spec: skip)
   const r = state.reps[repKey] || (state.reps[repKey] = { phone: repPhone, leads: {}, summaryMsgId: null, remindedAt: 0 });
-  r.phone = repPhone;
+  r.phone = repPhone; r.lids = r.lids || [];
   for (const l of leads) {
     if (r.leads[l.recordId]) continue;
     r.leads[l.recordId] = { recordId: l.recordId, summary: l.summary, brand: l.brand || '', custName: l.custName || '', custPhone: l.custPhone || '', assignedAt: now(), dmMsgId, status: 'pending', reassignCount: 0, contactedAt: 0 };
   }
   persist();
+  (deps.log || console.log)('SLA register:', repKey, '←', leads.length, 'lead(s)');
 }
 
 // Rep sent a message to the TM number.
-//   ANY message  → acknowledged → confirm ALL their pending leads (no reassign). Returns repKey.
-//   contains "pass" → they're handing it over → reassign each pending lead NOW. Returns 'pass'.
-//   (rep has no pending leads → ignore, returns false)
-async function onReply(fromPhone, text) {
+//   ANY message → acknowledged → confirm ALL their pending leads (no reassign).
+//   contains "pass" → reassign each pending lead NOW.
+// Match by PHONE (real-phone JID) OR by NAME (replies come from a @lid privacy JID, so repHint =
+// their WhatsApp name matched to the roster). Returns null, or { repKey, action:'ack'|'pass' }.
+async function onReply(fromPhone, text, repHint, fromJid) {
   const digits = String(fromPhone).replace(/\D/g, '');
   for (const [repKey, r] of Object.entries(state.reps)) {
-    if (String(r.phone).replace(/\D/g, '').slice(-9) !== digits.slice(-9)) continue;
+    const lidMatch = fromJid && (r.lids || []).includes(fromJid);          // exact — learned from a past reply
+    const phoneMatch = digits.length >= 6 && String(r.phone).replace(/\D/g, '').slice(-9) === digits.slice(-9);
+    const nameMatch = repHint && String(repHint).toLowerCase() === repKey.toLowerCase();
+    if (!lidMatch && !phoneMatch && !nameMatch) continue;
+    if (fromJid) { r.lids = r.lids || []; if (!r.lids.includes(fromJid)) r.lids.push(fromJid); }   // LEARN this rep's JID → instant match next time
     const pending = Object.values(r.leads).filter(l => l.status === 'pending');
-    if (!pending.length) return false;
+    if (!pending.length) return null;
     if (/\bpass\b/i.test(text || '')) {
       for (const l of pending) await reassignLead(repKey, r, l, 'passed');
-      persist(); return 'pass';
+      persist(); return { repKey, action: 'pass' };
     }
     for (const l of pending) { l.status = 'contacted'; l.contactedAt = now(); }   // any other message = acknowledged
-    persist(); return repKey;
+    persist(); return { repKey, action: 'ack' };
   }
-  return false;
+  return null;
 }
 
 // Move a lead to the next rep (used by T+75 timeout AND by an explicit "pass").
