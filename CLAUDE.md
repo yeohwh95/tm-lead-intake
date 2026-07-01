@@ -24,7 +24,27 @@ The 8787 console persists EVERY forwarded message per channel:
 - **Group card FIRST**, then staff DMs (was queued behind ~8× 5s DMs → looked dead for ~40s).
 - **Vision fix** → feed OpenAI the WaSender **public URL**, not the local decrypted buffer (buffer was occasionally malformed → GPT returned empty on readable lead screenshots).
 
+## 🟢 Lead SLA — LIVE 2026-07-01 (gated `SLA_ON=1` in Render env)
+`sla.js` engine + wiring in `index.js`. **Mon–Fri 9 AM–6 PM MYT** (skips outside hours). Per lead:
+- **T+0** rep DM'd → ends with "✅ Reply YES once you have contacted this lead" → `sla.register()` saves the DM `msgId`.
+- Rep replies **YES** (personal DM to the TM number) → confirms ALL their pending leads → bot replies "✅ Noted — thanks!".
+- **T+60min** no YES → ONE summary nudge to the rep.
+- **T+75min** no YES → 🗑️ delete the T+0 DM + the summary (WaSender `DELETE /messages/{msgId}`) → reassign to next region-pool rep (`pickNextRep`, skips unavailable) → DM them → update Lark Salesman → group note.
+- **2nd miss** → escalate to group (no further auto-reassign).
+- **Only NEW leads from activation onward** are tracked (never retroactive — `register()` fires only at assign-time).
+- Engine is decoupled + simulated-time tested: `sla_test.js` (15/15). Spec: `SLA-SPEC.md`.
+- ⚠️ Store `sla_store.json` is on Render's ephemeral disk → a mid-day redeploy wipes in-flight timers (acceptable for now; rehydrate-from-Lark if it bites).
+- **Kill switch:** set `SLA_ON=0` (Render env) + redeploy → dormant, lead bot unaffected.
+
 ## Gotchas
 - WaSender msg hard limit **4096 chars** (422 otherwise).
 - Render env change needs a MANUAL redeploy to load (see ai-benjamin Rule 102).
 - `messages.upsert` replays on reconnect — dedup by msg id + ignore stale timestamps.
+
+## 🟢 Lead SLA — behavior finalized 2026-07-01
+- **ANY reply from the rep = acknowledged** (not just "YES"). **"pass"** = instant reassign to next region-pool rep. **👍 reactions** also acknowledge.
+- **Reply matching (Rule 23):** rep replies arrive from `@lid` privacy JIDs, so match by `key.cleanedSenderPn` (real phone) → name (pushName→roster) → learned-@lid. `onReply(realPhone, text, repHint, jid)` returns `{repKey, action:'ack'|'pass'}`.
+- **SAFETY: auto-reassign on no-response is PAUSED** unless `SLA_REASSIGN=1` (Render env). While paused, a 75-min no-reply only alerts the group ("please follow up") — never moves the lead. Explicit "pass" still reassigns. Turn ON only after confirming acks work live.
+- **Visibility:** `/sla` endpoint = live JSON (reassign on/off, tracked, byStatus, pending list). **Hourly group status** posted to the AI Agent group (assigned/acknowledged/waiting).
+- **Ephemeral store caveat (Rule 24):** `sla_store.json` is on Render's ephemeral disk → every deploy wipes in-flight leads. So a deploy = clean baseline (past leads "let go"). For durability, rehydrate-from-Lark on startup (TODO).
+- Files: `sla.js` (engine, 18/18 tests in `sla_test.js`) · wiring in `index.js` · `SLA-SPEC.md`.
