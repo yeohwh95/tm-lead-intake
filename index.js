@@ -169,6 +169,7 @@ function extract(payload){
     return { chatId, sender, kind: 'document', mediaObj: dm, fullMessage: m, caption: dm.caption || '', mime: dm.mimetype || '', fileName: dm.fileName || dm.title || '' };
   }
   if (text0) return { chatId, sender, kind: 'text', text: text0 };
+  if (msg.reactionMessage || rawMsg.reactionMessage) return { chatId, sender, kind: 'reaction', text: '' };   // 👍 reaction = acknowledgement (SLA)
   return null;
 }
 
@@ -481,7 +482,7 @@ async function handle(payload){
   log('inbound', info.kind, 'from', info.sender, 'chat', info.chatId, isGroup ? '(group)' : '(personal)');
   remember({ event: 'inbound', src: info.kind, summary: `chat=${info.chatId} ${isGroup ? 'GROUP' : 'personal'} from=${info.sender}` });
   // SLA: a rep replying YES (personal DM to the TM number) confirms their pending leads.
-  if (sla && !isGroup && (info.kind === 'text' || info.kind === 'image' || info.kind === 'document')) {
+  if (sla && !isGroup && (info.kind === 'text' || info.kind === 'image' || info.kind === 'document' || info.kind === 'reaction')) {
     // The webhook key carries the rep's REAL phone in cleanedSenderPn/senderPn (remoteJid is a @lid privacy id).
     const k = (pickMessages(payload.data || {}).key) || {};
     const realPhone = String(k.cleanedSenderPn || k.senderPn || k.participantPn || '').replace(/\D/g, '')
