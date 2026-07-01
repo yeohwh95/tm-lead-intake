@@ -482,12 +482,13 @@ async function handle(payload){
   remember({ event: 'inbound', src: info.kind, summary: `chat=${info.chatId} ${isGroup ? 'GROUP' : 'personal'} from=${info.sender}` });
   // SLA: a rep replying YES (personal DM to the TM number) confirms their pending leads.
   if (sla && !isGroup && (info.kind === 'text' || info.kind === 'image' || info.kind === 'document')) {
-    // Replies usually arrive from a @lid privacy JID (not the phone) → match the rep by their WhatsApp NAME.
-    const isLid = info.chatId.includes('@lid');
-    const fromPhone = isLid ? '' : (info.chatId.split('@')[0] || '').replace(/\D/g, '');
-    const repHint = matchStaff((info.sender || '').split(/\s+/)[0] || '').name;
+    // The webhook key carries the rep's REAL phone in cleanedSenderPn/senderPn (remoteJid is a @lid privacy id).
+    const k = (pickMessages(payload.data || {}).key) || {};
+    const realPhone = String(k.cleanedSenderPn || k.senderPn || k.participantPn || '').replace(/\D/g, '')
+      || (info.chatId.includes('@lid') ? '' : (info.chatId.split('@')[0] || '').replace(/\D/g, ''));
+    const repHint = matchStaff((info.sender || '').split(/\s+/)[0] || '').name;   // name fallback
     const text = info.kind === 'text' ? info.text : '';   // sticker/image reply = acknowledgement too (empty text)
-    const res = await sla.onReply(fromPhone, text, repHint, info.chatId);   // pass the JID so the SLA learns it
+    const res = await sla.onReply(realPhone, text, repHint, info.chatId);   // phone (real) → name → learned-lid
     if (res) {
       const to = (STAFF[res.repKey] && STAFF[res.repKey].phone) || info.chatId;
       if (res.action === 'pass') { log('SLA: ' + res.repKey + ' passed their lead(s)'); await waSend(to, '🔄 Got it — passing this lead to another salesperson.'); }
