@@ -71,6 +71,13 @@ async function onReply(fromPhone, text, repHint, fromJid) {
 async function reassignLead(repKey, r, l, reason) {
   l.heldBy = l.heldBy || [];
   if (!l.heldBy.includes(repKey)) l.heldBy.push(repKey);
+  // SAFETY: auto-reassign on no-response is PAUSED unless SLA_REASSIGN=1. (Explicit "pass" always works.)
+  if (reason === 'no_response' && process.env.SLA_REASSIGN !== '1') {
+    l.status = 'flagged_noreassign';
+    await safe(deps.groupNotify(`⏰ ${l.custName || l.custPhone} (${l.brand || 'TM'}) — no reply in 75 min. Auto-reassign is PAUSED; ${repKey}, please follow up.`));
+    (deps.log || console.log)('SLA no-response (reassign paused):', l.recordId, repKey);
+    return;
+  }
   // no-response: escalate after the first reassign (never bounce a customer endlessly)
   if (reason === 'no_response' && l.reassignCount >= 1) {
     l.status = 'escalated';
@@ -134,4 +141,15 @@ function scoreboard(dayStartMs, dayEndMs) {
   return rows; // (filled in when wired to a per-day persistent log)
 }
 
-module.exports = { init, register, onReply, tick, scoreboard, inHours, _state: () => state, NUDGE_MS, REASSIGN_MS };
+// Live snapshot of what the bot is currently tracking.
+function stats() {
+  const byStatus = {}; const pendingLeads = []; let tracked = 0;
+  for (const [repKey, r] of Object.entries(state.reps)) {
+    for (const l of Object.values(r.leads)) {
+      tracked++; byStatus[l.status] = (byStatus[l.status] || 0) + 1;
+      if (l.status === 'pending') pendingLeads.push({ rep: repKey, who: l.custName || l.custPhone || '—', brand: l.brand || '', ageMin: Math.round((now() - l.assignedAt) / 60000) });
+    }
+  }
+  return { reassign: process.env.SLA_REASSIGN === '1' ? 'ON' : 'PAUSED', reps: Object.keys(state.reps).length, tracked, byStatus, pending: pendingLeads };
+}
+module.exports = { init, register, onReply, tick, scoreboard, stats, inHours, _state: () => state, NUDGE_MS, REASSIGN_MS };

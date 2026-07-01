@@ -1,5 +1,6 @@
 // Simulated-time test for sla.js — proves nudge/reassign/escalate/YES/off-hours with injectable clock.
 process.env.SLA_STORE = '/tmp/sla_test_store.json';
+process.env.SLA_REASSIGN = '1';
 const fs = require('fs');
 try { fs.unlinkSync(process.env.SLA_STORE); } catch {}
 const sla = require('./sla');

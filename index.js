@@ -626,6 +626,8 @@ http.createServer((req, res) => {
     });
   } else if (req.url === '/health') {
     res.writeHead(200, { 'Content-Type': 'text/plain' }); res.end('ok');
+  } else if (req.url === '/sla') {
+    res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(sla ? sla.stats() : { off: true }, null, 1));
   } else {
     const items = recent.map(r => `<b>${r.at}</b> <i>${r.src || r.event || ''}</i><pre>${(r.leads ? JSON.stringify(r.leads, null, 1) : r.summary || '').replace(/</g,'&lt;')}</pre>`).join('<hr>');
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
