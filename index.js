@@ -273,7 +273,7 @@ function fileOverrides(name){
 }
 
 // Valid Brand single-select options in Lark (anything else is coerced away so the field never gets junk).
-const VALID_BRANDS = new Set(['HQ','Honda','Lambretta','Thunder','KTM','Zontes']);   // Suzuki/Kawasaki dropped → non-TM brands coerce to HQ (PIC)
+const VALID_BRANDS = new Set(['HQ','Honda','Lambretta','Thunder','KTM','Zontes','Aveta']);   // Suzuki/Kawasaki dropped → non-TM brands coerce to HQ (PIC); Aveta = own brand → HQ pool
 
 // ---- Model / text → Brand inference ----
 // Staff often drop just a bike MODEL (image caption / Excel cell) with no brand word.
@@ -289,6 +289,7 @@ function brandFromModel(text){
   if (/\bthunder\b/.test(t))    return 'Thunder';
   if (/\bktm\b/.test(t))        return 'KTM';
   if (/\bzontes\b|\b368\s?[a-z]\b/.test(t)) return 'Zontes';   // Zontes incl. the 368 series (PIC: 368 = Zontes)
+  if (/\baveta\b/.test(t))      return 'Aveta';                // Aveta = brand, Nova = model (PIC); routes to HQ pool
   // 2) Honda model families — CBR INCLUDED (PIC: CBR → Honda)
   if (/\bcbr\b|\bcbr\d|\bcb\d|\brs\s?150|\brs-?x\b|\bwave\s?\d*|\bpcx\s?\d*|\bvario\s?\d*|\badv\s?\d|\bafrica\s?twin\b|\bcrf\b|\brebel\b|\bdax\b|\bmonkey\b|\bex5\b|\bcub\b/.test(t)) return 'Honda';
   // 3) Lambretta model families (x-series, v-special, g350)
