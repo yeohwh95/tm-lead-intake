@@ -273,7 +273,7 @@ function fileOverrides(name){
 }
 
 // Valid Brand single-select options in Lark (anything else is coerced away so the field never gets junk).
-const VALID_BRANDS = new Set(['HQ','Honda','Lambretta','Thunder','Suzuki','KTM','Zontes','Kawasaki']);
+const VALID_BRANDS = new Set(['HQ','Honda','Lambretta','Thunder','KTM','Zontes']);   // Suzuki/Kawasaki dropped → non-TM brands coerce to HQ (PIC)
 
 // ---- Model / text → Brand inference ----
 // Staff often drop just a bike MODEL (image caption / Excel cell) with no brand word.
@@ -282,21 +282,19 @@ const VALID_BRANDS = new Set(['HQ','Honda','Lambretta','Thunder','Suzuki','KTM',
 // Returns '' when nothing matches — the caller then defaults to HQ (TM's catch-all desk).
 function brandFromModel(text){
   const t = (text || '').toLowerCase();
-  // 1) an explicit brand name anywhere in the text
+  // 1) an explicit TM brand name. Non-TM brands (Suzuki/Kawasaki/Yamaha/Ducati/BMW) are NOT matched
+  //    here — per PIC they all go to the HQ catch-all desk, so they fall through to '' → HQ default.
   if (/\bhonda\b/.test(t))      return 'Honda';
   if (/\blambretta\b/.test(t))  return 'Lambretta';
   if (/\bthunder\b/.test(t))    return 'Thunder';
-  if (/\bsuzuki\b/.test(t))     return 'Suzuki';
   if (/\bktm\b/.test(t))        return 'KTM';
-  if (/\bzontes\b/.test(t))     return 'Zontes';
-  if (/\bkawasaki\b|\bkawa\b|\bninja\b/.test(t)) return 'Kawasaki';
-  // 2) Honda model families (model code without the word "honda").
-  //    NOTE: CBR is intentionally NOT here — TM's history books ~80% of CBRs (used/trade-in) under HQ, so CBR → HQ below.
-  if (/\bcb\d|\brs\s?150|\brs-?x\b|\bwave\s?\d*|\bpcx\s?\d*|\bvario\s?\d*|\badv\s?\d|\bafrica\s?twin\b|\bcrf\b|\brebel\b|\bdax\b|\bmonkey\b|\bex5\b|\bcub\b/.test(t)) return 'Honda';
+  if (/\bzontes\b|\b368\s?[a-z]\b/.test(t)) return 'Zontes';   // Zontes incl. the 368 series (PIC: 368 = Zontes)
+  // 2) Honda model families — CBR INCLUDED (PIC: CBR → Honda)
+  if (/\bcbr\b|\bcbr\d|\bcb\d|\brs\s?150|\brs-?x\b|\bwave\s?\d*|\bpcx\s?\d*|\bvario\s?\d*|\badv\s?\d|\bafrica\s?twin\b|\bcrf\b|\brebel\b|\bdax\b|\bmonkey\b|\bex5\b|\bcub\b/.test(t)) return 'Honda';
   // 3) Lambretta model families (x-series, v-special, g350)
   if (/\bx1[2-5]0\b|\bx250\b|\bx300\b|\bv-?special\b|\bg350\b|\bxpa\b/.test(t)) return 'Lambretta';
-  // 4) Modenas / QJ Motor / Benda house line + CBR (per history) → HQ
-  if (/\bcbr\b|\bcbr\d|\b(moda\s*)?moca\b|\bmica\b|\bmodenas\b|\bz15\s*?gt\b|\bmoda\b|\bqj\b|\bbenda\b/.test(t)) return 'HQ';
+  // 4) Modenas / QJ Motor / Benda house line → HQ
+  if (/\b(moda\s*)?moca\b|\bmica\b|\bmodenas\b|\bz15\s*?gt\b|\bmoda\b|\bqj\b|\bbenda\b/.test(t)) return 'HQ';
   return '';
 }
 
