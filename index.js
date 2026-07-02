@@ -188,7 +188,7 @@ Rules:
 - TAG FORMAT: staff often add a short tag (as a text message or an image caption) in the order "ORIGIN BRAND (Salesperson)" — e.g. "TIKTOK DM Lambretta (Nabil)" or "TIKTOK DM HQ". When present, the LEADING words are the Origin, the BRAND word is the Brand, and "(Name)" is the salesperson. Use the tag's Origin + Brand for the lead(s); the screenshot/content gives the customer's phone + name. "Tiktok DM HQ" = Origin "Tiktok DM" + Brand "HQ" (HQ is the BRAND, not part of the origin).
 - phone: normalize to Malaysian +60 format, digits only after +60, no spaces. If no phone, use "".
 - interest: ALWAYS capture the specific BIKE MODEL when one is mentioned (e.g. "cbr250","aveta nova 250","africa twin"). If the customer asks the PRICE of a model, set interest to the model + " (pricing)" e.g. "aveta nova 250 (pricing)" — NEVER just "pricing" when a model is named. Only use a bare topic like "pricing" / "loan" when NO model is mentioned at all. If nothing -> "No question". Keep short lowercase.
-- brand: exactly one of HQ, Honda, Lambretta, Thunder, Suzuki, KTM, Zontes. **HQ is a real brand (TM's house brand) — if the tag/data says HQ, use "HQ", NEVER substitute "Suzuki".** If unclear -> "".
+- brand: exactly one of HQ, Honda, Lambretta, Thunder, Suzuki, KTM, Zontes. **HQ is a real brand (TM's house brand) — if the tag/data says HQ, use "HQ", NEVER substitute "Suzuki".** **The Modenas / QJ "Moca" line is HQ — if the model is "moca" / "moda moca" / "mica" / "modenas" / "z15gt" (and no other brand is tagged), set brand to "HQ".** If unclear -> "".
 - origin: identify the lead's SOURCE. MUST be EXACTLY one of: "Tiktok DM", "Tiktok Get Leads", "TIKTOK LIVE (Get leads)", "Ads Tiktok", "Whatsapp", "FB Ads", "FB/IG comments", "Mudah", "On Site Event", "Bike Continent META". Map: a tag starting "TIKTOK DM" OR a TikTok DM/chat-conversation screenshot (@handle, "Message request accepted") -> "Tiktok DM"; the word "Organic" in the data -> "Tiktok Get Leads"; paid TikTok ad OR TikTok lead-form export -> "Ads Tiktok"; WhatsApp chat screenshot -> "Whatsapp"; Facebook lead ad -> "FB Ads"; FB/IG comment -> "FB/IG comments"; Mudah -> "Mudah"; walk-in / showroom / roadshow / event -> "On Site Event".
 - name: the customer's name. For a chat/DM screenshot, use the contact's display name or @handle shown at the top (e.g. "mas.saifuddin"). Else "".
 Return JSON only.`;
@@ -271,12 +271,26 @@ function fileOverrides(name){
   return { assignee, origin, requestedName, brand };
 }
 
+// ---- Model → Brand inference ----
+// Staff often drop just a bike MODEL with no brand word (e.g. "moda moca", "modenas z15gt").
+// Map known models to their brand so the lead still gets a pool + salesman.
+// Modenas / QJ "Moca" line → HQ (Benjamin's decision 2026-07-02).
+const MODEL_BRAND = [
+  [/\b(moda\s*)?moca\b|\bmica\b|\bmodenas\b|\bz15\s*gt\b|\bz15gt\b/i, 'HQ'],
+];
+function brandFromModel(text){
+  const t = (text || '').toLowerCase();
+  for (const [re, brand] of MODEL_BRAND) if (re.test(t)) return brand;
+  return '';
+}
+
 // ---- Assignment (persistent take-turns across drops; resets only on deploy) ----
 const ROT = {};
 function assignLeads(leads, ov, unavail){
   ov = ov || {}; unavail = unavail || new Set();
   return leads.map(l => {
     if (ov.brand) l.brand = ov.brand;   // filename/caption brand wins → fills the gap so the lead gets a pool + salesman
+    if (!l.brand) l.brand = brandFromModel(l.interest || l.name || '');   // no brand word? infer from the bike model (e.g. "moda moca" → HQ)
     let assignee = ov.assignee || '';
     if (!assignee) {
       const [team, pool] = poolForBrand(l.brand);
