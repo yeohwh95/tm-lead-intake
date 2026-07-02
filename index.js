@@ -290,12 +290,13 @@ function brandFromModel(text){
   if (/\bktm\b/.test(t))        return 'KTM';
   if (/\bzontes\b/.test(t))     return 'Zontes';
   if (/\bkawasaki\b|\bkawa\b|\bninja\b/.test(t)) return 'Kawasaki';
-  // 2) Honda model families (model code without the word "honda")
-  if (/\bcbr\d|\bcb\d|\brs150\b|\brs-?x\b|\bwave\b|\bpcx\b|\bvario\b|\badv\s?\d|\bafrica\s?twin\b|\bcrf\b|\brebel\b|\bdax\b|\bmonkey\b|\bex5\b|\bcub\b/.test(t)) return 'Honda';
+  // 2) Honda model families (model code without the word "honda").
+  //    NOTE: CBR is intentionally NOT here — TM's history books ~80% of CBRs (used/trade-in) under HQ, so CBR → HQ below.
+  if (/\bcb\d|\brs\s?150|\brs-?x\b|\bwave\s?\d*|\bpcx\s?\d*|\bvario\s?\d*|\badv\s?\d|\bafrica\s?twin\b|\bcrf\b|\brebel\b|\bdax\b|\bmonkey\b|\bex5\b|\bcub\b/.test(t)) return 'Honda';
   // 3) Lambretta model families (x-series, v-special, g350)
   if (/\bx1[2-5]0\b|\bx250\b|\bx300\b|\bv-?special\b|\bg350\b|\bxpa\b/.test(t)) return 'Lambretta';
-  // 4) Modenas / QJ Motor / Benda house line → HQ
-  if (/\b(moda\s*)?moca\b|\bmica\b|\bmodenas\b|\bz15\s*?gt\b|\bmoda\b|\bqj\b|\bbenda\b/.test(t)) return 'HQ';
+  // 4) Modenas / QJ Motor / Benda house line + CBR (per history) → HQ
+  if (/\bcbr\b|\bcbr\d|\b(moda\s*)?moca\b|\bmica\b|\bmodenas\b|\bz15\s*?gt\b|\bmoda\b|\bqj\b|\bbenda\b/.test(t)) return 'HQ';
   return '';
 }
 
