@@ -11,7 +11,16 @@ WhatsApp lead → AI extract → Lark CRM + notify the assigned salesperson. **L
 webhook → `extract()` → if intake group → AI `aiExtract` (gpt-4o: text / image-vision / PDF / Excel) → `parseLeads` → `assignLeads` → Lark write → **group confirmation card FIRST** → per-salesperson DMs (5s spaced).
 
 ## Assignment = BRAND-driven (`poolForBrand`)
-Honda→Honda pool · HQ/Suzuki→HQ · Lambretta/Thunder→Klang+ShahAlam · KTM/Zontes→ShahAlam. **No brand = no pool = no salesman** (Salesman left blank in Lark). Brand comes from the lead data OR the **filename/caption** (`fileOverrides` forces it — "get lead lambretta.csv" → Lambretta on all rows).
+Honda→Honda pool · Lambretta/Thunder→Klang+ShahAlam · KTM/Zontes→ShahAlam · **HQ/Suzuki/Kawasaki/Aveta/anything-else→HQ pool (catch-all)**. Brand comes from the lead data OR the **filename/caption** (`fileOverrides`) OR — new 2026-07-02 — inferred from the **model** (`brandFromModel`).
+
+## 🧠 Brand auto-detection (2026-07-02 — never leave blank, never ask & wait)
+`brandFromModel(text)` reads the brand off the bike model so a lead ALWAYS gets a brand + pool + salesperson (was: no-brand leads sat blank → bot DM'd the group "what brand?" and waited). Resolution order in `assignLeads`: caption/AI brand → `brandFromModel` → **default HQ**. `VALID_BRANDS` whitelist coerces any off-list value to HQ. **`askMissing` (the "Brand unknown?" group ask) is now effectively dead** — brand is never blank.
+- **PIC rulings (locked 2026-07-02):** `cbr*`→**Honda** · `368*`/zontes→**Zontes** · moca/moda/modenas/qj/benda→**HQ** · `aveta`→**Aveta** (HQ pool) · Honda families (cb#/pcx/vario/wave/rs150/africa twin…)→Honda · x-series/v-special/g350→Lambretta · **non-TM (Suzuki/Kawasaki/Yamaha/Ducati/BMW)→HQ** (dropped from detection so they fall through to the HQ catch-all).
+- **"HQ" is NOT a bike brand** — it's TM's catch-all desk/team that absorbs Suzuki/Kawasaki/Modenas/non-TM. "Brand = HQ" means "handled by HQ team".
+- Two assignment PATHS: (1) WhatsApp bot leads assign here; (2) **TikTok form leads (`Ads Tiktok`)** are written by the TikTok engine and assigned by **`sync.py`** round-robin — they bypass this file. So pool mismatches on TikTok-DM/form leads are EXPECTED (manual grabs / sync.py), NOT bugs.
+
+## 🧹 SLA SWEEP — SLA on EVERY lead, any source (2026-07-02, `69a66cf`)
+`slaSweep()` runs every 3 min: finds Lark rows with a Salesman but **no SLA Assigned At** → DMs the rep → starts the 75-min timer → stamps SLA cols. This covers **TikTok-engine / sync.py / manual** leads (they got a rep but no SLA before — SLA only fired from the WhatsApp bot). Triple-gated + safe: needs `SLA_ON=1` + `SLA_SWEEP=1` + `SLA_SWEEP_FROM` (epoch-ms cutoff, only enrols leads created at/after it → can't touch the ~5,700 historical rows) + `SLA_SWEEP_CAP` (per-run cap), working-hours only. **ON since 2026-07-02** (cutoff 18:49, cap 3; raise cap after watching first live sweep). Kill switch: `SLA_SWEEP=0`.
 
 ## 🗄️ Console message store (reconciliation / backfill goldmine)
 The 8787 console persists EVERY forwarded message per channel:
