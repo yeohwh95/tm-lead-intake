@@ -421,6 +421,56 @@ async function larkUpdateSLA(recordId, fields){
   const tok = await larkToken();
   await fetch(`${LARK_BASE}/bitable/v1/apps/${LARK_APP_TOKEN}/tables/${LARK_TABLE_ID}/records/${recordId}`, { method: 'PUT', headers: { 'Authorization': 'Bearer ' + tok, 'Content-Type': 'application/json' }, body: JSON.stringify({ fields }) });
 }
+
+// ---- SLA SWEEP: enrol EVERY lead in Lark, whatever created it (TikTok engine, sync.py, manual). ----
+// Any row that HAS a salesperson but NO SLA timer yet → DM the rep, start the 75-min clock, stamp SLA cols.
+// Safety: gated by SLA_SWEEP=1, only touches leads created at/after SLA_SWEEP_FROM (epoch-ms), capped per run,
+// working-hours only. This means it can never blast the 5,700 historical rows.
+const STAFF_BY_OPENID = Object.fromEntries(Object.entries(STAFF).map(([name, v]) => [v.openId, { name, phone: v.phone }]));
+const SLA_SWEEP_FROM = parseInt(process.env.SLA_SWEEP_FROM || '0', 10);   // 0 = disabled (no cutoff → never enrol)
+const SLA_SWEEP_CAP  = parseInt(process.env.SLA_SWEEP_CAP  || '15', 10);
+function slaFieldText(v){ if (Array.isArray(v)) return v.map(slaFieldText).join(' '); if (v && typeof v === 'object') return v.text || v.name || ''; return v == null ? '' : String(v); }
+function slaRecCreated(f){ for (const k of ['date created','Created on','Last modified on']){ const n = parseInt(slaFieldText(f[k]), 10); if (n) return n; } return 0; }
+async function larkSearch(body){
+  const tok = await larkToken();
+  const r = await fetch(`${LARK_BASE}/bitable/v1/apps/${LARK_APP_TOKEN}/tables/${LARK_TABLE_ID}/records/search?page_size=100`, { method: 'POST', headers: { 'Authorization': 'Bearer ' + tok, 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  const j = await r.json();
+  if (j.code !== 0) throw new Error('lark search ' + j.code + ' ' + (j.msg || ''));
+  return j.data?.items || [];
+}
+async function slaSweep(){
+  if (!sla || !SLA_SWEEP_FROM) return;             // disabled unless a cutoff is set
+  const now = Date.now();
+  if (!sla.inHours(now)) return;                    // enrol only in working hours (matches the T+0 rule)
+  const items = await larkSearch({
+    filter: { conjunction: 'and', conditions: [
+      { field_name: 'Salesman', operator: 'isNotEmpty', value: [] },
+      { field_name: 'SLA Assigned At', operator: 'isEmpty', value: [] },
+    ]},
+    sort: [{ field_name: 'date created', desc: true }],
+  });
+  let done = 0;
+  for (const it of items){
+    if (done >= SLA_SWEEP_CAP) break;
+    const f = it.fields || {};
+    if (slaRecCreated(f) < SLA_SWEEP_FROM) continue;         // SAFETY: never enrol pre-cutoff (historical) leads
+    const sm = f['Salesman'];
+    const oid = Array.isArray(sm) ? (sm[0]?.id || '') : '';
+    const rep = STAFF_BY_OPENID[oid];
+    if (!rep) continue;                                       // salesperson not in roster / no phone → can't DM, skip
+    const model = slaFieldText(f['Customer want']) || 'No question';
+    const brand = slaFieldText(f['Brand']);
+    const cust  = slaFieldText(f['Phone number']);
+    const digits = cust.replace(/\D/g, '');
+    const dm = [`🔔 *New Lead — ${brand || 'TM Motoworld'}*`, ``, `🎯 Wants: ${model}`, digits ? `👉 https://wa.me/${digits}` : ``, ``, `✅ Reply YES once you have contacted this lead`].filter(Boolean).join('\n');
+    const dmMsgId = await waSend(rep.phone, dm);
+    sla.register(rep.name, rep.phone, [{ recordId: it.record_id, summary: model, brand, custName: '', custPhone: cust }], dmMsgId);
+    try { await larkUpdateSLA(it.record_id, { 'SLA Assigned At': now, 'SLA Original Salesman': rep.name, 'SLA Status': 'Pending', 'SLA Reassign Count': 0 }); }
+    catch (e){ log('sweep SLA-write err', String(e.message || e)); }
+    done++;
+  }
+  if (done) log(`SLA sweep: enrolled ${done} lead(s) (cap ${SLA_SWEEP_CAP})`);
+}
 // ---- SLA: pick the next rep in the brand's region pool (skip current + unavailable) ----
 async function pickNextRep(brand, currentKey, exclude){
   const ex = new Set(exclude && exclude.length ? exclude : [currentKey]);
@@ -439,6 +489,11 @@ if (SLA_ON){
   sla = require('./sla');
   sla.init({ waSend, waDelete, larkUpdateSalesman, larkUpdateSLA, groupNotify: alertReview, pickNextRep, log });
   setInterval(() => { try { sla.tick(); } catch (e) { log('sla tick err', String(e.message||e)); } }, 60 * 1000);
+  // SLA SWEEP — enrol every new Lark lead (any source) into SLA. OFF unless SLA_SWEEP=1 + SLA_SWEEP_FROM set.
+  if (process.env.SLA_SWEEP === '1'){
+    setInterval(() => { slaSweep().catch(e => log('sla sweep err', String(e.message||e))); }, 3 * 60 * 1000);
+    log('🧹 SLA sweep ON — every ' + '3min, from ' + (SLA_SWEEP_FROM || 'DISABLED (no cutoff)') + ', cap ' + SLA_SWEEP_CAP);
+  }
   // AWARENESS: hourly SLA status to the AI Agent group (so we always SEE tracking is working)
   setInterval(async () => {
     try {
