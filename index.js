@@ -52,10 +52,11 @@ const POOLS = {
 function poolForBrand(brand){
   const b = (brand || '').toLowerCase();
   if (b === 'honda') return ['Honda', POOLS.Honda];
-  if (b === 'hq' || b === 'suzuki') return ['HQ', POOLS.HQ];
   if (b === 'lambretta' || b === 'thunder') return ['Klang/Shah Alam', POOLS.KS];
   if (b === 'ktm' || b === 'zontes') return ['Shah Alam', POOLS.ShahAlam];
-  return [null, []];
+  // HQ is TM's catch-all desk — HQ / Suzuki / Kawasaki / any other or unknown brand → HQ pool.
+  // (Never return an empty pool: a lead must always get a salesman, never sit blank waiting.)
+  return ['HQ', POOLS.HQ];
 }
 
 // ---- WaSender send: SERIALIZED + 5s-spaced + retry-on-429 ----
@@ -271,16 +272,30 @@ function fileOverrides(name){
   return { assignee, origin, requestedName, brand };
 }
 
-// ---- Model → Brand inference ----
-// Staff often drop just a bike MODEL with no brand word (e.g. "moda moca", "modenas z15gt").
-// Map known models to their brand so the lead still gets a pool + salesman.
-// Modenas / QJ "Moca" line → HQ (Benjamin's decision 2026-07-02).
-const MODEL_BRAND = [
-  [/\b(moda\s*)?moca\b|\bmica\b|\bmodenas\b|\bz15\s*gt\b|\bz15gt\b/i, 'HQ'],
-];
+// Valid Brand single-select options in Lark (anything else is coerced away so the field never gets junk).
+const VALID_BRANDS = new Set(['HQ','Honda','Lambretta','Thunder','Suzuki','KTM','Zontes','Kawasaki']);
+
+// ---- Model / text → Brand inference ----
+// Staff often drop just a bike MODEL (image caption / Excel cell) with no brand word.
+// Detect the brand from the text so the lead auto-tags + routes without asking the group.
+// Order matters: explicit brand word first, then model families, then the Modenas/QJ house line.
+// Returns '' when nothing matches — the caller then defaults to HQ (TM's catch-all desk).
 function brandFromModel(text){
   const t = (text || '').toLowerCase();
-  for (const [re, brand] of MODEL_BRAND) if (re.test(t)) return brand;
+  // 1) an explicit brand name anywhere in the text
+  if (/\bhonda\b/.test(t))      return 'Honda';
+  if (/\blambretta\b/.test(t))  return 'Lambretta';
+  if (/\bthunder\b/.test(t))    return 'Thunder';
+  if (/\bsuzuki\b/.test(t))     return 'Suzuki';
+  if (/\bktm\b/.test(t))        return 'KTM';
+  if (/\bzontes\b/.test(t))     return 'Zontes';
+  if (/\bkawasaki\b|\bkawa\b|\bninja\b/.test(t)) return 'Kawasaki';
+  // 2) Honda model families (model code without the word "honda")
+  if (/\bcbr\d|\bcb\d|\brs150\b|\brs-?x\b|\bwave\b|\bpcx\b|\bvario\b|\badv\s?\d|\bafrica\s?twin\b|\bcrf\b|\brebel\b|\bdax\b|\bmonkey\b|\bex5\b|\bcub\b/.test(t)) return 'Honda';
+  // 3) Lambretta model families (x-series, v-special, g350)
+  if (/\bx1[2-5]0\b|\bx250\b|\bx300\b|\bv-?special\b|\bg350\b|\bxpa\b/.test(t)) return 'Lambretta';
+  // 4) Modenas / QJ Motor / Benda house line → HQ
+  if (/\b(moda\s*)?moca\b|\bmica\b|\bmodenas\b|\bz15\s*?gt\b|\bmoda\b|\bqj\b|\bbenda\b/.test(t)) return 'HQ';
   return '';
 }
 
@@ -290,7 +305,10 @@ function assignLeads(leads, ov, unavail){
   ov = ov || {}; unavail = unavail || new Set();
   return leads.map(l => {
     if (ov.brand) l.brand = ov.brand;   // filename/caption brand wins → fills the gap so the lead gets a pool + salesman
-    if (!l.brand) l.brand = brandFromModel(l.interest || l.name || '');   // no brand word? infer from the bike model (e.g. "moda moca" → HQ)
+    // Normalize: keep a valid known brand as-is; otherwise infer from the model, then default to HQ.
+    // Guarantees the Brand column is ALWAYS a valid option and never blank → bot keys it straight
+    // into Lark instead of leaving it empty and asking the group to reply.
+    if (!VALID_BRANDS.has(l.brand)) l.brand = brandFromModel(l.interest || l.name || '') || 'HQ';
     let assignee = ov.assignee || '';
     if (!assignee) {
       const [team, pool] = poolForBrand(l.brand);
