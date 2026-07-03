@@ -465,7 +465,7 @@ async function slaSweep(){
     const digits = cust.replace(/\D/g, '');
     const dm = [`🔔 *New Lead — ${brand || 'TM Motoworld'}*`, ``, `🎯 Wants: ${model}`, digits ? `👉 https://wa.me/${digits}` : ``, ``, `✅ Reply YES once you have contacted this lead`].filter(Boolean).join('\n');
     const dmMsgId = await waSend(rep.phone, dm);
-    sla.register(rep.name, rep.phone, [{ recordId: it.record_id, summary: model, brand, custName: '', custPhone: cust }], dmMsgId);
+    sla.register(rep.name, rep.phone, [{ recordId: it.record_id, summary: model, brand, custName: '', custPhone: cust, override: true }], dmMsgId);  // sweep = Salesman already set in Lark (deliberate/manual) → protect from auto-move
     try { await larkUpdateSLA(it.record_id, { 'SLA Assigned At': now, 'SLA Original Salesman': rep.name, 'SLA Status': 'Pending', 'SLA Reassign Count': 0 }); }
     catch (e){ log('sweep SLA-write err', String(e.message || e)); }
     done++;
@@ -690,7 +690,7 @@ async function handle(payload){
           const dmMsgId = await notifyStaff(byStaff[ph], info.screenshotUrl);
           if (sla) {   // T+0: start the SLA timer for this rep's lead(s)
             const grp = byStaff[ph];
-            sla.register(grp[0].assignee, ph, grp.map(l => ({ recordId: l.recordId, summary: l.want, brand: l.brand, custName: l.name, custPhone: l.phone })), dmMsgId);
+            sla.register(grp[0].assignee, ph, grp.map(l => ({ recordId: l.recordId, summary: l.want, brand: l.brand, custName: l.name, custPhone: l.phone, override: l.override })), dmMsgId);
           }
         } catch (e) { log('notify err', String(e.message || e).slice(0, 60)); }
       }

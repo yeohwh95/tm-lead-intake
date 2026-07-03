@@ -84,6 +84,21 @@ sla.init(deps, { now: () => clock });
   ok('reply with nothing pending → noop', trulyNoop && trulyNoop.action === 'noop');
   process.env.SLA_REASSIGN = '1';   // restore for any later tests
 
+  // NAMED-LEAD PROTECTION — reassign ON, but a deliberately-named lead (override) must NOT auto-move.
+  process.env.SLA_REASSIGN = '1';
+  sla.register('Nabil', '+60124164828', [{ recordId: 'rec6', summary: 'X250 (Nabil)', brand: 'Lambretta', custName: 'Aiman', custPhone: '+60111222333', override: true }], 9006);
+  const gc6 = calls.group.length; const snt6 = calls.sent.length;
+  clock += 80 * MIN; await sla.tick();
+  ok('named lead NOT auto-moved (override)', sla._state().reps.Nabil.leads.rec6.status === 'flagged_noreassign' && !sla._state().reps.Ahmad?.leads?.rec6);
+  ok('named lead group-escalated instead', calls.group.slice(gc6).some(t => /named to Nabil/.test(t)));
+
+  // GO-LIVE CUTOFF — a lead assigned BEFORE SLA_REASSIGN_FROM must NOT move even if round-robin.
+  process.env.SLA_REASSIGN_FROM = String(clock + 1000 * MIN);   // cutoff far in the future
+  sla.register('Aso', '+60127674828', [{ recordId: 'rec7', summary: 'old lead', brand: 'Lambretta', custName: 'Old', custPhone: '+60199000111' }], 9007);
+  clock += 80 * MIN; await sla.tick();
+  ok('pre-cutoff lead NOT moved (new-leads-only guard)', sla._state().reps.Aso.leads.rec7.status === 'flagged_noreassign');
+  process.env.SLA_REASSIGN_FROM = '';
+
   // off-hours: register at Sunday → skipped
   let clock2 = Date.UTC(2026, 5, 28, 4, 0, 0); // Sunday 12:00 MYT
   sla.init(deps, { now: () => clock2 });

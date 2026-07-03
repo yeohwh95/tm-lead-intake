@@ -39,7 +39,7 @@ function register(repKey, repPhone, leads, dmMsgId) {
   r.phone = repPhone; r.lids = r.lids || [];
   for (const l of leads) {
     if (r.leads[l.recordId]) continue;
-    r.leads[l.recordId] = { recordId: l.recordId, summary: l.summary, brand: l.brand || '', custName: l.custName || '', custPhone: l.custPhone || '', assignedAt: now(), firstAssignedAt: now(), dmMsgId, status: 'pending', reassignCount: 0, contactedAt: 0 };
+    r.leads[l.recordId] = { recordId: l.recordId, summary: l.summary, brand: l.brand || '', custName: l.custName || '', custPhone: l.custPhone || '', assignedAt: now(), firstAssignedAt: now(), dmMsgId, status: 'pending', reassignCount: 0, contactedAt: 0, override: !!l.override };
   }
   persist();
   (deps.log || console.log)('SLA register:', repKey, '←', leads.length, 'lead(s)');
@@ -90,12 +90,18 @@ async function onReply(fromPhone, text, repHint, fromJid) {
 async function reassignLead(repKey, r, l, reason) {
   l.heldBy = l.heldBy || [];
   if (!l.heldBy.includes(repKey)) l.heldBy.push(repKey);
-  // SAFETY: auto-reassign on no-response is PAUSED unless SLA_REASSIGN=1. (Explicit "pass" always works.)
-  if (reason === 'no_response' && process.env.SLA_REASSIGN !== '1') {
+  // Do NOT auto-move a no-response lead when ANY of these hold (nudge + group-escalate only, never move):
+  //   • globally paused (SLA_REASSIGN !== '1'), OR
+  //   • DELIBERATE (named) assignment — l.override — protect human intent (Benjamin's Option B, 2026-07-03), OR
+  //   • lead predates the go-live cutoff SLA_REASSIGN_FROM — protects old in-flight leads ("new leads only").
+  const REASSIGN_FROM = Number(process.env.SLA_REASSIGN_FROM || 0);
+  const dontMove = process.env.SLA_REASSIGN !== '1' || l.override || (REASSIGN_FROM && l.assignedAt < REASSIGN_FROM);
+  if (reason === 'no_response' && dontMove) {
     l.status = 'flagged_noreassign';
     await slaWrite(l.recordId, { 'SLA Status': 'No-Response' });
-    await safe(deps.groupNotify(`⏰ ${l.custName || l.custPhone} (${l.brand || 'TM'}) — no reply in 75 min. Auto-reassign is PAUSED; ${repKey}, please follow up.`));
-    (deps.log || console.log)('SLA no-response (reassign paused):', l.recordId, repKey);
+    const why = l.override ? `named to ${repKey}` : (process.env.SLA_REASSIGN !== '1' ? 'auto-reassign PAUSED' : 'pre-go-live lead');
+    await safe(deps.groupNotify(`⏰ ${l.custName || l.custPhone} (${l.brand || 'TM'}) — no reply in 75 min (${why}); ${repKey}, please follow up.`));
+    (deps.log || console.log)('SLA no-response (no move):', l.recordId, repKey, l.override ? '[named]' : '');
     return;
   }
   // no-response: escalate after the first reassign (never bounce a customer endlessly)

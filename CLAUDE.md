@@ -58,6 +58,13 @@ The 8787 console persists EVERY forwarded message per channel:
 - **Ephemeral store caveat (Rule 24):** `sla_store.json` is on Render's ephemeral disk → every deploy wipes in-flight leads. So a deploy = clean baseline (past leads "let go"). For durability, rehydrate-from-Lark on startup (TODO).
 - Files: `sla.js` (engine, 18/18 tests in `sla_test.js`) · wiring in `index.js` · `SLA-SPEC.md`.
 
+## 🐛→✅ SLA LATE-ACK bug FIXED 2026-07-03 (`f6b2a2d`)
+**Symptom:** active reps (e.g. Allysa) showed `No-Response` / 0% in Lark even though they replied ✅ — proven by the WhatsApp console screenshot + Render logs (`match noop: … replied but has no pending leads`).
+**Root cause:** `onReply` only acked leads with `status==='pending'`. Once a lead flipped to `flagged_noreassign` (No-Response) at T+75 — or a reply landed in the split-second **before** the lead registered — there was nothing "pending", so the reply was dropped as `noop` and the ack was lost. Reps looked silent when they weren't.
+**Fix (`sla.js`):** a reply now acknowledges any lead in `RECOVERABLE = {pending, flagged_noreassign, skipped_offhours}` (these stay in the store while reassign is paused). Late acks write `SLA Status=Acknowledged` + `Within SLA?=false` + real `Response Time`; logs `SLA late-ack recovered`. Genuinely-silent reps (no reply at all) still stay No-Response. Tests: `sla_test.js` **21/21** (+3 late-ack).
+**Lark backfill (2026-07-03):** reconciled the 15 `No-Response` rows (01–03 Jul) against the reply logs → **flipped 6** to Acknowledged-late (reps who provably replied after receiving: Allysa ×3, Adib, Nabil, Amirul); **kept 9** truly-silent (Azwin ×2, Nazrin ×2, Roy ×3, Fazwan, Syahrin). Backfill scripts in scratchpad (`backfill_plan.py` → `flips.json` → `write_flips.py`).
+**⚠️ Takeaway:** the raw reply log (`✅MATCH ack` / `noop` lines) is the ground truth for "did the rep reply", NOT the `SLA Status` column (which under-counted before this fix). Do NOT turn on `SLA_REASSIGN=1` until enough live acks confirm the fix — else it would yank leads reps actually handled.
+
 ## 🟢 SLA → Lark columns (durable DB, live 2026-07-01)
 Lark ("Lead management" table `tblP12qfzg5jlyZ2`, app `JmtibHNxPal4A5sUepml6LK5gzg`) is now the durable SLA record — no longer only the ephemeral `sla_store.json`. 13 columns, all prefixed `SLA `. Written by:
 - **Assign (T+0)** `larkWriteLead` → `SLA Assigned At`, `SLA Original Salesman`, `SLA Status`=Pending (or Off-hours), `SLA Reassign Count`=0.
