@@ -9,6 +9,9 @@ const NUDGE_MS = 60 * 60 * 1000;       // T+60min summary nudge
 const REASSIGN_MS = 75 * 60 * 1000;    // T+75min reassign
 const HOURS = { startH: 9, endH: 18, days: [1, 2, 3, 4, 5] }; // Mon–Fri 9am–6pm MYT
 const MYT = 8 * 3600 * 1000;
+// Lead states a rep's reply can still acknowledge — includes leads flagged No-Response / skipped
+// off-hours (late ack recovery). Excludes contacted (already acked) and reassigned/escalated (moved on).
+const RECOVERABLE = new Set(['pending', 'flagged_noreassign', 'skipped_offhours']);
 
 let now = () => Date.now();            // overridable in tests
 let deps = {};                          // { waSend, waDelete, larkUpdateSalesman, groupNotify, pickNextRep }
@@ -55,21 +58,30 @@ async function onReply(fromPhone, text, repHint, fromJid) {
     const nameMatch = repHint && String(repHint).toLowerCase() === repKey.toLowerCase();
     if (!lidMatch && !phoneMatch && !nameMatch) continue;
     if (fromJid) { r.lids = r.lids || []; if (!r.lids.includes(fromJid)) r.lids.push(fromJid); }   // LEARN this rep's JID → instant match next time
-    const pending = Object.values(r.leads).filter(l => l.status === 'pending');
-    if (!pending.length) return { repKey, action: 'noop' };   // matched a rep, but nothing waiting (already acked)
+    // A reply acknowledges leads that are still open OR were flagged No-Response / skipped-offhours
+    // while unattended (LATE ACK). Bug fixed 2026-07-03: a reply arriving after the 75-min flag (or in
+    // the split-second before a lead registered) was dropped as "noop", mis-scoring the rep as silent.
+    // flagged_noreassign & skipped_offhours leads stay in r.leads (only deleted on a real reassign,
+    // which is paused), so they can be recovered here.
+    const ackable = Object.values(r.leads).filter(l => RECOVERABLE.has(l.status));
+    if (!ackable.length) return { repKey, action: 'noop' };   // matched a rep, but genuinely nothing to ack
     if (/\bpass\b/i.test(text || '')) {
-      for (const l of pending) {
+      for (const l of ackable) {
         await slaWrite(l.recordId, { 'SLA First Response At': now(), 'SLA Response Action': 'Pass', 'SLA Response Time (min)': mins(now() - l.assignedAt) });
         await reassignLead(repKey, r, l, 'passed');
       }
-      persist(); return { repKey, action: 'pass', count: pending.length };
+      persist(); return { repKey, action: 'pass', count: ackable.length };
     }
-    for (const l of pending) {   // any other message = acknowledged ("Keep")
+    let lateCount = 0;
+    for (const l of ackable) {   // any other message = acknowledged ("Keep")
+      const late = l.status !== 'pending';   // was flagged No-Response / skipped before this reply
+      if (late) lateCount++;
       l.status = 'contacted'; l.contactedAt = now();
       const rt = mins(now() - l.assignedAt), cw = mins(now() - (l.firstAssignedAt || l.assignedAt));
       await slaWrite(l.recordId, { 'SLA First Response At': now(), 'SLA Response Action': 'Keep', 'SLA Status': 'Acknowledged', 'SLA Response Time (min)': rt, 'SLA Customer Wait (min)': cw, 'SLA Within SLA?': rt <= 60 });
+      if (late) (deps.log || console.log)('SLA late-ack recovered:', l.recordId, repKey, `(${rt}min after assign)`);
     }
-    persist(); return { repKey, action: 'ack', count: pending.length };
+    persist(); return { repKey, action: 'ack', count: ackable.length, late: lateCount };
   }
   return null;   // no tracked rep matched this reply
 }

@@ -72,6 +72,18 @@ sla.init(deps, { now: () => clock });
   ok('PASS reassigns immediately', passRes && passRes.action === 'pass' && !sla._state().reps.Jue?.leads?.rec3 && sla._state().reps.Ahmad?.leads?.rec3);
   ok('PASS notified the group', calls.group.slice(gcBefore).some(t => /Passed/.test(t)));
 
+  // LATE-ACK RECOVERY (the 2026-07-03 bug) — reassign PAUSED, lead flags No-Response at 75min,
+  // then the rep replies LATE → must still acknowledge (not drop as noop).
+  process.env.SLA_REASSIGN = '';   // pause auto-reassign (live condition)
+  sla.register('Allysa', '+60123343259', [{ recordId: 'rec5', summary: 'Lambretta X250', brand: 'Lambretta', custName: 'Fara', custPhone: '+60137508882' }], 9005);
+  clock += 80 * MIN; await sla.tick();   // T+80 → flags No-Response (paused, stays in store)
+  ok('paused: lead flagged No-Response (not moved)', sla._state().reps.Allysa.leads.rec5.status === 'flagged_noreassign');
+  const late = await sla.onReply('60123343259', '✅', 'Allysa');
+  ok('LATE reply recovers the flagged lead → ack', late && late.action === 'ack' && late.late === 1 && sla._state().reps.Allysa.leads.rec5.status === 'contacted');
+  const trulyNoop = await sla.onReply('60123343259', '✅', 'Allysa');   // nothing left to ack
+  ok('reply with nothing pending → noop', trulyNoop && trulyNoop.action === 'noop');
+  process.env.SLA_REASSIGN = '1';   // restore for any later tests
+
   // off-hours: register at Sunday → skipped
   let clock2 = Date.UTC(2026, 5, 28, 4, 0, 0); // Sunday 12:00 MYT
   sla.init(deps, { now: () => clock2 });
