@@ -58,6 +58,14 @@ The 8787 console persists EVERY forwarded message per channel:
 - **Ephemeral store caveat (Rule 24):** `sla_store.json` is on Render's ephemeral disk → every deploy wipes in-flight leads. So a deploy = clean baseline (past leads "let go"). For durability, rehydrate-from-Lark on startup (TODO).
 - Files: `sla.js` (engine, 18/18 tests in `sla_test.js`) · wiring in `index.js` · `SLA-SPEC.md`.
 
+## 🚀 AUTO-REASSIGN LIVE from Mon 2026-07-06 9am (`e7e2c23`, env armed 2026-07-03)
+`SLA_REASSIGN=1` + `SLA_REASSIGN_FROM=1783299600000` (Mon 06 Jul 09:00 MYT). `/sla` shows `reassign: ON`, store wiped clean (`tracked:0`). Behaviour:
+- **Round-robin lead**, 75-min no-reply → auto-moves to next region-pool rep (delete DM → DM next → update Lark Salesman → group note). 2nd miss → escalate to manager.
+- **Named/deliberate lead protected** (`override`): WhatsApp caption `(Name)` OR sweep leads (Salesman already set in Lark) → nudged + group-escalated, NEVER auto-moved (Benjamin's Option B, 2026-07-03).
+- **New leads only:** `SLA_REASSIGN_FROM` cutoff → any lead assigned before Mon 9am never moves (protects old in-flight leads even though the store persisted).
+- Weekend/off-hours safe: working-hours gate (Mon–Fri 9–6) means nothing fires until Mon 9am.
+- **Kill switch:** set `SLA_REASSIGN=0` (Render env) + redeploy → back to flag-only. Tests 24/24.
+
 ## 🐛→✅ SLA LATE-ACK bug FIXED 2026-07-03 (`f6b2a2d`)
 **Symptom:** active reps (e.g. Allysa) showed `No-Response` / 0% in Lark even though they replied ✅ — proven by the WhatsApp console screenshot + Render logs (`match noop: … replied but has no pending leads`).
 **Root cause:** `onReply` only acked leads with `status==='pending'`. Once a lead flipped to `flagged_noreassign` (No-Response) at T+75 — or a reply landed in the split-second **before** the lead registered — there was nothing "pending", so the reply was dropped as `noop` and the ack was lost. Reps looked silent when they weren't.
