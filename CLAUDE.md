@@ -54,7 +54,7 @@ The 8787 console persists EVERY forwarded message per channel:
 - **ANY reply from the rep = acknowledged** (not just "YES"). **"pass"** = instant reassign to next region-pool rep. **👍 reactions** also acknowledge.
 - **Reply matching (Rule 23):** rep replies arrive from `@lid` privacy JIDs, so match by `key.cleanedSenderPn` (real phone) → name (pushName→roster) → learned-@lid. `onReply(realPhone, text, repHint, jid)` returns `{repKey, action:'ack'|'pass'}`.
 - **SAFETY: auto-reassign on no-response is PAUSED** unless `SLA_REASSIGN=1` (Render env). While paused, a 75-min no-reply only alerts the group ("please follow up") — never moves the lead. Explicit "pass" still reassigns. Turn ON only after confirming acks work live.
-- **Visibility:** `/sla` endpoint = live JSON (reassign on/off, tracked, byStatus, pending list). **Hourly group status** posted to the AI Agent group (assigned/acknowledged/waiting).
+- **Visibility:** `/sla` endpoint = live JSON (reassign on/off, tracked, byStatus, pending list). **Group summaries at 12:00 + 18:00 MYT** (`digestTick` in index.js) — routine 75-min flags, reassign/pass, AND manager escalations buffer via `digestPush` → `sla_digest.json`, aggregated by rep, NO 1-by-1 spam (Harith's request, 2026-07-06). Per-rep DMs unchanged. (Was: hourly status post — removed.)
 - **Ephemeral store caveat (Rule 24):** `sla_store.json` is on Render's ephemeral disk → every deploy wipes in-flight leads. So a deploy = clean baseline (past leads "let go"). For durability, rehydrate-from-Lark on startup (TODO).
 - Files: `sla.js` (engine, 18/18 tests in `sla_test.js`) · wiring in `index.js` · `SLA-SPEC.md`.
 
