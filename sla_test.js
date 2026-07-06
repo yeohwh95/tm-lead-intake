@@ -13,13 +13,14 @@ let clock = Date.UTC(2026, 5, 29, 2, 0, 0);
 const MIN = 60000;
 
 // mock deps — record calls
-const calls = { sent: [], deleted: [], lark: [], group: [] };
+const calls = { sent: [], deleted: [], lark: [], group: [], digest: [] };
 let msgSeq = 1000;
 const deps = {
   waSend: async (phone, text) => { msgSeq++; calls.sent.push({ phone, text, id: msgSeq }); return msgSeq; },
   waDelete: async (id) => { calls.deleted.push(id); },
   larkUpdateSalesman: async (rec, openId) => { calls.lark.push({ rec, openId }); },
   groupNotify: async (t) => { calls.group.push(t); },
+  digestPush: (ev) => { calls.digest.push(ev); },
   pickNextRep: async (brand, currentKey) => ({ key: 'Ahmad', name: 'Ahmad', phone: '+60111111111', openId: 'ou_ahmad' }),
   log: () => {},
 };
@@ -44,13 +45,13 @@ sla.init(deps, { now: () => clock });
   ok('T+76: summary deleted too', calls.deleted.length === 2);
   ok('T+76: new rep Ahmad DMed', calls.sent.some(s => s.phone === '+60111111111' && /Reassigned Lead/.test(s.text)));
   ok('T+76: Lark Salesman updated', calls.lark.length === 1 && calls.lark[0].openId === 'ou_ahmad');
-  ok('T+76: group notified of reassign', calls.group.some(t => /Reassigned/.test(t)));
+  ok('T+76: reassign buffered for digest', calls.digest.some(e => e.type === 'reassign' && e.reason === 'no_response'));
   ok('T+76: lead moved off Ali', !sla._state().reps.Ali.leads.rec1);
   ok('T+76: lead now under Ahmad, reassignCount=1', sla._state().reps.Ahmad.leads.rec1.reassignCount === 1);
 
   // Ahmad also ignores → T+76 of the new assignment → escalate (2nd miss)
   clock += 76 * MIN; await sla.tick();
-  ok('2nd miss: escalated to manager', calls.group.some(t => /not picked up|Needs a manager/i.test(t)));
+  ok('2nd miss: escalation buffered for digest', calls.digest.some(e => e.type === 'escalate'));
   ok('2nd miss: status escalated', sla._state().reps.Ahmad.leads.rec1.status === 'escalated');
 
   // ACK path — ANY message confirms (not just "yes")
@@ -70,7 +71,7 @@ sla.init(deps, { now: () => clock });
   const gcBefore = calls.group.length;
   const passRes = await sla.onReply('60155556666', 'pass');
   ok('PASS reassigns immediately', passRes && passRes.action === 'pass' && !sla._state().reps.Jue?.leads?.rec3 && sla._state().reps.Ahmad?.leads?.rec3);
-  ok('PASS notified the group', calls.group.slice(gcBefore).some(t => /Passed/.test(t)));
+  ok('PASS buffered for digest', calls.digest.some(e => e.type === 'reassign' && e.reason === 'passed'));
 
   // LATE-ACK RECOVERY (the 2026-07-03 bug) — reassign PAUSED, lead flags No-Response at 75min,
   // then the rep replies LATE → must still acknowledge (not drop as noop).
@@ -90,7 +91,7 @@ sla.init(deps, { now: () => clock });
   const gc6 = calls.group.length; const snt6 = calls.sent.length;
   clock += 80 * MIN; await sla.tick();
   ok('named lead NOT auto-moved (override)', sla._state().reps.Nabil.leads.rec6.status === 'flagged_noreassign' && !sla._state().reps.Ahmad?.leads?.rec6);
-  ok('named lead group-escalated instead', calls.group.slice(gc6).some(t => /named to Nabil/.test(t)));
+  ok('named lead flagged (buffered for digest, not moved)', calls.digest.some(e => e.type === 'flag' && /named to Nabil/.test(e.why)));
 
   // GO-LIVE CUTOFF — a lead assigned BEFORE SLA_REASSIGN_FROM must NOT move even if round-robin.
   process.env.SLA_REASSIGN_FROM = String(clock + 1000 * MIN);   // cutoff far in the future

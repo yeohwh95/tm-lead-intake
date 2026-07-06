@@ -100,7 +100,8 @@ async function reassignLead(repKey, r, l, reason) {
     l.status = 'flagged_noreassign';
     await slaWrite(l.recordId, { 'SLA Status': 'No-Response' });
     const why = l.override ? `named to ${repKey}` : (process.env.SLA_REASSIGN !== '1' ? 'auto-reassign PAUSED' : 'pre-go-live lead');
-    await safe(deps.groupNotify(`⏰ ${l.custName || l.custPhone} (${l.brand || 'TM'}) — no reply in 75 min (${why}); ${repKey}, please follow up.`));
+    // batched into the 12PM/6PM group summary (no more 1-by-1 spam) — rep still got their personal DM
+    if (deps.digestPush) deps.digestPush({ type: 'flag', rep: repKey, who: l.custName || l.custPhone, brand: l.brand || 'TM', why });
     (deps.log || console.log)('SLA no-response (no move):', l.recordId, repKey, l.override ? '[named]' : '');
     return;
   }
@@ -108,19 +109,20 @@ async function reassignLead(repKey, r, l, reason) {
   if (reason === 'no_response' && l.reassignCount >= 1) {
     l.status = 'escalated';
     await slaWrite(l.recordId, { 'SLA Status': 'Escalated', 'SLA Escalated At': now() });
-    await safe(deps.groupNotify(`🚨 *Lead not picked up* — ${l.custName || l.custPhone} (${l.brand || 'TM'}) — no response after reassign. Needs a manager.`));
+    if (deps.digestPush) deps.digestPush({ type: 'escalate', who: l.custName || l.custPhone, brand: l.brand || 'TM', why: 'no response after reassign' });
     return;
   }
   await safe(deps.waDelete(l.dmMsgId));
   if (r.summaryMsgId) { await safe(deps.waDelete(r.summaryMsgId)); r.summaryMsgId = null; }
   const exclude = reason === 'passed' ? l.heldBy : [repKey];   // a passed lead skips everyone who already had it
   const next = await deps.pickNextRep(l.brand, repKey, exclude);
-  if (!next) { l.status = 'escalated'; await slaWrite(l.recordId, { 'SLA Status': 'Escalated', 'SLA Escalated At': now() }); await safe(deps.groupNotify(`🚨 No available rep for ${l.custName || l.custPhone} (${l.brand || 'TM'})${reason === 'passed' ? ' (everyone passed)' : ''}. Needs a manager.`)); return; }
+  if (!next) { l.status = 'escalated'; await slaWrite(l.recordId, { 'SLA Status': 'Escalated', 'SLA Escalated At': now() }); if (deps.digestPush) deps.digestPush({ type: 'escalate', who: l.custName || l.custPhone, brand: l.brand || 'TM', why: reason === 'passed' ? 'everyone passed' : 'no available rep' }); return; }
   const verb = reason === 'passed' ? 'Passed' : 'Reassigned';
   const newMsgId = await safe(deps.waSend(next.phone, `🔔 *${verb} Lead — ${l.brand || 'TM Motoworld'}*\n👤 ${l.custName || '—'}\n🎯 ${l.summary}\n${l.custPhone ? '👉 https://wa.me/' + l.custPhone.replace(/\D/g, '') : ''}\n\n✅ Reply anything once you've contacted them (or *PASS* to hand it over).`));
   await safe(deps.larkUpdateSalesman(l.recordId, next.openId));
   await slaWrite(l.recordId, { 'SLA Status': 'Reassigned', 'SLA Reassigned At': now(), 'SLA Reassigned From': repKey, 'SLA Reassign Count': l.reassignCount + 1 });
-  await safe(deps.groupNotify(`🔄 *${verb}* — ${l.custName || l.custPhone}: ${repKey} → ${next.name}${reason === 'passed' ? ' (rep passed)' : ' (no response 75 min)'}`));
+  // batched into the 12PM/6PM group summary (no more 1-by-1 spam) — both reps still got their personal DMs
+  if (deps.digestPush) deps.digestPush({ type: 'reassign', from: repKey, to: next.name, who: l.custName || l.custPhone, reason });
   delete r.leads[l.recordId];
   const nr = state.reps[next.key] || (state.reps[next.key] = { phone: next.phone, leads: {}, summaryMsgId: null, remindedAt: 0 });
   nr.phone = next.phone;

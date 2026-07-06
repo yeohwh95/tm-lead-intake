@@ -20,6 +20,57 @@ async function alertReview(text){
       body: JSON.stringify({ to: REVIEW_GROUP_JID, text }) });
   } catch (e) { log('alertReview failed', String(e.message||e)); }
 }
+// ---- SLA group digest: buffer routine notices → ONE summary at 12PM + 6PM MYT (no more 1-by-1 spam) ----
+const _fs = require('fs'), _path = require('path');
+const DIGEST_STORE = _path.join(__dirname, 'sla_digest.json');
+let digest = { events: [], sent: {} };
+try { digest = JSON.parse(_fs.readFileSync(DIGEST_STORE, 'utf8')); } catch { /* fresh */ }
+function digestPersist(){ try { _fs.writeFileSync(DIGEST_STORE, JSON.stringify(digest)); } catch {} }
+function digestPush(ev){ digest.events.push({ ...ev, t: Date.now() }); digestPersist(); }
+const MYT_OFF = 8 * 3600 * 1000;
+function mytNow(){ const d = new Date(Date.now() + MYT_OFF); return { date: d.toISOString().slice(0,10), h: d.getUTCHours(), m: d.getUTCMinutes() }; }
+function buildDigest(label, sinceMs){
+  const evs = digest.events.filter(e => e.t >= sinceMs);
+  const flags = evs.filter(e => e.type === 'flag');
+  const moves = evs.filter(e => e.type === 'reassign');
+  const escs  = evs.filter(e => e.type === 'escalate');
+  const s = (typeof sla !== 'undefined' && sla) ? sla.stats() : null;
+  const L = [`📊 *TM SLA — ${label}*  (${mytNow().date})`];
+  if (s) L.push(`🔔 ${s.tracked} assigned · ✅ ${s.byStatus.contacted || 0} acknowledged · ⏳ ${s.pending.length} waiting · auto-reassign *${s.reassign}*`);
+  if (escs.length){
+    L.push('', `🚨 *Needs a manager (${escs.length})* — not picked up:`);
+    escs.slice(0, 10).forEach(e => L.push(`   • ${e.who} (${e.brand}) — ${e.why}`));
+  }
+  if (flags.length){
+    const byRep = {}; flags.forEach(f => { byRep[f.rep] = (byRep[f.rep] || 0) + 1; });
+    L.push('', `⏰ *No reply >75min (${flags.length})* — please follow up:`);
+    Object.entries(byRep).sort((a,b)=>b[1]-a[1]).forEach(([r,n]) => L.push(`   • ${r} — ${n}`));
+  }
+  if (moves.length){
+    const byPair = {}; moves.forEach(m => { const k = `${m.from} → ${m.to}`; byPair[k] = (byPair[k] || 0) + 1; });
+    L.push('', `🔄 *Reassigned / passed (${moves.length})*:`);
+    Object.entries(byPair).sort((a,b)=>b[1]-a[1]).forEach(([k,n]) => L.push(`   • ${k} — ${n}`));
+  }
+  if (!flags.length && !moves.length) L.push('', '✅ No SLA misses this window — all assigned leads acknowledged.');
+  return L.join('\n');
+}
+// checks every 5 min; fires once when it crosses 12:00 and 18:00 MYT (health poller keeps the bot awake)
+function digestTick(){
+  const p = mytNow();
+  const windows = [[12, 'Midday update (9AM–12PM)', 0], [18, 'End-of-day update (12PM–6PM)', 12]];
+  for (const [hr, label, startHr] of windows){
+    const key = `${p.date}:${hr}`;
+    if (p.h === hr && p.m < 15 && !digest.sent[key]){
+      const since = Date.parse(p.date + 'T00:00:00Z') - MYT_OFF + startHr * 3600 * 1000;
+      alertReview(buildDigest(label, since)).catch(e => log('digest send err', String(e.message||e)));
+      digest.sent[key] = true;
+      const cut = Date.now() - 26 * 3600 * 1000;
+      digest.events = digest.events.filter(e => e.t >= cut);
+      for (const k of Object.keys(digest.sent)) if (k < p.date) delete digest.sent[k];
+      digestPersist();
+    }
+  }
+}
 const OPENAI_KEY     = process.env.OPENAI_API_KEY || '';
 const MODEL          = process.env.MODEL || 'gpt-4o';
 const LIVE_LARK      = process.env.LIVE_LARK === '1';   // stays OFF for testing
@@ -488,25 +539,16 @@ const SLA_ON = process.env.SLA_ON === '1';
 let sla = null;
 if (SLA_ON){
   sla = require('./sla');
-  sla.init({ waSend, waDelete, larkUpdateSalesman, larkUpdateSLA, groupNotify: alertReview, pickNextRep, log });
+  sla.init({ waSend, waDelete, larkUpdateSalesman, larkUpdateSLA, groupNotify: alertReview, digestPush, pickNextRep, log });
   setInterval(() => { try { sla.tick(); } catch (e) { log('sla tick err', String(e.message||e)); } }, 60 * 1000);
   // SLA SWEEP — enrol every new Lark lead (any source) into SLA. OFF unless SLA_SWEEP=1 + SLA_SWEEP_FROM set.
   if (process.env.SLA_SWEEP === '1'){
     setInterval(() => { slaSweep().catch(e => log('sla sweep err', String(e.message||e))); }, 3 * 60 * 1000);
     log('🧹 SLA sweep ON — every ' + '3min, from ' + (SLA_SWEEP_FROM || 'DISABLED (no cutoff)') + ', cap ' + SLA_SWEEP_CAP);
   }
-  // AWARENESS: hourly SLA status to the AI Agent group (so we always SEE tracking is working)
-  setInterval(async () => {
-    try {
-      if (!sla.inHours(Date.now())) return;
-      const s = sla.stats();
-      if (!s.tracked) return;   // nothing tracked yet → skip
-      const ack = s.byStatus.contacted || 0, waiting = s.pending.length;
-      const list = s.pending.slice(0, 10).map(p => `• ${p.who} → ${p.rep} (${p.ageMin}m)`).join('\n');
-      await alertReview(`📊 *SLA status* (since last restart)\n🔔 ${s.tracked} assigned · ✅ ${ack} acknowledged · ⏳ ${waiting} waiting${waiting ? ':\n' + list : ''}\n\nauto-reassign: *${s.reassign}*`);
-    } catch (e) { log('sla summary err', String(e.message || e)); }
-  }, 60 * 60 * 1000);
-  log('⏱️ SLA engine ON — reassign ' + (process.env.SLA_REASSIGN === '1' ? 'ON' : 'PAUSED') + ', hourly group status');
+  // GROUP UPDATES: no more 1-by-1 spam — ONE batched summary at 12PM + 6PM MYT (routine flags/reassigns buffered via digestPush)
+  setInterval(() => { try { digestTick(); } catch (e) { log('digest tick err', String(e.message || e)); } }, 5 * 60 * 1000);
+  log('⏱️ SLA engine ON — reassign ' + (process.env.SLA_REASSIGN === '1' ? 'ON' : 'PAUSED') + ', group summary 12PM+6PM');
 }
 
 // ---- Notify the assigned salesperson via TM Motor Marketing WaSender ----
