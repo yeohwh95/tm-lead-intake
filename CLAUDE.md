@@ -7,6 +7,9 @@ WhatsApp lead → AI extract → Lark CRM + notify the assigned salesperson. **L
 - WhatsApp session = WaSender **93210**. Acts ONLY in `INTAKE_GROUP_JID` (`120363410229539926@g.us`); everything else is capture-only.
 - Fan-outs (fire-and-forget, never block lead flow): `INBOX_FORWARD_URL` → 8787 console · `WOO_FORWARD_URL` → `http://66.42.52.89/woo/` (website-upload service).
 
+## ⚠️ `REVIEW_TOKEN` — group-notify sender (fixed 2026-07-10)
+`REVIEW_TOKEN`/`REVIEW_GROUP_JID` drive the SLA digest (12PM/6PM `digestTick`) + the "no lead found" alert, both into "AI Agent Project TM Motoworld". Until 2026-07-10 this was still Benjamin's **personal** PA WaSender token — missed by an earlier same-day sweep that switched the other two TM group-notify flows (`tm-woo-upload` draft-ready ping, `tm-daily-report` cron) because those live on the **VPS**, while this service is on **Render**. Now switched to the TM Marketing token (session 93210), same as everywhere else. **Lesson:** a "switch this token everywhere" sweep must check every hosting platform (Render env vars AND VPS crontab/`.env` files) that references the var name, not just the ones already top-of-mind.
+
 ## Flow
 webhook → `extract()` → if intake group → AI `aiExtract` (gpt-4o: text / image-vision / PDF / Excel) → `parseLeads` → `assignLeads` → Lark write → **group confirmation card FIRST** → per-salesperson DMs (5s spaced).
 
@@ -32,6 +35,13 @@ The 8787 console persists EVERY forwarded message per channel:
 - **Big-file reply** → renderCard sends a COMPACT per-assignee summary when the full card >3900 chars; `waSend` hard-caps text at 4096 (WhatsApp limit — full card was 422'ing → "no reply"/"bot not working").
 - **Group card FIRST**, then staff DMs (was queued behind ~8× 5s DMs → looked dead for ~40s).
 - **Vision fix** → feed OpenAI the WaSender **public URL**, not the local decrypted buffer (buffer was occasionally malformed → GPT returned empty on readable lead screenshots).
+
+## 🐞 FIXED 2026-07-15 — sticker ack silently dropped → Syaza lost her lead
+Syaza acked her 15:46 lead with an "Ok NOTED" **sticker** at 16:04 → `extract()` had no stickerMessage branch → `NO-EXTRACT` → ack never registered → T+75 reassigned to Anis → staff complaint ("ni syaza respon tapi kenapa still pass lead ya?"). Her TEXT ack the day before worked fine. Fix (3 parts):
+1. `extract()` returns `kind:'sticker'` (like reaction) — stickers now ack.
+2. SLA ack gate accepts `'sticker'`.
+3. **Safety net:** ANY unparseable `messages-personal.received` (future unknown msg types) still routes phone/jid → `sla.onReply()` — logged as `✅MATCH ack (UNPARSED msg type — safety net)`. Unreadable ≠ ignorable: an unknown message type must never silently cost a rep her lead.
+Staff SOP to circulate: **no "✅ Noted" reply from the bot = your ack didn't count — send a text.**
 
 ## 🟢 Lead SLA — LIVE 2026-07-01 (gated `SLA_ON=1` in Render env)
 `sla.js` engine + wiring in `index.js`. **Mon–Fri 9 AM–6 PM MYT** (skips outside hours). Per lead:

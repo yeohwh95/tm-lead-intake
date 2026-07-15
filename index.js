@@ -222,6 +222,7 @@ function extract(payload){
   }
   if (text0) return { chatId, sender, kind: 'text', text: text0 };
   if (msg.reactionMessage || rawMsg.reactionMessage) return { chatId, sender, kind: 'reaction', text: '' };   // 👍 reaction = acknowledgement (SLA)
+  if (msg.stickerMessage || rawMsg.stickerMessage) return { chatId, sender, kind: 'sticker', text: '' };      // sticker = acknowledgement too (Syaza "Ok NOTED" sticker, 2026-07-15)
   return null;
 }
 
@@ -632,13 +633,32 @@ async function handle(payload){
   const info = extract(payload);
   if (!info) {
     try { const mm = pickMessages(payload.data || {}); log('NO-EXTRACT event=' + payload.event + ' fromMe=' + (mm.key && mm.key.fromMe) + ' jid=' + (mm.key && mm.key.remoteJid) + ' msgKeys=' + JSON.stringify(Object.keys(unwrap(mm.message || {})))); } catch (e) {}
+    // SAFETY NET: a PERSONAL message the parser can't read must still count as a rep acknowledgement —
+    // an unknown WhatsApp message type must never silently cost a rep her lead (Syaza sticker, 2026-07-15).
+    if (sla && payload.event === 'messages-personal.received') {
+      try {
+        const k = (pickMessages(payload.data || {}).key) || {};
+        if (!k.fromMe) {
+          const realPhone = String(k.cleanedSenderPn || k.senderPn || k.participantPn || '').replace(/\D/g, '');
+          const jid = k.remoteJid || '';
+          const res = await sla.onReply(realPhone, '', '', jid);
+          if (res && res.action === 'ack') {
+            const to = (STAFF[res.repKey] && STAFF[res.repKey].phone) || jid;
+            log('SLA ✅MATCH ack (UNPARSED msg type — safety net): ' + res.repKey + ' acknowledged ' + (res.count || 0) + ' lead(s) [phone=' + realPhone + ' jid=' + jid + ']');
+            await waSend(to, '✅ Noted — thanks! Marked as acknowledged.');
+          } else if (res && res.action === 'noop') {
+            log('SLA ·safety-net noop: ' + res.repKey + ' sent unparsed msg, no pending leads [jid=' + jid + ']');
+          }
+        }
+      } catch (e) { log('SLA safety-net error: ' + (e && e.message)); }
+    }
     return;
   }
   const isGroup = info.chatId.endsWith('@g.us');
   log('inbound', info.kind, 'from', info.sender, 'chat', info.chatId, isGroup ? '(group)' : '(personal)');
   remember({ event: 'inbound', src: info.kind, summary: `chat=${info.chatId} ${isGroup ? 'GROUP' : 'personal'} from=${info.sender}` });
   // SLA: a rep replying YES (personal DM to the TM number) confirms their pending leads.
-  if (sla && !isGroup && (info.kind === 'text' || info.kind === 'image' || info.kind === 'document' || info.kind === 'reaction')) {
+  if (sla && !isGroup && (info.kind === 'text' || info.kind === 'image' || info.kind === 'document' || info.kind === 'reaction' || info.kind === 'sticker')) {
     // The webhook key carries the rep's REAL phone in cleanedSenderPn/senderPn (remoteJid is a @lid privacy id).
     const k = (pickMessages(payload.data || {}).key) || {};
     const realPhone = String(k.cleanedSenderPn || k.senderPn || k.participantPn || '').replace(/\D/g, '')
