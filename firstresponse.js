@@ -19,19 +19,23 @@ const persist = () => { try { fs.writeFileSync(STATE_FILE, JSON.stringify(state)
 const humanTouched = new Set();                   // jids where a HUMAN (fromMe) has spoken since boot
 const buffers = {};                               // jid -> { texts:[], hasImage, phone, timer }
 
+const EVENT_INFO = process.env.FR_EVENT_INFO || 'test ride event kami 17 & 18 July (Jumaat & Sabtu) untuk motor Zontes dan KTM. Boleh walk-in terus, register masa walk-in ya';
+
 // Fitri = TM purchaser (trade-ins go to her — confirmed from staff behavior 2026-07-17)
 const FITRI = { name: 'Fitri', phone: '+60108093259' };
 
 // ---------- classification ----------
 const RE_SELL = /jual\s+motor|nak\s+jual|mahu\s+jual|trade\s?-?in|tukar\s+motor/i;
+const RE_TESTRIDE = /test\s?-?ride|test\s?rode/i;
 const RE_LOAN = /\bloan\b|ansuran|\bepp\b|kad\s+kredit|credit\s+card|pinjaman|bulanan\s+(berapa|brp)|0\s?depo|blacklist|ctos|ccris/i;
 const RE_BIKE = /vstrom|v-?strom|tracer|\bz\s?\d{3}|\bmt-?\s?\d{2}\b|cbr|ninja|\bzx\s?\d|gsx|t-?max|x-?max|n-?max|forza|vulcan|er-?6|rsv4|\btrk\b|tiger|duke|\br\s?2[35]\b|\br15\b|y1[56]|sv\s?650|nk\s?\d|450mt|368g|hunter|dominar|lambretta|vespa|zontes|\bnova\b|aveta|avantiz|\bego\b|lc\s?135|enduro|\bsym\b|versys|brutale|xj6|scrambler|monster|\bcb\s?\d{3}|crf|klx|pcx|vario|\bbeat\b|y15zr|8tt|thunder|moda\b|wmoto|gpx|keeway|scooter|superbike|motor\s+(second|2nd|baru|used)/i;
 const RE_VENDOR_AUTO = /thank you for contacting|welcome to .* (service|customer)|terima kasih kerana menghubungi|saya akan reply|confirmation code|verification code/i;
-const RE_MALAY = /\b(nak|boleh|ada|berapa|brp|tuan|bang|bos|ke|tak|x\s?mau|macam|mcm|saya|kami|harga|jual|beli|lagi|stok|pagi|petang|malam|salam)\b/i;
+const RE_MALAY = /\b(nak|nk|boleh|bleh|ada|berapa|brp|tuan|bang|bos|ke|tak|x\s?mau|macam|mcm|saya|sy|kami|harga|jual|beli|lagi|stok|pagi|petang|malam|salam|tnya|tanya|ape|khabar|kew|ye|dgn|utk|esok|arini)\b/i;
 
 function classify(text, hasImage){
   const t = String(text || '').trim();
   if (RE_VENDOR_AUTO.test(t)) return { cat: 'skip' };
+  if (RE_TESTRIDE.test(t)) return { cat: 'testride' };
   if (RE_SELL.test(t)) return { cat: 'sell' };
   if (RE_LOAN.test(t)) return { cat: 'loan' };
   if (RE_BIKE.test(t)) return { cat: 'product' };
@@ -45,22 +49,24 @@ const isEnglish = t => { const s = String(t || '').trim(); return !RE_MALAY.test
 
 // ---------- reply templates (lifted from the team's own replies; human-feel rules) ----------
 function saMYT(){ const h = new Date(Date.now() + 8 * 3600e3).getUTCHours(); return h < 12 ? 'Selamat pagi' : h < 15 ? 'Selamat tengah hari' : h < 19 ? 'Selamat petang' : 'Selamat malam'; }
-function tpl(cat, lang, want){
+function tpl(cat, lang, card){
   const g = saMYT();
-  if (cat === 'sell') return lang === 'en'
-    ? `Hi! Sure, we do buy & trade-in 👍 Which bike (model, year)? Photos help too. Our purchaser will contact you shortly — or WhatsApp directly: FITRI 010-809 3259 / https://wa.me/60108093259`
-    : `${g} 😊 Boleh tuan. Nak jual/trade-in motor apa ya? Boleh share model, tahun & gambar motor. Purchaser kami akan contact awak sebentar lagi — atau boleh direct WhatsApp: FITRI 010-809 3259 / https://wa.me/60108093259`;
-  if (cat === 'loan') return lang === 'en'
-    ? `Hi! Yes — we offer shop loan, Aeon & 0% credit-card EPP (3/5 years) 👍 Which bike are you looking at? Our salesperson will contact you shortly with the loan details.`
-    : `${g} 😊 Boleh tuan — kami ada loan kedai, Aeon & EPP kad kredit 0% (3/5 tahun). Motor mana tuan berminat ya? Salesman kami akan contact awak sebentar lagi untuk bantu dengan detail loan.`;
+  const c = card ? `\n\n${card.name.toUpperCase()} : ${card.disp}\nhttps://wa.me/${card.digits}` : '';
+  if (cat === 'sell') return (lang === 'en'
+    ? `Hi! Sure, we do buy & trade-in 👍 Which bike (model, year)? Photos help too. Our purchaser will contact you shortly ya`
+    : `${g} 😊 Boleh tuan. Nak jual/trade-in motor apa ya? Boleh share model, tahun & gambar motor. Purchaser kami akan contact awak ya`) + c;
+  if (cat === 'loan') return (lang === 'en'
+    ? `Hi! Yes — we offer shop loan, Aeon & 0% credit-card EPP (3/5 years) 👍 Our salesperson will contact you shortly with the loan details ya`
+    : `${g} 😊 Boleh tuan — kami ada loan kedai, Aeon & EPP kad kredit 0% (3/5 tahun). Salesman kami akan contact awak sebentar lagi untuk detail loan ya`) + c;
+  if (cat === 'testride') return lang === 'en'
+    ? `Hi! 😊 Our ${EVENT_INFO}`
+    : `${g} 😊 Boleh tuan — ${EVENT_INFO}`;
   if (cat === 'greeting') return lang === 'en'
     ? `Hi! 😊 Which bike are you interested in? Feel free to share the model or a screenshot of the ad you saw 👍`
     : `${g} 😊 Ya bos, berminat motor apa ya? Boleh share model atau screenshot iklan yang bos tengok tadi 👍`;
-  // product
-  const w = want ? ` untuk ${want}` : '';
-  return lang === 'en'
-    ? `Hi! Yes — our salesperson will contact you shortly with the details 👍`
-    : `${g} 😊 Ya tuan, boleh — salesman kami akan contact awak sebentar lagi${want ? ` untuk detail ${want}` : ''} ya 👍`;
+  return (lang === 'en'
+    ? `Hi! Yes — our salesperson will contact you shortly to assist ya 👍`
+    : `${g} 😊 Ya tuan, boleh — salesman kami akan contact awak sebentar lagi untuk bantu lebih lanjut ya`) + c;
 }
 
 // ---------- assignment (the point of it all: category confirmed = lead assigned NOW) ----------
@@ -74,7 +80,7 @@ async function assign(cat, jid, phone, wantText){
     try { await D.waSend(FITRI.phone, `🔁 *Trade-in Lead (auto)*\n\n🎯 ${want}\n👉 https://wa.me/${phone.replace(/\D/g,'')}\n\nCustomer dah dapat reply pertama — follow up ya.`); }
     catch(e){ D.log('FR fitri DM err:', String(e.message||e).slice(0,60)); }
     D.log(`FR ✅ SELL lead assigned → Fitri (${phone}) "${want}"`);
-    return;
+    return { name: 'Fitri', digits: '60108093259', disp: '010-8093259' };
   }
   // product / loan → the normal machine: round-robin pool → Lark → salesperson DM → SLA timers
   const unavail = await D.getUnavailable();
@@ -86,9 +92,15 @@ async function assign(cat, jid, phone, wantText){
     if (D.sla && l.staff?.phone) D.sla.register(l.assignee, l.staff.phone, [{ recordId: l.recordId, summary: l.want, brand: l.brand, custName: '', custPhone: phone, override: false }], dmMsgId);
   } catch(e){ D.log('FR notify err:', String(e.message||e).slice(0,60)); }
   D.log(`FR ✅ ${cat.toUpperCase()} lead assigned → ${l.assignee || '(pool empty?)'} (${phone}) "${want}"`);
+  if (l.assignee && l.staff?.phone){
+    const digits = String(l.staff.phone).replace(/\D/g, '');
+    return { name: l.assignee, digits, disp: '0' + digits.slice(2, 4) + '-' + digits.slice(4) };
+  }
+  return null;
 }
 
 // ---------- flow ----------
+const VAGUE = t => !t || t.trim().length < 4 || classify(t, false).cat === 'greeting';
 async function flush(jid){
   const b = buffers[jid]; delete buffers[jid];
   if (!b) return;
@@ -99,21 +111,24 @@ async function flush(jid){
   const lang = isEnglish(text) ? 'en' : 'bm';
 
   if (pend && now - pend.ts < PENDING_MODEL_MS){
-    // they answered our "berminat motor apa?" — WHATEVER it is, the category is confirmed → assign.
+    // they answered our "berminat motor apa?" — category confirmed → assign FIRST, reply with the card.
     delete state.pending[jid]; persist();
+    if (cat === 'testride'){ await D.waSend(jid, tpl('testride', lang)); return; }
     const finalCat = (cat === 'sell' || cat === 'loan') ? cat : 'product';
-    await D.waSend(jid, tpl(finalCat === 'product' ? 'product' : finalCat, lang, cat === 'product' ? text.slice(0, 30) : ''));
-    await assign(finalCat, jid, b.phone, text || '[gambar]');
+    const want = VAGUE(text) && !b.hasImage ? '[ad click — model belum stated, sila probe]' : (text || '[gambar/screenshot iklan]');
+    const card = await assign(finalCat, jid, b.phone, want);
+    await D.waSend(jid, tpl(finalCat, lang, card));
     return;
   }
   if (cat === 'skip') { D.log('FR skip (unclassified/vendor):', jid.slice(0, 20)); return; }
   if (state.greeted[jid] && now - state.greeted[jid] < REGREET_MS) return;   // one touch per 7d
   state.greeted[jid] = now;
 
+  if (cat === 'testride'){ persist(); await D.waSend(jid, tpl('testride', lang)); return; }   // info only — NO assignment (Benjamin)
   if (cat === 'greeting'){ state.pending[jid] = { ts: now }; persist(); await D.waSend(jid, tpl('greeting', lang)); return; }
   persist();
-  await D.waSend(jid, tpl(cat, lang, cat === 'product' && !imageOnly ? text.slice(0, 30) : ''));
-  await assign(cat, jid, b.phone, imageOnly ? '[gambar/screenshot iklan]' : text);
+  const card = await assign(cat, jid, b.phone, imageOnly ? '[gambar/screenshot iklan]' : text);
+  await D.waSend(jid, tpl(cat, lang, card));
 }
 
 function onMessage(info){

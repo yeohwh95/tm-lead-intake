@@ -16,6 +16,7 @@ ok(C('Assalammualaikum. Hi\nTracer merah ni ada lagi ke?') === 'product', 'produ
 ok(C('Salam hai nk tnya nova 200 ad stok dak') === 'product', 'product: nova 200 stok');
 ok(C('hi bole tau harga cash utk xmax?') === 'product', 'product: harga xmax');
 ok(C('Hai nak tanya still available ke Mt25') === 'product', 'product: Mt25 available');
+ok(C('untuk join test ride esok bole walk in atau perlu register dlu arini?') === 'testride', 'testride: walk-in question');
 ok(C('Hai moto ni boleh buat EPP?') === 'loan', 'loan: EPP');
 ok(C('hi ... moda Sporter s loan harga berapa ya?') === 'loan', 'loan: loan harga');
 ok(C('Nak tanya ego avantiz 2026 0 depo berapa yer bulanan') === 'loan', 'loan: 0 depo bulanan');
@@ -35,11 +36,14 @@ ok(C('Assalamualaikum semua. Mari belajar fahami makna Al-Quran m bersama kami d
 ok(fr._isEnglish('Hello! Can I get more info on this?') === true, 'lang: EN prefill');
 ok(fr._isEnglish('nak tanya z800 ada ke') === false, 'lang: BM');
 ok(fr._isEnglish('Hi') === false, 'lang: bare Hi defaults BM (Malaysian audience)');
+ok(fr._isEnglish('hi \n nk tnya') === false, 'lang: short-form Malay (nk tnya) = BM');
 
 // ---- templates carry the handoff + no forbidden patterns ----
-const t1 = fr._tpl('product', 'bm', 'Vstrom 800');
-ok(/salesman kami akan contact/i.test(t1) && /Vstrom 800/.test(t1), 'tpl product BM has handoff + model');
-ok(/FITRI|wa\.me\/60108093259/.test(fr._tpl('sell', 'bm')), 'tpl sell has Fitri contact');
+const t1 = fr._tpl('product', 'bm', { name: 'Azrul', digits: '60102323259', disp: '010-2323259' });
+ok(/salesman kami akan contact/i.test(t1) && /AZRUL : 010-2323259/.test(t1) && /wa\.me\/60102323259/.test(t1), 'tpl product BM has handoff + salesperson card');
+ok(!/untuk detail/i.test(fr._tpl('product', 'bm', null)), 'tpl product no raw-text echo');
+ok(/17 & 18 July/.test(fr._tpl('testride', 'bm')) && /walk-in/.test(fr._tpl('testride', 'bm')), 'tpl testride has event info');
+ok(/FITRI : 010-8093259/.test(fr._tpl('sell', 'bm', { name: 'Fitri', digits: '60108093259', disp: '010-8093259' })), 'tpl sell renders Fitri card');
 ok(/EPP|loan/i.test(fr._tpl('loan', 'en')), 'tpl loan EN mentions financing');
 ok(/berminat motor apa/.test(fr._tpl('greeting', 'bm')), 'tpl greeting asks model');
 
@@ -63,6 +67,7 @@ const wait = ms => new Promise(r => setTimeout(r, ms));
   fr.onMessage({ jid: 'cust1@s.whatsapp.net', phone: '60111111111', kind: 'text', text: 'z900rs' });
   await wait(120);
   ok(assigned.some(a => a.want && /z900rs/i.test(a.want)), 'flow: model answer → Lark lead');
+ok(/ADIB : 017-8869542/.test(sent[sent.length-1].text), 'flow: reply carries assigned salesperson card');
   ok(assigned.some(a => a.sla === 'Adib'), 'flow: SLA registered for Adib');
   ok(dms.length === 1, 'flow: salesperson DM sent');
 
@@ -71,6 +76,12 @@ const wait = ms => new Promise(r => setTimeout(r, ms));
   ok(sent.some(s => /FITRI/i.test(s.text) && s.to === 'cust2@s.whatsapp.net'), 'flow: sell reply w/ Fitri');
   ok(sent.some(s => s.to === '+60108093259' && /Trade-in Lead/.test(s.text)), 'flow: Fitri DM sent');
   ok(assigned.some(a => /TRADE-IN/.test(a.want || '')), 'flow: trade-in Lark record');
+
+  const nAssigned = assigned.length, nSent = sent.length;
+  fr.onMessage({ jid: 'cust3@s.whatsapp.net', phone: '60133333333', kind: 'text', text: 'nak join test ride esok boleh?' });
+  await wait(120);
+  ok(sent.length === nSent + 1 && /17 & 18 July/.test(sent[sent.length-1].text), 'flow: testride reply has event info');
+  ok(assigned.length === nAssigned, 'flow: testride NOT assigned (info only)');
 
   fr.onMessage({ jid: 'staff@s.whatsapp.net', phone: '60123773259', kind: 'text', text: 'z800 ada' });
   await wait(120);
