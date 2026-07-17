@@ -36,6 +36,10 @@ The 8787 console persists EVERY forwarded message per channel:
 - **Group card FIRST**, then staff DMs (was queued behind ~8× 5s DMs → looked dead for ~40s).
 - **Vision fix** → feed OpenAI the WaSender **public URL**, not the local decrypted buffer (buffer was occasionally malformed → GPT returned empty on readable lead screenshots).
 
+## 🟢 FIRST-RESPONSE BOT — LIVE 2026-07-17 (`FIRSTRESPONSE_ON=1`)
+`firstresponse.js` — instant first touch on customer DMs to 93210 (Product / Loan / Trade-in; spec: FIRSTRESPONSE-SPEC.md). **Prime rule (Benjamin): category confirmed = lead ASSIGNED immediately** — Product/Loan → `assignLeads` round-robin → Lark → salesperson DM → SLA timers; Trade-in → Fitri (purchaser 010-8093259) DM + Lark `TRADE-IN:` record. One-touch: bot replies once (greeting flow: ask model → their answer, ANY answer, = assign; 2 touches max) then silent — humans own the chat (fromMe on `messages.upsert` → `markHuman`). 10s debounce aggregates multi-message sends. BM default / EN on real English sentences (bare "Hi" = BM). Guards: staff roster (19 + support numbers, last-9-digit match), vendors/OTP, groups, 447*, one greeting per 7 days. Follow-up nudges PARKED (Benjamin: design later). Test-ride/Service categories PARKED. Kill switch: `FIRSTRESPONSE_ON=0` + redeploy. Tests: `firstresponse_test.js` 36/36 (real inbox messages as fixtures).
+⚠️ `fr_state.json` is on Render's ephemeral disk (same as sla_store) — a deploy wipes greeted/pending state → worst case one duplicate greeting to a recent chat after deploy.
+
 ## 🐞 FIXED 2026-07-15 — sticker ack silently dropped → Syaza lost her lead
 Syaza acked her 15:46 lead with an "Ok NOTED" **sticker** at 16:04 → `extract()` had no stickerMessage branch → `NO-EXTRACT` → ack never registered → T+75 reassigned to Anis → staff complaint ("ni syaza respon tapi kenapa still pass lead ya?"). Her TEXT ack the day before worked fine. Fix (3 parts):
 1. `extract()` returns `kind:'sticker'` (like reaction) — stickers now ack.
