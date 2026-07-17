@@ -542,14 +542,24 @@ if (SLA_ON){
   sla = require('./sla');
   sla.init({ waSend, waDelete, larkUpdateSalesman, larkUpdateSLA, groupNotify: alertReview, digestPush, pickNextRep, log });
   setInterval(() => { try { sla.tick(); } catch (e) { log('sla tick err', String(e.message||e)); } }, 60 * 1000);
-  // SLA SWEEP — enrol every new Lark lead (any source) into SLA. OFF unless SLA_SWEEP=1 + SLA_SWEEP_FROM set.
-  if (process.env.SLA_SWEEP === '1'){
-    setInterval(() => { slaSweep().catch(e => log('sla sweep err', String(e.message||e))); }, 3 * 60 * 1000);
-    log('🧹 SLA sweep ON — every ' + '3min, from ' + (SLA_SWEEP_FROM || 'DISABLED (no cutoff)') + ', cap ' + SLA_SWEEP_CAP);
+}
+// ---- First-response bot wiring (FIRSTRESPONSE_ON=1) — deps injected AFTER sla so it can register SLA timers ----
+const firstresponse = require('./firstresponse');
+{
+  const FR_EXTRA_INTERNAL = new Set(['60162393812','60108093259','60102304152','60123534271','60182907538','601143991899']);
+  const staffLast9 = new Set(Object.values(STAFF).map(s => String(s.phone || '').replace(/\D/g, '').slice(-9)).filter(Boolean));
+  const isStaffPhone = p => { const d = String(p || '').replace(/\D/g, ''); return !!d && (staffLast9.has(d.slice(-9)) || FR_EXTRA_INTERNAL.has(d)); };
+  firstresponse.init({ waSend, assignLeads, larkWriteLead, notifyStaff, sla, getUnavailable, log, isStaffPhone });
+  if (SLA_ON){   // these belong to the SLA engine — keep them gated exactly as before the FR wiring
+    // SLA SWEEP — enrol every new Lark lead (any source) into SLA. OFF unless SLA_SWEEP=1 + SLA_SWEEP_FROM set.
+    if (process.env.SLA_SWEEP === '1'){
+      setInterval(() => { slaSweep().catch(e => log('sla sweep err', String(e.message||e))); }, 3 * 60 * 1000);
+      log('🧹 SLA sweep ON — every ' + '3min, from ' + (SLA_SWEEP_FROM || 'DISABLED (no cutoff)') + ', cap ' + SLA_SWEEP_CAP);
+    }
+    // GROUP UPDATES: no more 1-by-1 spam — ONE batched summary at 12PM + 6PM MYT (routine flags/reassigns buffered via digestPush)
+    setInterval(() => { try { digestTick(); } catch (e) { log('digest tick err', String(e.message || e)); } }, 5 * 60 * 1000);
+    log('⏱️ SLA engine ON — reassign ' + (process.env.SLA_REASSIGN === '1' ? 'ON' : 'PAUSED') + ', group summary 12PM+6PM');
   }
-  // GROUP UPDATES: no more 1-by-1 spam — ONE batched summary at 12PM + 6PM MYT (routine flags/reassigns buffered via digestPush)
-  setInterval(() => { try { digestTick(); } catch (e) { log('digest tick err', String(e.message || e)); } }, 5 * 60 * 1000);
-  log('⏱️ SLA engine ON — reassign ' + (process.env.SLA_REASSIGN === '1' ? 'ON' : 'PAUSED') + ', group summary 12PM+6PM');
 }
 
 // ---- Notify the assigned salesperson via TM Motor Marketing WaSender ----
@@ -629,7 +639,11 @@ async function handle(payload){
   // the console). NEVER process it here: it REPLAYS on session reconnect → duplicate Lark writes +
   // repeat salesperson notifies (the cbr-600 spam, 2026-06-17). Lead processing happens ONLY on the
   // original messages-group.received / messages-personal.received delivery.
-  if (payload.event === 'messages.upsert') return;
+  if (payload.event === 'messages.upsert') {
+    // first-response: a human (or bot) outbound marks the chat as owned — bot stays out of it
+    try { const mm0 = pickMessages(payload.data || {}); if (mm0.key && mm0.key.fromMe) firstresponse.markHuman(mm0.key.remoteJid || ''); } catch {}
+    return;
+  }
   const info = extract(payload);
   if (!info) {
     try { const mm = pickMessages(payload.data || {}); log('NO-EXTRACT event=' + payload.event + ' fromMe=' + (mm.key && mm.key.fromMe) + ' jid=' + (mm.key && mm.key.remoteJid) + ' msgKeys=' + JSON.stringify(Object.keys(unwrap(mm.message || {})))); } catch (e) {}
@@ -672,6 +686,16 @@ async function handle(payload){
     if (res && res.action === 'noop') { log('SLA ·match noop: ' + res.repKey + ' replied but has no pending leads (already acked?) [phone=' + realPhone + ' name=' + repHint + ' jid=' + info.chatId + ']'); }
     else if (!res) { log('SLA ✖NO-MATCH: personal reply not tracked to any rep [phone=' + realPhone + ' name=' + repHint + ' jid=' + info.chatId + ' text="' + String(text).slice(0,40) + '"]'); }
   }
+  // FIRST-RESPONSE BOT (Product/Loan/Trade-in, Benjamin 2026-07-17): instant first touch on
+  // customer DMs — fire-and-forget, never blocks lead flow. Guards live inside the module.
+  if (!isGroup && (info.kind === 'text' || info.kind === 'image')){
+    try {
+      const kfr = (pickMessages(payload.data || {}).key) || {};
+      const phoneFr = String(kfr.cleanedSenderPn || kfr.senderPn || '').replace(/\D/g, '') || (info.chatId.includes('@lid') ? '' : (info.chatId.split('@')[0] || '').replace(/\D/g, ''));
+      firstresponse.onMessage({ jid: info.chatId, phone: phoneFr, kind: info.kind, text: info.kind === 'text' ? info.text : '', caption: info.caption || '' });
+    } catch (e) { log('FR hook err', String(e.message||e)); }
+  }
+
   // SAFETY GATE: only ever act/reply inside the designated intake group.
   if (!INTAKE_GROUP_JID || info.chatId !== INTAKE_GROUP_JID) {
     log('SKIP — not intake group (chat=' + info.chatId + ', intake=' + (INTAKE_GROUP_JID || 'UNSET') + ') — captured only, no reply');
