@@ -492,9 +492,10 @@ async function larkSearch(body){
   return j.data?.items || [];
 }
 async function slaSweep(){
-  if (!sla || !SLA_SWEEP_FROM) return;             // disabled unless a cutoff is set
+  // TEMP DIAGNOSTICS 2026-07-18 (Ads Tiktok rows unswept since 07-16) — remove after root cause
+  if (!sla || !SLA_SWEEP_FROM) { log('sweep-diag: gated off (sla=' + !!sla + ' from=' + SLA_SWEEP_FROM + ')'); return; }
   const now = Date.now();
-  if (!sla.inHours(now)) return;                    // enrol only in working hours (matches the T+0 rule)
+  if (!sla.inHours(now)) { log('sweep-diag: off-hours'); return; }
   const items = await larkSearch({
     filter: { conjunction: 'and', conditions: [
       { field_name: 'Salesman', operator: 'isNotEmpty', value: [] },
@@ -502,15 +503,15 @@ async function slaSweep(){
     ]},
     sort: [{ field_name: 'date created', desc: true }],
   });
-  let done = 0;
+  let done = 0, skipPre = 0, skipRep = 0;
   for (const it of items){
     if (done >= SLA_SWEEP_CAP) break;
     const f = it.fields || {};
-    if (slaRecCreated(f) < SLA_SWEEP_FROM) continue;         // SAFETY: never enrol pre-cutoff (historical) leads
+    if (slaRecCreated(f) < SLA_SWEEP_FROM) { skipPre++; continue; }   // SAFETY: never enrol pre-cutoff (historical) leads
     const sm = f['Salesman'];
     const oid = Array.isArray(sm) ? (sm[0]?.id || '') : '';
     const rep = STAFF_BY_OPENID[oid];
-    if (!rep) continue;                                       // salesperson not in roster / no phone → can't DM, skip
+    if (!rep) { skipRep++; if (skipRep <= 2) log('sweep-diag: no-rep oid=' + String(oid).slice(0,20) + ' smtype=' + typeof sm + (Array.isArray(sm) ? '[array]' : JSON.stringify(sm).slice(0,40))); continue; }
     const model = slaFieldText(f['Customer want']) || 'No question';
     const brand = slaFieldText(f['Brand']);
     const cust  = slaFieldText(f['Phone number']);
@@ -523,6 +524,7 @@ async function slaSweep(){
     done++;
   }
   if (done) log(`SLA sweep: enrolled ${done} lead(s) (cap ${SLA_SWEEP_CAP})`);
+  else log(`sweep-diag: 0 enrolled of ${items.length} candidates (precutoff ${skipPre}, no-rep ${skipRep})`);
 }
 // ---- SLA: pick the next rep in the brand's region pool (skip current + unavailable) ----
 async function pickNextRep(brand, currentKey, exclude){
