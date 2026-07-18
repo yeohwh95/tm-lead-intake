@@ -7,7 +7,9 @@ const STORE = process.env.SLA_STORE || path.join(__dirname, 'sla_store.json');
 
 const NUDGE_MS = 60 * 60 * 1000;       // T+60min summary nudge
 const REASSIGN_MS = 75 * 60 * 1000;    // T+75min reassign
-const HOURS = { startH: 9, endH: 18, days: [1, 2, 3, 4, 5] }; // Mon–Fri 9am–6pm MYT
+// TM operates SATURDAYS too (proven 2026-07-18: 13 TikTok leads + staff active while SLA slept).
+// Days env-configurable: SLA_DAYS="1,2,3,4,5,6" default Mon–Sat; add 0 for Sunday if the team confirms.
+const HOURS = { startH: 9, endH: 18, days: (process.env.SLA_DAYS || '1,2,3,4,5,6').split(',').map(Number) };
 const MYT = 8 * 3600 * 1000;
 // Lead states a rep's reply can still acknowledge — includes leads flagged No-Response / skipped
 // off-hours (late ack recovery). Excludes contacted (already acked) and reassigned/escalated (moved on).
