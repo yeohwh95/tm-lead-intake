@@ -22,6 +22,9 @@ Honda→Honda pool · Lambretta/Thunder→Klang+ShahAlam · KTM/Zontes→ShahAla
 - **"HQ" is NOT a bike brand** — it's TM's catch-all desk/team that absorbs Suzuki/Kawasaki/Modenas/non-TM. "Brand = HQ" means "handled by HQ team".
 - Two assignment PATHS: (1) WhatsApp bot leads assign here; (2) **TikTok form leads (`Ads Tiktok`)** are written by the TikTok engine and assigned by **`sync.py`** round-robin — they bypass this file. So pool mismatches on TikTok-DM/form leads are EXPECTED (manual grabs / sync.py), NOT bugs.
 
+## 📅 FIXED 2026-07-18 — SATURDAY is a working day (SLA_DAYS)
+TM operates Mon–SAT, but `HOURS.days` was Mon–Fri (original spec assumption) → every Saturday the whole SLA layer slept: sweep skipped (13 Ads-Tiktok leads 07-18 had no SLA — Benjamin caught it in Lark), timers/reassigns dormant, FR-bot leads registered as off-hours. Now `SLA_DAYS` env (default `1,2,3,4,5,6`); Sunday stays OFF until the team confirms Sunday ops. Diagnosis trail: sweep worked daily ~09:02 MYT until Thu 07-16, silent after; manual Lark query proved data/roster fine; temp diag logged `off-hours` at Sat 13:14 → calendar, not code. **Lesson: encode the CLIENT'S actual business days, not the spec template's.**
+
 ## 🧹 SLA SWEEP — SLA on EVERY lead, any source (2026-07-02, `69a66cf`)
 `slaSweep()` runs every 3 min: finds Lark rows with a Salesman but **no SLA Assigned At** → DMs the rep → starts the 75-min timer → stamps SLA cols. This covers **TikTok-engine / sync.py / manual** leads (they got a rep but no SLA before — SLA only fired from the WhatsApp bot). Triple-gated + safe: needs `SLA_ON=1` + `SLA_SWEEP=1` + `SLA_SWEEP_FROM` (epoch-ms cutoff, only enrols leads created at/after it → can't touch the ~5,700 historical rows) + `SLA_SWEEP_CAP` (per-run cap), working-hours only. **ON since 2026-07-02** (cutoff 18:49, cap 3; raise cap after watching first live sweep). Kill switch: `SLA_SWEEP=0`.
 
