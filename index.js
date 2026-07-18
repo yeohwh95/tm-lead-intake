@@ -523,7 +523,7 @@ async function slaSweep(){
     done++;
   }
   if (done) log(`SLA sweep: enrolled ${done} lead(s) (cap ${SLA_SWEEP_CAP})`);
-  else if (items.length) log(`SLA sweep: 0 of ${items.length} candidates enrolled (precutoff ${skipPre}, no-rep ${skipRep})`);
+  else if (skipRep) log(`SLA sweep: 0 enrolled — ${skipRep} candidate(s) have a salesperson not in the roster (check STAFF map)`);   // precutoff-only = steady state, stay quiet
 }
 // ---- SLA: pick the next rep in the brand's region pool (skip current + unavailable) ----
 async function pickNextRep(brand, currentKey, exclude){
