@@ -1,7 +1,9 @@
 // First-response bot for the TM Marketing number (93210) — Benjamin approved 2026-07-17.
-// Instant first touch on Product / Loan / Trade-in DMs, then silent — humans own the conversation.
+// Instant first touch on Product / Loan / Trade-in / Test-ride DMs, then silent — humans own the conversation.
 // PRIME DIRECTIVE (Benjamin): the moment a category is confirmed, the lead IS ASSIGNED —
 // no sales opportunity is ever left sitting. Spec: FIRSTRESPONSE-SPEC.md.
+// Test-ride (2026-07-20, Harith): was info-only (17-18 Jul event only) — now assigns like product/loan,
+// reusing the SAME brand→pool routing (it already matches TM's test-ride-by-branch line-up).
 const fs = require('fs');
 const path = require('path');
 
@@ -18,8 +20,6 @@ const persist = () => { try { fs.writeFileSync(STATE_FILE, JSON.stringify(state)
 
 const humanTouched = new Set();                   // jids where a HUMAN (fromMe) has spoken since boot
 const buffers = {};                               // jid -> { texts:[], hasImage, phone, timer }
-
-const EVENT_INFO = process.env.FR_EVENT_INFO || 'test ride event kami 17 & 18 July (Jumaat & Sabtu) untuk motor Zontes dan KTM. Boleh walk-in terus, register masa walk-in ya';
 
 // Fitri = TM purchaser (trade-ins go to her — confirmed from staff behavior 2026-07-17)
 const FITRI = { name: 'Fitri', phone: '+60108093259' };
@@ -64,9 +64,9 @@ function tpl(cat, lang, card, stockLine){
   if (cat === 'loan') return (lang === 'en'
     ? `Hi! Yes — we offer shop loan (${LOAN_SHOP}) & 0% credit-card EPP (${LOAN_EPP} — CIMB EPP not available) 👍 Our salesperson will contact you shortly with the loan details ya`
     : `${g} 😊 Boleh tuan — kami ada loan kedai (${LOAN_SHOP}) & EPP kad kredit 0% (${LOAN_EPP} — EPP CIMB tiada). Salesman kami akan contact awak sebentar lagi untuk detail loan ya`) + c;
-  if (cat === 'testride') return lang === 'en'
-    ? `Hi! 😊 Our ${EVENT_INFO}`
-    : `${g} 😊 Boleh tuan — ${EVENT_INFO}`;
+  if (cat === 'testride') return (lang === 'en'
+    ? `Thank you for your interest in a test ride with us! 😊 Our sales advisor will contact you as soon as possible to help check the model, date, time availability and the test ride process.`
+    : `Terima kasih kerana berminat untuk membuat test ride bersama kami! 😊 Sales advisor kami akan menghubungi anda secepat mungkin untuk membantu semakan model, tarikh, masa yang available dan proses untuk test ride.`) + c;
   if (cat === 'greeting') return lang === 'en'
     ? `Hi! 😊 Which bike are you interested in? Feel free to share the model or a screenshot of the ad you saw 👍`
     : `${g} 😊 Ya bos, berminat motor apa ya? Boleh share model atau screenshot iklan yang bos tengok tadi 👍`;
@@ -107,9 +107,14 @@ async function assign(cat, jid, phone, wantText){
     D.log(`FR ✅ SELL lead assigned → Fitri (${phone}) "${want}"`);
     return { name: 'Fitri', digits: '60108093259', disp: '010-8093259' };
   }
-  // product / loan → the normal machine: round-robin pool → Lark → salesperson DM → SLA timers
+  // product / loan / testride → the normal machine: round-robin pool → Lark → salesperson DM → SLA timers.
+  // Testride reuses the SAME brand→pool routing as product (Zontes→Shah Alam, Lambretta/Thunder→Klang+Shah
+  // Alam, Honda→Honda, anything else→HQ) — this already matches TM's test-ride-by-branch line-up
+  // (Harith, 2026-07-20), so an unrecognised/used-bike model correctly falls through to the HQ catch-all
+  // ("round robin as normal") with zero extra mapping needed.
+  const prefix = cat === 'loan' ? 'LOAN: ' : cat === 'testride' ? 'TESTRIDE: ' : '';
   const unavail = await D.getUnavailable();
-  const enriched = D.assignLeads([{ phone, name: '', interest: (cat === 'loan' ? 'LOAN: ' : '') + want, brand: '' }], { origin: 'WhatsApp Direct' }, unavail);
+  const enriched = D.assignLeads([{ phone, name: '', interest: prefix + want, brand: '' }], { origin: 'WhatsApp Direct' }, unavail);
   const l = enriched[0];
   try { l.recordId = await D.larkWriteLead(l); } catch(e){ D.log('FR lark err:', String(e.message||e).slice(0,60)); }
   try {
@@ -138,8 +143,7 @@ async function flush(jid){
   if (pend && now - pend.ts < PENDING_MODEL_MS){
     // they answered our "berminat motor apa?" — category confirmed → assign FIRST, reply with the card.
     delete state.pending[jid]; persist();
-    if (cat === 'testride'){ await D.waSend(jid, tpl('testride', lang)); return; }
-    const finalCat = (cat === 'sell' || cat === 'loan') ? cat : 'product';
+    const finalCat = (cat === 'sell' || cat === 'loan' || cat === 'testride') ? cat : 'product';
     const want = VAGUE(text) && !b.hasImage ? '[ad click — model belum stated, sila probe]' : (text || '[gambar/screenshot iklan]');
     const stockLine = await stockLineFor(finalCat, text, lang);
     const card = await assign(finalCat, jid, b.phone, want);
@@ -150,7 +154,6 @@ async function flush(jid){
   if (state.greeted[jid] && now - state.greeted[jid] < REGREET_MS) return;   // one touch per 7d
   state.greeted[jid] = now;
 
-  if (cat === 'testride'){ persist(); await D.waSend(jid, tpl('testride', lang)); return; }   // info only — NO assignment (Benjamin)
   if (cat === 'greeting'){ state.pending[jid] = { ts: now }; persist(); await D.waSend(jid, tpl('greeting', lang)); return; }
   persist();
   const stockLine = await stockLineFor(cat, imageOnly ? '' : text, lang);

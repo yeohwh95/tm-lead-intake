@@ -42,7 +42,7 @@ ok(fr._isEnglish('hi \n nk tnya') === false, 'lang: short-form Malay (nk tnya) =
 const t1 = fr._tpl('product', 'bm', { name: 'Azrul', digits: '60102323259', disp: '010-2323259' });
 ok(/sales advisor kami akan menghubungi/i.test(t1) && /AZRUL : 010-2323259/.test(t1) && /wa\.me\/60102323259/.test(t1), 'tpl product BM has handoff + salesperson card (Harith wording, 07-20)');
 ok(!/untuk detail/i.test(fr._tpl('product', 'bm', null)), 'tpl product no raw-text echo');
-ok(/17 & 18 July/.test(fr._tpl('testride', 'bm')) && /walk-in/.test(fr._tpl('testride', 'bm')), 'tpl testride has event info');
+ok(/berminat untuk membuat test ride/i.test(fr._tpl('testride', 'bm', { name: 'Roy', digits: '60103793259', disp: '010-3793259' })), 'tpl testride uses the standing (non-dated) reply + salesperson card');
 ok(/FITRI : 010-8093259/.test(fr._tpl('sell', 'bm', { name: 'Fitri', digits: '60108093259', disp: '010-8093259' })), 'tpl sell renders Fitri card');
 ok(/EPP|loan/i.test(fr._tpl('loan', 'en')), 'tpl loan EN mentions financing');
 ok(/Chailease|JCL|Parkson|BSNC/.test(fr._tpl('loan', 'bm')), 'tpl loan BM lists real shop-loan financiers');
@@ -85,8 +85,9 @@ ok(/ADIB : 017-8869542/.test(sent[sent.length-1].text), 'flow: reply carries ass
   const nAssigned = assigned.length, nSent = sent.length;
   fr.onMessage({ jid: 'cust3@s.whatsapp.net', phone: '60133333333', kind: 'text', text: 'nak join test ride esok boleh?' });
   await wait(120);
-  ok(sent.length === nSent + 1 && /17 & 18 July/.test(sent[sent.length-1].text), 'flow: testride reply has event info');
-  ok(assigned.length === nAssigned, 'flow: testride NOT assigned (info only)');
+  ok(sent.length === nSent + 1 && /berminat untuk membuat test ride/i.test(sent[sent.length-1].text), 'flow: testride reply uses standing message');
+  ok(assigned.length > nAssigned, 'flow: testride IS assigned (2026-07-20 — no longer info-only)');
+  ok(assigned.some(a => a.want && /^TESTRIDE: /.test(a.want)), 'flow: testride Lark record prefixed so brandFromModel still sees the model + staff know it is a test-ride lead');
 
   fr.onMessage({ jid: 'staff@s.whatsapp.net', phone: '60123773259', kind: 'text', text: 'z800 ada' });
   await wait(120);
