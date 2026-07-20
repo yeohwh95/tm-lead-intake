@@ -49,15 +49,21 @@ const isEnglish = t => { const s = String(t || '').trim(); return !RE_MALAY.test
 
 // ---------- reply templates (lifted from the team's own replies; human-feel rules) ----------
 function saMYT(){ const h = new Date(Date.now() + 8 * 3600e3).getUTCHours(); return h < 12 ? 'Selamat pagi' : h < 15 ? 'Selamat tengah hari' : h < 19 ? 'Selamat petang' : 'Selamat malam'; }
-function tpl(cat, lang, card){
+// financiers, kept in one place so the wording stays in sync across BM/EN (Harith feedback 2026-07-20:
+// bot must state actual providers, not a vague "Aeon & EPP" — and CIMB EPP does NOT exist)
+const LOAN_SHOP = 'Aeon Credit, Chailease, JCL, Parkson, BSNC';
+const LOAN_EPP  = 'Maybank, Public Bank, UOB, RHB, OCBC, Affin, AmBank, HLB, Alliance Bank, HSBC, Standard Chartered, BSN & AEON Credit Card';
+
+function tpl(cat, lang, card, stockLine){
   const g = saMYT();
   const c = card ? `\n\n${card.name.toUpperCase()} : ${card.disp}\nhttps://wa.me/${card.digits}` : '';
+  const s = stockLine ? `\n\n${stockLine}` : '';
   if (cat === 'sell') return (lang === 'en'
     ? `Hi! Sure, we do buy & trade-in 👍 Which bike (model, year)? Photos help too. Our purchaser will contact you shortly ya`
     : `${g} 😊 Boleh tuan. Nak jual/trade-in motor apa ya? Boleh share model, tahun & gambar motor. Purchaser kami akan contact awak ya`) + c;
   if (cat === 'loan') return (lang === 'en'
-    ? `Hi! Yes — we offer shop loan, Aeon & 0% credit-card EPP (3/5 years) 👍 Our salesperson will contact you shortly with the loan details ya`
-    : `${g} 😊 Boleh tuan — kami ada loan kedai, Aeon & EPP kad kredit 0% (3/5 tahun). Salesman kami akan contact awak sebentar lagi untuk detail loan ya`) + c;
+    ? `Hi! Yes — we offer shop loan (${LOAN_SHOP}) & 0% credit-card EPP (${LOAN_EPP} — CIMB EPP not available) 👍 Our salesperson will contact you shortly with the loan details ya`
+    : `${g} 😊 Boleh tuan — kami ada loan kedai (${LOAN_SHOP}) & EPP kad kredit 0% (${LOAN_EPP} — EPP CIMB tiada). Salesman kami akan contact awak sebentar lagi untuk detail loan ya`) + c;
   if (cat === 'testride') return lang === 'en'
     ? `Hi! 😊 Our ${EVENT_INFO}`
     : `${g} 😊 Boleh tuan — ${EVENT_INFO}`;
@@ -65,8 +71,27 @@ function tpl(cat, lang, card){
     ? `Hi! 😊 Which bike are you interested in? Feel free to share the model or a screenshot of the ad you saw 👍`
     : `${g} 😊 Ya bos, berminat motor apa ya? Boleh share model atau screenshot iklan yang bos tengok tadi 👍`;
   return (lang === 'en'
-    ? `Hi! Yes — our salesperson will contact you shortly to assist ya 👍`
-    : `${g} 😊 Ya tuan, boleh — salesman kami akan contact awak sebentar lagi untuk bantu lebih lanjut ya`) + c;
+    ? `Thank you for contacting us. 😊 Your message has been received. Our sales advisor will contact you shortly to help answer your questions.`
+    : `Terima kasih kerana menghubungi kami. 😊 Mesej anda telah diterima. Sales advisor kami akan menghubungi anda dalam masa terdekat untuk membantu menjawab pertanyaan anda.`) + s + c;
+}
+
+// ---------- stock check (Harith feedback: check real WooCommerce stock before answering
+// a product/stock question, instead of always assuming yes or staying silent on it) ----------
+async function stockLineFor(cat, text, lang){
+  if (cat !== 'product' || !text || !RE_BIKE.test(text) || !D.wooCheckStock) return '';
+  let r = null;
+  try { r = await D.wooCheckStock(text); } catch(e){ D.log && D.log('FR stock err:', String(e.message||e).slice(0,60)); }
+  if (!r) return '';   // not configured / lookup failed → skip silently, never block the reply
+  if (r.matches && r.matches.length){
+    const prices = r.matches.map(m => m.price).filter(p => p > 0);
+    const price = prices.length ? Math.min(...prices) : 0;
+    return lang === 'en'
+      ? (price ? `✅ Yes, we have stock — from RM ${price.toLocaleString()}.` : `✅ Yes, we have stock available.`)
+      : (price ? `✅ Ada, stok tersedia — dari RM ${price.toLocaleString()}.` : `✅ Ada, stok tersedia.`);
+  }
+  return lang === 'en'
+    ? `⚠️ That exact model isn't in stock right now, but we have other units — our salesperson can suggest alternatives.`
+    : `⚠️ Buat masa ni takde stok untuk model tu, tapi kami ada unit lain — salesman boleh cadangkan pilihan lain ya.`;
 }
 
 // ---------- assignment (the point of it all: category confirmed = lead assigned NOW) ----------
@@ -116,8 +141,9 @@ async function flush(jid){
     if (cat === 'testride'){ await D.waSend(jid, tpl('testride', lang)); return; }
     const finalCat = (cat === 'sell' || cat === 'loan') ? cat : 'product';
     const want = VAGUE(text) && !b.hasImage ? '[ad click — model belum stated, sila probe]' : (text || '[gambar/screenshot iklan]');
+    const stockLine = await stockLineFor(finalCat, text, lang);
     const card = await assign(finalCat, jid, b.phone, want);
-    await D.waSend(jid, tpl(finalCat, lang, card));
+    await D.waSend(jid, tpl(finalCat, lang, card, stockLine));
     return;
   }
   if (cat === 'skip') { D.log('FR skip (unclassified/vendor):', jid.slice(0, 20)); return; }
@@ -127,8 +153,9 @@ async function flush(jid){
   if (cat === 'testride'){ persist(); await D.waSend(jid, tpl('testride', lang)); return; }   // info only — NO assignment (Benjamin)
   if (cat === 'greeting'){ state.pending[jid] = { ts: now }; persist(); await D.waSend(jid, tpl('greeting', lang)); return; }
   persist();
+  const stockLine = await stockLineFor(cat, imageOnly ? '' : text, lang);
   const card = await assign(cat, jid, b.phone, imageOnly ? '[gambar/screenshot iklan]' : text);
-  await D.waSend(jid, tpl(cat, lang, card));
+  await D.waSend(jid, tpl(cat, lang, card, stockLine));
 }
 
 function onMessage(info){

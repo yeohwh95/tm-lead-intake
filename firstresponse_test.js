@@ -40,12 +40,16 @@ ok(fr._isEnglish('hi \n nk tnya') === false, 'lang: short-form Malay (nk tnya) =
 
 // ---- templates carry the handoff + no forbidden patterns ----
 const t1 = fr._tpl('product', 'bm', { name: 'Azrul', digits: '60102323259', disp: '010-2323259' });
-ok(/salesman kami akan contact/i.test(t1) && /AZRUL : 010-2323259/.test(t1) && /wa\.me\/60102323259/.test(t1), 'tpl product BM has handoff + salesperson card');
+ok(/sales advisor kami akan menghubungi/i.test(t1) && /AZRUL : 010-2323259/.test(t1) && /wa\.me\/60102323259/.test(t1), 'tpl product BM has handoff + salesperson card (Harith wording, 07-20)');
 ok(!/untuk detail/i.test(fr._tpl('product', 'bm', null)), 'tpl product no raw-text echo');
 ok(/17 & 18 July/.test(fr._tpl('testride', 'bm')) && /walk-in/.test(fr._tpl('testride', 'bm')), 'tpl testride has event info');
 ok(/FITRI : 010-8093259/.test(fr._tpl('sell', 'bm', { name: 'Fitri', digits: '60108093259', disp: '010-8093259' })), 'tpl sell renders Fitri card');
 ok(/EPP|loan/i.test(fr._tpl('loan', 'en')), 'tpl loan EN mentions financing');
+ok(/Chailease|JCL|Parkson|BSNC/.test(fr._tpl('loan', 'bm')), 'tpl loan BM lists real shop-loan financiers');
+ok(/EPP CIMB tiada/i.test(fr._tpl('loan', 'bm')) && /CIMB EPP not available/i.test(fr._tpl('loan', 'en')), 'tpl loan states CIMB EPP unavailable (Harith feedback 07-20)');
+ok(/Alliance Bank|Standard Chartered/.test(fr._tpl('loan', 'bm')), 'tpl loan BM lists real EPP bank list');
 ok(/berminat motor apa/.test(fr._tpl('greeting', 'bm')), 'tpl greeting asks model');
+ok(fr._tpl('product', 'bm', null, '✅ Ada, stok tersedia — dari RM 12,800.').includes('✅ Ada, stok tersedia'), 'tpl product carries stock line when provided');
 
 // ---- flow: greeting → model answer assigns; sell assigns to Fitri; staff ignored ----
 const sent = [], assigned = [], dms = [];
@@ -58,6 +62,7 @@ fr.init({
   getUnavailable: async () => new Set(),
   log: () => {},
   isStaffPhone: p => String(p).endsWith('123773259'),
+  wooCheckStock: async (q) => /vulcan/i.test(q) ? { matches: [{ name: 'Kawasaki Vulcan S', price: 12800 }] } : { matches: [] },
 });
 const wait = ms => new Promise(r => setTimeout(r, ms));
 (async () => {
@@ -92,6 +97,18 @@ ok(/ADIB : 017-8869542/.test(sent[sent.length-1].text), 'flow: reply carries ass
   fr.onMessage({ jid: 'cust2@s.whatsapp.net', phone: '60122222222', kind: 'text', text: 'hello?' });
   await wait(120);
   ok(sent.length === n, 'flow: one-touch — no second reply to cust2');
+
+  // stock check (Harith feedback 07-20): product question w/ real WooCommerce match → reply states stock
+  fr.onMessage({ jid: 'cust4@s.whatsapp.net', phone: '60144444444', kind: 'text', text: 'vulcan ada stok tak' });
+  await wait(120);
+  ok(/Ada, stok tersedia.*RM 12,800/.test(sent[sent.length - 1].text), 'flow: stock check reports real WooCommerce stock');
+
+  // stock check: product question w/ NO WooCommerce match → reply says out of stock, still assigns lead
+  const nAssigned2 = assigned.length;
+  fr.onMessage({ jid: 'cust5@s.whatsapp.net', phone: '60155555555', kind: 'text', text: 'ninja 250 ada ke' });
+  await wait(120);
+  ok(/takde stok untuk model tu/.test(sent[sent.length - 1].text), 'flow: stock check reports out-of-stock');
+  ok(assigned.length > nAssigned2, 'flow: out-of-stock model still assigns the lead');
 
   console.log(`\n${pass} passed, ${fail} failed`);
   process.exit(fail ? 1 : 0);

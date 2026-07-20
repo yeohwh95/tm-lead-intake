@@ -88,6 +88,31 @@ const INBOX_FORWARD_SECRET = process.env.INBOX_FORWARD_SECRET || '';
 // Fire-and-forget; the woo service itself filters to the HQ Mudah group. Never blocks lead flow.
 const WOO_FORWARD_URL = process.env.WOO_FORWARD_URL || '';
 
+// Live stock lookup (Harith feedback 2026-07-20: FR bot must check real stock before answering
+// a stock-availability question, instead of always assuming "yes" / staying silent on it).
+const WOO_SITE    = process.env.WOO_SITE || '';       // e.g. https://tmmotoworld.com
+const WOO_USER    = process.env.WOO_USER || '';
+const WOO_APP_PW  = process.env.WOO_APP_PW || '';
+async function wooCheckStock(query){
+  if (!WOO_SITE || !WOO_USER || !WOO_APP_PW) return null;   // not configured — caller must skip silently
+  const q = String(query || '').replace(/[^\w\s.-]/g, ' ').trim().slice(0, 60);
+  if (!q) return null;
+  const auth = 'Basic ' + Buffer.from(`${WOO_USER}:${WOO_APP_PW}`).toString('base64');
+  const url = `${WOO_SITE}/wp-json/wc/v3/products?search=${encodeURIComponent(q)}&status=publish&per_page=5`;
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 4000);
+  try {
+    const r = await fetch(url, { headers: { Authorization: auth }, signal: ctrl.signal });
+    if (!r.ok) return null;
+    const items = await r.json();
+    const matches = (Array.isArray(items) ? items : [])
+      .filter(p => p.stock_status !== 'outofstock')
+      .map(p => ({ name: p.name, price: Number(p.price || p.regular_price || 0) }));
+    return { matches };
+  } catch (e) { log('wooCheckStock err:', String(e.message || e).slice(0, 80)); return null; }
+  finally { clearTimeout(timer); }
+}
+
 const recent = [];                 // in-memory debug log (wiped on restart)
 const SEEN = new Set();             // processed message ids (webhook-retry dedup)
 function log(...a){ console.log(new Date().toISOString(), ...a); }
@@ -550,7 +575,7 @@ const firstresponse = require('./firstresponse');
   const FR_EXTRA_INTERNAL = new Set(['60162393812','60108093259','60102304152','60123534271','60182907538','601143991899']);
   const staffLast9 = new Set(Object.values(STAFF).map(s => String(s.phone || '').replace(/\D/g, '').slice(-9)).filter(Boolean));
   const isStaffPhone = p => { const d = String(p || '').replace(/\D/g, ''); return !!d && (staffLast9.has(d.slice(-9)) || FR_EXTRA_INTERNAL.has(d)); };
-  firstresponse.init({ waSend, assignLeads, larkWriteLead, notifyStaff, sla, getUnavailable, log, isStaffPhone });
+  firstresponse.init({ waSend, assignLeads, larkWriteLead, notifyStaff, sla, getUnavailable, log, isStaffPhone, wooCheckStock });
   if (SLA_ON){   // these belong to the SLA engine — keep them gated exactly as before the FR wiring
     // SLA SWEEP — enrol every new Lark lead (any source) into SLA. OFF unless SLA_SWEEP=1 + SLA_SWEEP_FROM set.
     if (process.env.SLA_SWEEP === '1'){
