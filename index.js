@@ -923,23 +923,32 @@ async function handle(payload){
       // safe and fully assigned even though the WhatsApp notify below may be staggered.
       for (const l of enriched) { try { l.recordId = await larkWriteLead(l); } catch (e) { l.larkErr = String(e.message || e).slice(0, 60); log('lark write err', l.larkErr); } }
     }
-    // GROUP confirmation FIRST → instant feedback in the group, BEFORE the per-salesperson DMs queue (5s each)
-    await waSend(info.chatId, renderCard(src, enriched, LIVE_LARK));
-    if (enriched.length <= 3) await askMissing(info.chatId, enriched);   // ❓ small drop with blank Brand → ask the group (Option A)
+    // GROUP confirmation: in BULK mode this is the bulk message ONLY (below) — the normal
+    // renderCard() claims "salesperson notified" + tallies EVERY lead's assignee, which was
+    // misleading (2026-07-21 incident: card said "21 leads notified, Nazrin/Aso/Roy 7 each"
+    // when only the first 15 had actually been sent to WhatsApp — the other 6 were still
+    // queued). One accurate message per event instead of two conflicting ones.
+    const isBulk = enriched.length > BULK_THRESHOLD;
+    if (!isBulk) {
+      await waSend(info.chatId, renderCard(src, enriched, LIVE_LARK));
+      if (enriched.length <= 3) await askMissing(info.chatId, enriched);   // ❓ small drop with blank Brand → ask the group (Option A)
+    }
     if (LIVE_LARK) {
-      if (enriched.length > BULK_THRESHOLD) {
+      if (isBulk) {
         // BULK MODE: notify + start SLA timers for only the first batch now; queue the rest to
         // trickle out automatically in later batches (drainBulkQueue, business-hours only).
         const batches = chunk(enriched, BULK_BATCH_SIZE);
         await notifyBatch(batches[0], info.screenshotUrl);
         const rest = batches.slice(1);
+        const drainsPerDay = Math.max(1, Math.floor(9 / (BULK_DRAIN_MS / 3600000)));   // working day ≈ 9h (9am-6pm)
+        const drainHrs = Math.round(BULK_DRAIN_MS / 3600000);
         if (rest.length) {
           bulkQueue.push({ chatId: info.chatId, screenshotUrl: info.screenshotUrl || '', total: enriched.length, sent: batches[0].length, batches: rest });
           bulkPersist();
-          const drainsPerDay = Math.max(1, Math.floor(9 / (BULK_DRAIN_MS / 3600000)));   // working day ≈ 9h (9am-6pm)
           const days = Math.ceil(rest.length / drainsPerDay);
-          const drainHrs = Math.round(BULK_DRAIN_MS / 3600000);
           await waSend(info.chatId, `📦 *Bulk batch detected* — ${enriched.length} leads, all saved to Lark now.\nFirst ${batches[0].length} assigned & sales team notified.\nRemaining ${enriched.length - batches[0].length} will go out in batches of ${BULK_BATCH_SIZE} every ~${drainHrs}h during working hours (~${days} working day${days > 1 ? 's' : ''}) — I'll post progress here as each batch goes.`);
+        } else {
+          await waSend(info.chatId, `📦 *Bulk batch detected* — ${enriched.length} leads, all saved to Lark + assigned & sales team notified now (fit in one batch).`);
         }
       } else {
         await notifyBatch(enriched, info.screenshotUrl);

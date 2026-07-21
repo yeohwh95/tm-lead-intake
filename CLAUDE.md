@@ -23,6 +23,10 @@ Harith dropped the real test-ride Excel with caption "shah alam + hq" expecting 
 3. A third contributing factor (not a bug): Amirul was marked unavailable in the Lark sheet at the time (`availability refreshed — OFF: amir, azwin, amirul, bella`), so the 21 leads split 7/7/7 across the 3 remaining ShahAlam reps — working as designed.
 ⚠️ **Operational note:** the first 21 leads from that drop are ALREADY in Lark + already notified to Nazrin/Aso/Roy. If staff re-send the same Excel now that the fix is live, those 21 rows will be re-extracted and re-assigned as NEW duplicate leads (no dedup-by-phone exists). Staff should mark those rows done / remove them from the file before re-dropping it, not just resend as-is.
 
+## 🐛→✅ FIXED 2026-07-21 (same incident) — confirmation card claimed ALL leads were notified when only the first batch was
+Benjamin caught it: the group card said "✅ 21 LEADS — saved to Lark + salesperson notified" with a full tally (Nazrin:7, Aso:7, Roy:7) even though only the FIRST 15 had actually been sent to WhatsApp at that point — the other 6 were still sitting queued for the next drain. Root cause: `renderCard()` always ran BEFORE the bulk-mode branch decided how many leads to actually notify, so its "notified" claim and per-assignee tally covered the FULL enriched list regardless of what bulk mode was about to do.
+**Fix:** in bulk mode (`enriched.length > BULK_THRESHOLD`), `renderCard()` is skipped entirely — the "📦 Bulk batch detected" message (which already correctly said "first 15 assigned... remaining 6 queued") is now the ONLY group confirmation for that event, so there's one accurate message instead of two conflicting ones. Non-bulk drops are unchanged.
+
 ## Where it runs
 - **Render** `srv-d8oft4ho3t8c73dkmpng` (acct `tea-d81kknkdirrc73a46jlg`, key in memory `reference_render_new_account.md`). Auto-deploys on push to `main` (github `yeohwh95/tm-lead-intake`).
 - WhatsApp session = WaSender **93210**. Acts ONLY in `INTAKE_GROUP_JID` (`120363410229539926@g.us`); everything else is capture-only.
