@@ -24,6 +24,8 @@ ok(C('hi nak tanya pembelian motor menggunakan epp kad kredit') === 'loan', 'loa
 ok(C('Boleh trade in kalo utang belum habis') === 'sell', 'sell: trade in');
 ok(C('hi nk tanya saya nak jual motor vespa sprint 150') === 'sell', 'sell: nak jual (beats product kw)');
 ok(C('Hi, saya dari website TMM dan saya mahu jual motor.') === 'sell', 'sell: mahu jual');
+ok(C('Boss SYM V3i kalau mau jual ambil?') === 'sell', 'sell: mau jual (2026-07-21 Amir chat — was misclassified product/no-stock)');
+ok(C('boss nak tanya moto still under loan aeon boleh jual ke dekat kedai you?') === 'sell', 'sell: boleh jual (2026-07-21 Fazwan chat — was misclassified loan)');
 ok(C('Hi') === 'greeting', 'greeting: Hi');
 ok(C('salam') === 'greeting', 'greeting: salam');
 ok(C('Hello! Can I get more info on this?') === 'greeting', 'greeting: Mudah ad-click prefill');

@@ -93,9 +93,14 @@ const WOO_FORWARD_URL = process.env.WOO_FORWARD_URL || '';
 const WOO_SITE    = process.env.WOO_SITE || '';       // e.g. https://tmmotoworld.com
 const WOO_USER    = process.env.WOO_USER || '';
 const WOO_APP_PW  = process.env.WOO_APP_PW || '';
+// WooCommerce's product search is a literal phrase match — chat filler words in the query
+// (customer text like "hi...gpx 250 ada lagi?") make it match NOTHING even when the bare model
+// name ("gpx 250") matches fine. Strip conversational filler before querying (Benjamin 2026-07-21:
+// GPX 250 was in stock on the site but the bot told the customer "takde stok").
+const WOO_STOPWORDS = /\b(hi|hello|hey|helo|salam|bos|boss|bro|sis|tuan|nak|mahu|mau|boleh|leh|ke|kat|dekat|tak|tidak|ada|masih|lagi|tanya|tny|tnya|nk|still|got|available|please|pls|sila|ya|yer|ye|dgn|utk|ni|tu|punya|the|is|there|do|you|a|an|and|or)\b/gi;
 async function wooCheckStock(query){
   if (!WOO_SITE || !WOO_USER || !WOO_APP_PW) return null;   // not configured — caller must skip silently
-  const q = String(query || '').replace(/[^\w\s.-]/g, ' ').trim().slice(0, 60);
+  const q = String(query || '').replace(/[^\w\s-]/g, ' ').replace(WOO_STOPWORDS, ' ').replace(/\s+/g, ' ').trim().slice(0, 60);
   if (!q) return null;
   const auth = 'Basic ' + Buffer.from(`${WOO_USER}:${WOO_APP_PW}`).toString('base64');
   const url = `${WOO_SITE}/wp-json/wc/v3/products?search=${encodeURIComponent(q)}&status=publish&per_page=5`;
@@ -120,7 +125,7 @@ function remember(o){ recent.unshift({ at: new Date().toISOString(), ...o }); if
 
 // ---- Rotation pools (updated roster 2026-06-17) ----
 const POOLS = {
-  KS:       ['Jebat','Nabil','Allysa','Azwin','Jue','Amirul','Nazrin','Aso','Roy'],  // Lambretta/Thunder (Klang + Shah Alam)
+  KS:       ['Jebat','Nabil','Allysa','Jue','Amirul','Nazrin','Aso','Roy'],  // Lambretta/Thunder (Klang + Shah Alam) — Azwin removed 2026-07-21 (resigned)
   HQ:       ['Adib','Syahrin','Fazwan','Azrul','Amir'],            // HQ / Suzuki
   Honda:    ['Bella','Syaza','Anis','Syafa','Zeera'],              // Honda Kapar
   ShahAlam: ['Amirul','Nazrin','Aso','Roy'],                      // KTM / Zontes
