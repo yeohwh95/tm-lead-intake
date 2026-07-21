@@ -2,6 +2,14 @@
 
 WhatsApp lead → AI extract → Lark CRM + notify the assigned salesperson. **LIVE.**
 
+## 🟢 BULK LEAD THROTTLE — LIVE 2026-07-21 (event Excel/form drops no longer blast the team)
+Staff sometimes drop an entire event's leads at once (e.g. a test-ride registration Excel, 100+ rows). Benjamin flagged the risk: assigning + DMing + starting SLA timers for all of them in one shot dumps dozens of leads on a 4-person brand pool instantly (guaranteed SLA reassign storm) and is exactly the kind of automated burst that risks the WhatsApp number.
+- **Fully automatic — staff do nothing differently.** They drop the file into the group exactly as before.
+- If a single message yields **> `BULK_THRESHOLD` leads (default 15)**: ALL leads are still written to Lark + assigned immediately (nothing is ever delayed or lost from the CRM) — only the first batch of `BULK_BATCH_SIZE` (default 15) gets the salesperson WhatsApp DM + SLA timer start right away. The rest queue in `bulk_queue.json` and drain automatically every `BULK_DRAIN_MS` (default 6h, Benjamin 2026-07-21), **business hours only** (reuses the Mon–Sat 9–6 MYT gate, `inBusinessHours()`), until the queue is empty. The group gets one message when bulk mode kicks in + a short progress note each batch.
+- ⚠️ `bulk_queue.json` is on Render's ephemeral disk (same caveat as `sla_store.json`/`fr_state.json`) — a mid-drain redeploy loses the QUEUED (not-yet-notified) batches. The leads themselves are safe (already in Lark, already assigned to a salesperson) — worst case is that batch never gets its WhatsApp DM/SLA timer and needs a manual nudge.
+- Also fixed same session: `excelToText()` was silently truncated at 24,000 characters — a 260-row real event export (the Zontes/KTM test-ride form) would have been cut off after row ~100, silently losing the rest. Raised to 120,000 chars.
+- Env overrides: `BULK_THRESHOLD`, `BULK_BATCH_SIZE`, `BULK_DRAIN_MS` (ms).
+
 ## Where it runs
 - **Render** `srv-d8oft4ho3t8c73dkmpng` (acct `tea-d81kknkdirrc73a46jlg`, key in memory `reference_render_new_account.md`). Auto-deploys on push to `main` (github `yeohwh95/tm-lead-intake`).
 - WhatsApp session = WaSender **93210**. Acts ONLY in `INTAKE_GROUP_JID` (`120363410229539926@g.us`); everything else is capture-only.

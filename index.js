@@ -28,6 +28,25 @@ try { digest = JSON.parse(_fs.readFileSync(DIGEST_STORE, 'utf8')); } catch { /* 
 function digestPersist(){ try { _fs.writeFileSync(DIGEST_STORE, JSON.stringify(digest)); } catch {} }
 function digestPush(ev){ digest.events.push({ ...ev, t: Date.now() }); digestPersist(); }
 const MYT_OFF = 8 * 3600 * 1000;
+
+// ---- Bulk lead throttle (Benjamin 2026-07-21): a single group drop can carry a WHOLE
+// event's worth of leads (e.g. a test-ride registration Excel, 100+ rows). Assigning +
+// notifying + starting SLA timers for all of them in one shot dumps dozens of leads on a
+// tiny brand pool at once (guaranteed SLA pile-up/reassign storm) and floods the sales
+// team's phones. Leads are ALWAYS written to Lark immediately (never lost) — only the
+// staff WhatsApp notify + SLA-timer-start is staggered into business-hours batches.
+const BULK_THRESHOLD  = Number(process.env.BULK_THRESHOLD || 15);      // more than this in one drop = bulk mode
+const BULK_BATCH_SIZE = Number(process.env.BULK_BATCH_SIZE || 15);     // leads notified per drain
+const BULK_DRAIN_MS   = Number(process.env.BULK_DRAIN_MS || 6 * 3600 * 1000); // drain every 6h (in-hours only)
+const BULK_QUEUE_FILE = _path.join(__dirname, 'bulk_queue.json');
+// queue entries: { chatId, screenshotUrl, total, sent, batches: [[lead,...], ...] }
+let bulkQueue = []; try { bulkQueue = JSON.parse(_fs.readFileSync(BULK_QUEUE_FILE, 'utf8')); } catch { /* fresh */ }
+function bulkPersist(){ try { _fs.writeFileSync(BULK_QUEUE_FILE, JSON.stringify(bulkQueue)); } catch {} }
+function chunk(arr, size){ const out = []; for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size)); return out; }
+// Same Mon-Sat 9-6 MYT gate as the SLA engine (kept independent — bulk drain must respect business
+// hours even if SLA_ON=0), so bulk notify DMs never fire in the middle of the night.
+const BIZ_DAYS = (process.env.SLA_DAYS || '1,2,3,4,5,6').split(',').map(Number);
+function inBusinessHours(){ const d = new Date(Date.now() + MYT_OFF); return BIZ_DAYS.includes(d.getUTCDay()) && d.getUTCHours() >= 9 && d.getUTCHours() < 18; }
 function mytNow(){ const d = new Date(Date.now() + MYT_OFF); return { date: d.toISOString().slice(0,10), h: d.getUTCHours(), m: d.getUTCMinutes() }; }
 function buildDigest(label, sinceMs){
   const evs = digest.events.filter(e => e.t >= sinceMs);
@@ -574,6 +593,7 @@ if (SLA_ON){
   sla.init({ waSend, waDelete, larkUpdateSalesman, larkUpdateSLA, groupNotify: alertReview, digestPush, pickNextRep, log });
   setInterval(() => { try { sla.tick(); } catch (e) { log('sla tick err', String(e.message||e)); } }, 60 * 1000);
 }
+setInterval(() => { drainBulkQueue().catch(e => log('bulk drain err', String(e.message||e))); }, BULK_DRAIN_MS);
 // ---- First-response bot wiring (FIRSTRESPONSE_ON=1) — deps injected AFTER sla so it can register SLA timers ----
 const firstresponse = require('./firstresponse');
 {
@@ -614,6 +634,43 @@ async function notifyStaff(leads, screenshotUrl){
   const txt = notifyText(leads) + (SLA_ON ? '\n\n✅ Reply anything once you have contacted this lead (or *PASS* to hand it over).' : '');
   const mid = (screenshotUrl && leads.length === 1) ? await waSend(phone, txt, screenshotUrl) : await waSend(phone, txt);
   return mid;   // msgId for the SLA (delete on reassign)
+}
+
+// One consolidated notify per salesperson (the send queue handles 5s spacing + 429 retry) + SLA start.
+// Shared by the normal (small-drop) flow and the bulk drain — same assign→notify→SLA contract either way.
+async function notifyBatch(enriched, screenshotUrl){
+  const byStaff = {};
+  for (const l of enriched) { const ph = l.staff?.phone; if (ph) (byStaff[ph] = byStaff[ph] || []).push(l); }
+  for (const ph in byStaff) {
+    try {
+      const dmMsgId = await notifyStaff(byStaff[ph], screenshotUrl);
+      if (sla) {   // T+0: start the SLA timer for this rep's lead(s)
+        const grp = byStaff[ph];
+        sla.register(grp[0].assignee, ph, grp.map(l => ({ recordId: l.recordId, summary: l.want, brand: l.brand, custName: l.name, custPhone: l.phone, override: l.override })), dmMsgId);
+      }
+    } catch (e) { log('notify err', String(e.message || e).slice(0, 60)); }
+  }
+}
+
+// Releases ONE batch from the bulk queue (business hours only) — leads are already in Lark from
+// the moment they were dropped; this only staggers the WhatsApp notify + SLA-timer-start.
+async function drainBulkQueue(){
+  if (!bulkQueue.length || !inBusinessHours()) return;
+  const job = bulkQueue[0];
+  const batch = job.batches.shift();
+  if (!batch) { bulkQueue.shift(); bulkPersist(); return; }
+  try {
+    await notifyBatch(batch, job.screenshotUrl);
+    job.sent += batch.length;
+    const left = job.total - job.sent;
+    if (job.batches.length === 0) {
+      bulkQueue.shift();
+      await waSend(job.chatId, `✅ Bulk batch complete — all ${job.total} leads have now been assigned & sales team notified.`);
+    } else {
+      await waSend(job.chatId, `📦 Batch sent — ${batch.length} more leads assigned. ${left} left in queue, next batch in ~${Math.round(BULK_DRAIN_MS / 3600000)}h.`);
+    }
+  } catch (e) { log('bulk drain err', String(e.message || e).slice(0, 60)); }
+  bulkPersist();
 }
 
 // ---- Group card (live wording when Lark is on) ----
@@ -760,7 +817,7 @@ async function handle(payload){
         blocks = [{ type: 'file', file: { filename: info.fileName || 'lead.pdf', file_data: `data:application/pdf;base64,${buf.toString('base64')}` } }];
       } else if (/sheet|excel|xlsx|xls|csv|spreadsheet/.test(tag)) {
         src = 'Excel';
-        blocks = [{ type: 'text', text: 'Spreadsheet (CSV export):\n' + excelToText(buf).slice(0, 24000) }];
+        blocks = [{ type: 'text', text: 'Spreadsheet (CSV export):\n' + excelToText(buf).slice(0, 120000) }];
       } else {
         src = 'Document';
         blocks = [{ type: 'text', text: 'Document caption: ' + (info.caption || '(none)') + '\n(unsupported type ' + info.mime + ')' }];
@@ -793,23 +850,30 @@ async function handle(payload){
     const unavail = await getUnavailable();   // salesmen marked "NO" in the Lark availability sheet → skipped in rotation
     const enriched = assignLeads(leads, fileOverrides(info.fileName || info.caption), unavail);
     if (LIVE_LARK) {
+      // Lark write happens for EVERY lead immediately, bulk or not — the CRM record is always
+      // safe and fully assigned even though the WhatsApp notify below may be staggered.
       for (const l of enriched) { try { l.recordId = await larkWriteLead(l); } catch (e) { l.larkErr = String(e.message || e).slice(0, 60); log('lark write err', l.larkErr); } }
     }
     // GROUP confirmation FIRST → instant feedback in the group, BEFORE the per-salesperson DMs queue (5s each)
     await waSend(info.chatId, renderCard(src, enriched, LIVE_LARK));
     if (enriched.length <= 3) await askMissing(info.chatId, enriched);   // ❓ small drop with blank Brand → ask the group (Option A)
     if (LIVE_LARK) {
-      // one consolidated notify per salesperson (the send queue handles 5s spacing + 429 retry)
-      const byStaff = {};
-      for (const l of enriched) { const ph = l.staff?.phone; if (ph) (byStaff[ph] = byStaff[ph] || []).push(l); }
-      for (const ph in byStaff) {
-        try {
-          const dmMsgId = await notifyStaff(byStaff[ph], info.screenshotUrl);
-          if (sla) {   // T+0: start the SLA timer for this rep's lead(s)
-            const grp = byStaff[ph];
-            sla.register(grp[0].assignee, ph, grp.map(l => ({ recordId: l.recordId, summary: l.want, brand: l.brand, custName: l.name, custPhone: l.phone, override: l.override })), dmMsgId);
-          }
-        } catch (e) { log('notify err', String(e.message || e).slice(0, 60)); }
+      if (enriched.length > BULK_THRESHOLD) {
+        // BULK MODE: notify + start SLA timers for only the first batch now; queue the rest to
+        // trickle out automatically in later batches (drainBulkQueue, business-hours only).
+        const batches = chunk(enriched, BULK_BATCH_SIZE);
+        await notifyBatch(batches[0], info.screenshotUrl);
+        const rest = batches.slice(1);
+        if (rest.length) {
+          bulkQueue.push({ chatId: info.chatId, screenshotUrl: info.screenshotUrl || '', total: enriched.length, sent: batches[0].length, batches: rest });
+          bulkPersist();
+          const drainsPerDay = Math.max(1, Math.floor(9 / (BULK_DRAIN_MS / 3600000)));   // working day ≈ 9h (9am-6pm)
+          const days = Math.ceil(rest.length / drainsPerDay);
+          const drainHrs = Math.round(BULK_DRAIN_MS / 3600000);
+          await waSend(info.chatId, `📦 *Bulk batch detected* — ${enriched.length} leads, all saved to Lark now.\nFirst ${batches[0].length} assigned & sales team notified.\nRemaining ${enriched.length - batches[0].length} will go out in batches of ${BULK_BATCH_SIZE} every ~${drainHrs}h during working hours (~${days} working day${days > 1 ? 's' : ''}) — I'll post progress here as each batch goes.`);
+        }
+      } else {
+        await notifyBatch(enriched, info.screenshotUrl);
       }
     }
   } catch (e) {
