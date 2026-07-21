@@ -365,12 +365,26 @@ function fileOverrides(name){
   const assignee = m.name;
   const requestedName = m.requested && !m.name ? m.requested : '';   // named someone we couldn't match → flag it
   const origin = /(^|\+|\s)live\b/i.test(f) ? 'TIKTOK LIVE (Get leads)' : '';
-  // BRAND from filename/caption ("get lead lambretta", "ads tiktok thunder", "tiktok dm hq") → force on all leads in the file.
-  const BRAND_DISPLAY = { lambretta:'Lambretta', thunder:'Thunder', honda:'Honda', suzuki:'Suzuki', ktm:'KTM', zontes:'Zontes', hq:'HQ' };
   const lf = f.toLowerCase();
-  const bkey = Object.keys(BRAND_DISPLAY).find(b => new RegExp('\\b' + b + '\\b').test(lf)) || '';
+
+  // TEAM override (Benjamin/Harith 2026-07-21): a caption/filename naming TWO OR MORE teams
+  // (e.g. "hq + shah alam" on an event Excel) restricts EVERY lead in that drop to rotate
+  // across ONLY those teams' pools combined — instead of each lead routing individually by
+  // its own brand. Naming exactly ONE team/brand keyword keeps today's normal single-BRAND
+  // override behavior unchanged (e.g. "tiktok dm honda" still just forces brand=Honda).
+  const teamHits = new Set();
+  if (/\bhq\b/.test(lf)) teamHits.add('HQ');
+  if (/\bhonda\b/.test(lf)) teamHits.add('Honda');
+  if (/\bklang\b|\bks\b/.test(lf)) teamHits.add('KS');
+  if (/\bshah\s*alam\b/.test(lf)) teamHits.add('ShahAlam');
+  const teamOverride = teamHits.size >= 2 ? [...teamHits] : null;
+
+  // BRAND from filename/caption ("get lead lambretta", "ads tiktok thunder", "tiktok dm hq") → force on all leads in the file.
+  // Skipped when a teamOverride is active — team routing wins, brand still comes from the AI/model per-lead for record-keeping.
+  const BRAND_DISPLAY = { lambretta:'Lambretta', thunder:'Thunder', honda:'Honda', suzuki:'Suzuki', ktm:'KTM', zontes:'Zontes', hq:'HQ' };
+  const bkey = (!teamOverride && Object.keys(BRAND_DISPLAY).find(b => new RegExp('\\b' + b + '\\b').test(lf))) || '';
   const brand = bkey ? BRAND_DISPLAY[bkey] : '';
-  return { assignee, origin, requestedName, brand };
+  return { assignee, origin, requestedName, brand, teamOverride };
 }
 
 // Valid Brand single-select options in Lark (anything else is coerced away so the field never gets junk).
@@ -412,7 +426,15 @@ function assignLeads(leads, ov, unavail){
     if (!VALID_BRANDS.has(l.brand)) l.brand = brandFromModel(l.interest || l.name || '') || 'HQ';
     let assignee = ov.assignee || '';
     if (!assignee) {
-      const [team, pool] = poolForBrand(l.brand);
+      let team, pool;
+      if (ov.teamOverride && ov.teamOverride.length) {
+        // Combined multi-team rotation (e.g. ["HQ","ShahAlam"]) — one shared round-robin
+        // across every rep from every named team, ignoring this lead's own brand.
+        team = [...ov.teamOverride].sort().join('+');
+        pool = [...new Set(ov.teamOverride.flatMap(k => POOLS[k] || []))];
+      } else {
+        [team, pool] = poolForBrand(l.brand);
+      }
       const avail = pool.filter(n => !unavail.has(n.toLowerCase()));   // skip anyone marked "NO" in the Lark availability sheet
       const usePool = avail.length ? avail : pool;                     // if the whole pool is OFF, fall back to all (never drop a lead)
       if (usePool.length) { const idx = ROT[team] || 0; assignee = usePool[idx % usePool.length]; ROT[team] = idx + 1; }

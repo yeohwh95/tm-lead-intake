@@ -10,6 +10,12 @@ Staff sometimes drop an entire event's leads at once (e.g. a test-ride registrat
 - Also fixed same session: `excelToText()` was silently truncated at 24,000 characters — a 260-row real event export (the Zontes/KTM test-ride form) would have been cut off after row ~100, silently losing the rest. Raised to 120,000 chars.
 - Env overrides: `BULK_THRESHOLD`, `BULK_BATCH_SIZE`, `BULK_DRAIN_MS` (ms).
 
+## 🟢 TEAM OVERRIDE (filename/caption) — LIVE 2026-07-21 (Harith: "only want HQ + Shah Alam, other team no need")
+Staff can now restrict a WHOLE file's assignment to two or more named teams instead of each lead routing individually by its own brand — e.g. an event Excel captioned **"hq + shah alam"** rotates every lead across the combined HQ+ShahAlam pool only, ignoring Honda/KS entirely, regardless of what brand each row says.
+- **Trigger:** the filename/caption names **2 or more** of `hq` / `honda` / `klang`/`ks` / `shah alam`. Naming exactly ONE keyword keeps the pre-existing single-BRAND-override behavior unchanged (e.g. "tiktok dm honda" still just forces brand=Honda — no behavior change for the normal daily case).
+- `fileOverrides()` returns `teamOverride: ['HQ','ShahAlam']` (array of `POOLS` keys); `assignLeads()` merges those pools (deduped) and round-robins across the combined list under a shared `ROT` key (e.g. `"HQ+ShahAlam"`) instead of calling `poolForBrand()`. Brand is still recorded per-lead from the AI/model for reporting — it just no longer decides the pool when a team override is active.
+- Verified with a standalone rotation test (mixed-brand leads all cycling correctly through the combined pool) — no dedicated index.js test harness exists yet for the assignment pipeline.
+
 ## Where it runs
 - **Render** `srv-d8oft4ho3t8c73dkmpng` (acct `tea-d81kknkdirrc73a46jlg`, key in memory `reference_render_new_account.md`). Auto-deploys on push to `main` (github `yeohwh95/tm-lead-intake`).
 - WhatsApp session = WaSender **93210**. Acts ONLY in `INTAKE_GROUP_JID` (`120363410229539926@g.us`); everything else is capture-only.
