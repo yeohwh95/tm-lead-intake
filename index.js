@@ -280,6 +280,29 @@ function excelToText(buf){
   const wb = XLSX.read(buf, { type: 'buffer' });
   return wb.SheetNames.map(n => '# Sheet: ' + n + '\n' + XLSX.utils.sheet_to_csv(wb.Sheets[n])).join('\n\n');
 }
+// Split a spreadsheet into row-count-bounded chunks (header repeated in every chunk) so a
+// large event export (100+ rows) never gets handed to the AI in one giant blob. A single-shot
+// extraction on a big repetitive sheet was proven (2026-07-21, Zontes/KTM test-ride file,
+// 139 real rows) to silently return a clean-looking PARTIAL result (finish_reason=stop, not
+// even a token-limit truncation — the model just stopped early) — 21 leads out of 139, zero
+// error, zero warning. Chunking keeps each AI call small enough that it has no room to "summarize".
+const EXCEL_CHUNK_ROWS = 20;
+function excelToChunks(buf){
+  if (!XLSX) return ['[xlsx parser unavailable]'];
+  const wb = XLSX.read(buf, { type: 'buffer' });
+  const chunks = [];
+  for (const name of wb.SheetNames) {
+    const lines = XLSX.utils.sheet_to_csv(wb.Sheets[name]).split(/\r?\n/).filter((l, i) => i === 0 || l.trim());
+    const header = lines[0] || '';
+    const rows = lines.slice(1);
+    if (!rows.length) { chunks.push(`# Sheet: ${name}\n${header}`); continue; }
+    for (let i = 0; i < rows.length; i += EXCEL_CHUNK_ROWS) {
+      const part = rows.slice(i, i + EXCEL_CHUNK_ROWS);
+      chunks.push(`# Sheet: ${name} (rows ${i + 1}-${i + part.length} of ${rows.length})\n${header}\n${part.join('\n')}`);
+    }
+  }
+  return chunks;
+}
 
 // ---- OpenAI extraction (GPT-4o: vision for images, native PDF, text for excel/plain) ----
 const EXTRACT_INSTRUCTION =
@@ -839,7 +862,7 @@ async function handle(payload){
         blocks = [{ type: 'file', file: { filename: info.fileName || 'lead.pdf', file_data: `data:application/pdf;base64,${buf.toString('base64')}` } }];
       } else if (/sheet|excel|xlsx|xls|csv|spreadsheet/.test(tag)) {
         src = 'Excel';
-        blocks = [{ type: 'text', text: 'Spreadsheet (CSV export):\n' + excelToText(buf).slice(0, 120000) }];
+        info.excelChunks = excelToChunks(buf);   // handled specially below — one AI call PER CHUNK, never one giant blob
       } else {
         src = 'Document';
         blocks = [{ type: 'text', text: 'Document caption: ' + (info.caption || '(none)') + '\n(unsupported type ' + info.mime + ')' }];
@@ -847,16 +870,36 @@ async function handle(payload){
     }
     if (info.fileName || info.caption) {
       log('document name="' + (info.fileName||'') + '" caption="' + (info.caption||'') + '"');   // debug: confirm name is captured
-      blocks.push({ type: 'text', text: `Source file name: "${info.fileName||''}". Caption: "${info.caption||''}". If EITHER names a brand (Lambretta / Honda / Thunder / HQ / Suzuki / KTM / Zontes), use that as the brand for ALL leads.` });
+      // The CAPTION is a deliberate instruction typed by a human at send-time; the FILENAME is
+      // often auto-generated (Google Forms exports, camera names) and can contain misleading
+      // words by accident — e.g. "ZONTES KTM TEST RIDE 2026 (Responses).xlsx" contains "ktm",
+      // which is NOT an instruction. Caption wins when both are present (2026-07-21 fix).
+      const hintSrc = info.caption ? `Caption: "${info.caption}"` : `Source file name: "${info.fileName||''}"`;
+      blocks.push({ type: 'text', text: `${hintSrc}. If this explicitly names a brand (Lambretta / Honda / Thunder / HQ / Suzuki / KTM / Zontes), use that as the brand for ALL leads. Do not infer a brand from words that just happen to appear in an auto-generated file name.` });
     }
-    blocks.push({ type: 'text', text: EXTRACT_INSTRUCTION });
-    let leads = parseLeads(await aiExtract(blocks));
-    // Bug-1 fix: an IMAGE with a lead caption (e.g. "tiktok dm lambretta") but no lead found = likely a
-    // vision miss (phone in a small bubble). Retry ONCE with an insistent prompt before giving up.
-    if (!leads.length && info.kind === 'image' && info.caption) {
-      log('image vision miss — retrying with insistent prompt');
-      const retry = [...blocks, { type: 'text', text: 'You returned no lead, but a lead IS present (the caption confirms it). Re-examine the image carefully — find the Malaysian phone number (often in a small grey chat bubble) and the bike model. Return the lead JSON now.' }];
-      leads = parseLeads(await aiExtract(retry));
+    let leads;
+    if (info.excelChunks) {
+      // One AI extraction call PER CHUNK (never the whole sheet in one shot) — a single-shot
+      // extraction on a big repetitive sheet was proven (2026-07-21, 139-row real event file)
+      // to return a clean-looking PARTIAL result (finish_reason=stop, not even a token-limit
+      // cutoff — the model just stopped early): 21 of 139 leads, zero error, zero warning.
+      leads = [];
+      for (let i = 0; i < info.excelChunks.length; i++) {
+        const chunkBlocks = [{ type: 'text', text: 'Spreadsheet (CSV export) — ' + info.excelChunks[i] }, ...blocks, { type: 'text', text: EXTRACT_INSTRUCTION }];
+        const chunkLeads = parseLeads(await aiExtract(chunkBlocks));
+        log(`excel chunk ${i + 1}/${info.excelChunks.length}: ${chunkLeads.length} leads`);
+        leads.push(...chunkLeads);
+      }
+    } else {
+      blocks.push({ type: 'text', text: EXTRACT_INSTRUCTION });
+      leads = parseLeads(await aiExtract(blocks));
+      // Bug-1 fix: an IMAGE with a lead caption (e.g. "tiktok dm lambretta") but no lead found = likely a
+      // vision miss (phone in a small bubble). Retry ONCE with an insistent prompt before giving up.
+      if (!leads.length && info.kind === 'image' && info.caption) {
+        log('image vision miss — retrying with insistent prompt');
+        const retry = [...blocks, { type: 'text', text: 'You returned no lead, but a lead IS present (the caption confirms it). Re-examine the image carefully — find the Malaysian phone number (often in a small grey chat bubble) and the bike model. Return the lead JSON now.' }];
+        leads = parseLeads(await aiExtract(retry));
+      }
     }
     remember({ src, sender: info.sender, leads });
     if (!leads.length) {
@@ -870,7 +913,11 @@ async function handle(payload){
       return;
     }
     const unavail = await getUnavailable();   // salesmen marked "NO" in the Lark availability sheet → skipped in rotation
-    const enriched = assignLeads(leads, fileOverrides(info.fileName || info.caption), unavail);
+    // Caption wins over filename (2026-07-21 fix — see the hintSrc note above): the caption is
+    // a deliberate human instruction, the filename is often auto-generated and can accidentally
+    // contain a misleading brand/team word (e.g. the Zontes/KTM test-ride Excel's own filename
+    // contains "ktm", which silently overrode Harith's actual "shah alam + hq" caption instruction).
+    const enriched = assignLeads(leads, fileOverrides(info.caption || info.fileName), unavail);
     if (LIVE_LARK) {
       // Lark write happens for EVERY lead immediately, bulk or not — the CRM record is always
       // safe and fully assigned even though the WhatsApp notify below may be staggered.
