@@ -28,7 +28,13 @@ const FITRI = { name: 'Fitri', phone: '+60108093259' };
 const RE_SELL = /jual\s+motor|nak\s+jual|mahu\s+jual|mau\s+jual|boleh\s+jual|leh\s+jual|trade\s?-?in|tukar\s+motor/i;
 const RE_TESTRIDE = /test\s?-?ride|test\s?rode/i;
 const RE_LOAN = /\bloan\b|ansuran|\bepp\b|kad\s+kredit|credit\s+card|pinjaman|bulanan\s+(berapa|brp)|0\s?depo|blacklist|ctos|ccris/i;
-const RE_BIKE = /vstrom|v-?strom|tracer|\bz\s?\d{3}|\bmt-?\s?\d{2}\b|cbr|ninja|\bzx\s?\d|gsx|t-?max|x-?max|n-?max|forza|vulcan|er-?6|rsv4|\btrk\b|tiger|duke|\br\s?2[35]\b|\br15\b|y1[56]|sv\s?650|nk\s?\d|450mt|368g|hunter|dominar|lambretta|vespa|zontes|\bnova\b|aveta|avantiz|\bego\b|lc\s?135|enduro|\bsym\b|versys|brutale|xj6|scrambler|monster|\bcb\s?\d{3}|crf|klx|pcx|vario|\bbeat\b|y15zr|8tt|thunder|moda\b|wmoto|gpx|keeway|scooter|superbike|motor\s+(second|2nd|baru|used)/i;
+// BRAND words (2026-07-22): the list below was all specific MODEL codes — a customer naming just
+// the brand ("ada KTM apa2", "nak tengok Yamaha") never matched at all. Pulled the real 32-brand
+// product_brand taxonomy from tmmotoworld.com's live WooCommerce catalog and added every brand
+// with stock as a bare keyword (Yamaha=90 products, Suzuki=38, Honda=39, Kawasaki=30 were the
+// biggest gaps). A real customer's detailed "KTM 390 Adv R... OTR price and waiting time?"
+// purchase inquiry got zero reply because "ktm" wasn't recognized anywhere.
+const RE_BIKE = /vstrom|v-?strom|tracer|\bz\s?\d{3}|\bmt-?\s?\d{2}\b|cbr|ninja|\bzx\s?\d|gsx|t-?max|x-?max|n-?max|forza|vulcan|er-?6|rsv4|\btrk\b|tiger|duke|\br\s?2[35]\b|\br15\b|y1[56]|sv\s?650|nk\s?\d|450mt|368g|hunter|dominar|lambretta|vespa|zontes|\bnova\b|aveta|avantiz|\bego\b|lc\s?135|enduro|\bsym\b|versys|brutale|xj6|scrambler|monster|\bcb\s?\d{3}|crf|klx|pcx|vario|\bbeat\b|y15zr|8tt|thunder|moda\b|wmoto|gpx|keeway|scooter|superbike|motor\s+(second|2nd|baru|used)|\bktm\b|yamaha|suzuki|honda|kawasaki|\bbmw\b|modenas|ducati|aprilia|triumph|benelli|cfmoto|harley|agusta|enfield|\bqj\b|morini|\bafaz\b|\bktns\b/i;
 const RE_VENDOR_AUTO = /thank you for contacting|welcome to .* (service|customer)|terima kasih kerana menghubungi|saya akan reply|confirmation code|verification code/i;
 const RE_MALAY = /\b(nak|nk|boleh|bleh|ada|berapa|brp|tuan|bang|bos|ke|tak|x\s?mau|macam|mcm|saya|sy|kami|harga|jual|beli|lagi|stok|pagi|petang|malam|salam|tnya|tanya|ape|khabar|kew|ye|dgn|utk|esok|arini)\b/i;
 

@@ -16,6 +16,13 @@ ok(C('Assalammualaikum. Hi\nTracer merah ni ada lagi ke?') === 'product', 'produ
 ok(C('Salam hai nk tnya nova 200 ad stok dak') === 'product', 'product: nova 200 stok');
 ok(C('hi bole tau harga cash utk xmax?') === 'product', 'product: harga xmax');
 ok(C('Hai nak tanya still available ke Mt25') === 'product', 'product: Mt25 available');
+ok(C('Hi, I am interested in purchasing the KTM 390 Adv R version with cash. Is quickshifter included? What is the OTR price and waiting time?') === 'product', 'product: KTM brand word (2026-07-22 — was skip, zero reply to a real purchase inquiry)');
+ok(C('ada yamaha apa2 bos') === 'product', 'product: bare Yamaha brand (90 products in catalog, had zero keyword coverage)');
+ok(C('nak tengok suzuki') === 'product', 'product: bare Suzuki brand');
+ok(C('kawasaki ada apa') === 'product', 'product: bare Kawasaki brand');
+ok(C('bmw gs ada tak') === 'product', 'product: bare BMW brand');
+ok(C('modenas dominar') === 'product', 'product: bare Modenas brand');
+ok(C('royal enfield ada') === 'product', 'product: bare Royal Enfield brand');
 ok(C('untuk join test ride esok bole walk in atau perlu register dlu arini?') === 'testride', 'testride: walk-in question');
 ok(C('Hai moto ni boleh buat EPP?') === 'loan', 'loan: EPP');
 ok(C('hi ... moda Sporter s loan harga berapa ya?') === 'loan', 'loan: loan harga');
