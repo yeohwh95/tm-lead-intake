@@ -187,4 +187,4 @@ function markHuman(jid){
 }
 
 function init(deps){ D = deps; D.log('firstresponse init — ON:', ON(), 'debounce:', DEBOUNCE_MS + 'ms'); }
-module.exports = { init, onMessage, markHuman, _classify: classify, _tpl: tpl, _isEnglish: isEnglish, _state: () => state };
+module.exports = { init, onMessage, markHuman, _classify: classify, _tpl: tpl, _isEnglish: isEnglish, _state: () => state, RE_BIKE };

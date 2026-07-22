@@ -112,14 +112,31 @@ const WOO_FORWARD_URL = process.env.WOO_FORWARD_URL || '';
 const WOO_SITE    = process.env.WOO_SITE || '';       // e.g. https://tmmotoworld.com
 const WOO_USER    = process.env.WOO_USER || '';
 const WOO_APP_PW  = process.env.WOO_APP_PW || '';
-// WooCommerce's product search is a literal phrase match — chat filler words in the query
-// (customer text like "hi...gpx 250 ada lagi?") make it match NOTHING even when the bare model
-// name ("gpx 250") matches fine. Strip conversational filler before querying (Benjamin 2026-07-21:
-// GPX 250 was in stock on the site but the bot told the customer "takde stok").
-const WOO_STOPWORDS = /\b(hi|hello|hey|helo|salam|bos|boss|bro|sis|tuan|nak|mahu|mau|boleh|leh|ke|kat|dekat|tak|tidak|ada|masih|lagi|tanya|tny|tnya|nk|still|got|available|please|pls|sila|ya|yer|ye|dgn|utk|ni|tu|punya|the|is|there|do|you|a|an|and|or)\b/gi;
+// WooCommerce's product search needs a TIGHT query — it's near-literal, not fuzzy/relevance-based.
+// A stopword blacklist (2026-07-21, first attempt) still failed on real customer messages: audited
+// 5 live conversations same day and found "Moda Moca", "Zontes 368D" (×2 customers) and "Aprilia
+// RSV4" ALL genuinely in stock, yet the bot told every one of them "takde stok" — because words
+// the blacklist never anticipated ("pink", "ade", "moto", "Hye", "tnye", "Biru dn hijau"...) still
+// diluted the query to zero matches. A blacklist can never cover infinite real phrasing.
+// Fixed properly: EXTRACT just the brand/model tokens (reusing firstresponse's own RE_BIKE keyword
+// list, which is guaranteed to have matched somewhere in the text before this function is ever
+// called) plus any digit-bearing token (model numbers like "368D"), plus the word immediately
+// before/after each match (captures compound names like "moda MOCA" / "zontes 368D"). Verified
+// against the live site: all 4 real broken cases above now resolve correctly.
+const RE_BIKE_KEYWORDS = require('./firstresponse').RE_BIKE;
+function extractProductQuery(text){
+  const clean = String(text || '').replace(/[^\w\s-]/g, ' ');
+  const words = clean.split(/\s+/).filter(Boolean);
+  const keepIdx = new Set();
+  words.forEach((w, i) => {
+    if (RE_BIKE_KEYWORDS.test(w)) { keepIdx.add(i); keepIdx.add(i + 1); }        // brand/model word -> also grab the next word (compound names)
+    else if (/\d/.test(w)) { keepIdx.add(i); keepIdx.add(i - 1); }               // model number -> also grab the PRECEDING word (brand prefix)
+  });
+  return [...keepIdx].sort((a, b) => a - b).map(i => words[i]).filter(Boolean).join(' ').trim().slice(0, 60);
+}
 async function wooCheckStock(query){
   if (!WOO_SITE || !WOO_USER || !WOO_APP_PW) return null;   // not configured — caller must skip silently
-  const q = String(query || '').replace(/[^\w\s-]/g, ' ').replace(WOO_STOPWORDS, ' ').replace(/\s+/g, ' ').trim().slice(0, 60);
+  const q = extractProductQuery(query);
   if (!q) return null;
   const auth = 'Basic ' + Buffer.from(`${WOO_USER}:${WOO_APP_PW}`).toString('base64');
   const url = `${WOO_SITE}/wp-json/wc/v3/products?search=${encodeURIComponent(q)}&status=publish&per_page=5`;
@@ -837,6 +854,17 @@ async function handle(payload){
   // DEDUP: a retried webhook must not double-parse / double-write to Lark.
   const mid = (pickMessages(payload.data || {}).key || {}).id || '';
   if (mid) { if (SEEN.has(mid)) { log('dup skip', mid); return; } SEEN.add(mid); if (SEEN.size > 3000) SEEN.clear(); }
+  // 🐛→✅ FIXED 2026-07-22: a 👍 REACTION to the bot's own group message has no real content
+  // (kind='reaction', text=''), but the code fell through to the generic extraction path with an
+  // EMPTY blocks array — the AI was handed nothing but its OWN instruction prompt (which contains
+  // worked EXAMPLES like "mas.saifuddin" / "John Doe" / "+60123456789") and hallucinated 4 fake
+  // leads FROM those examples, which got written to Lark + WhatsApp-notified to real salespeople
+  // (Syaza/Syahrin) as if real. Only text/image/document carry lead content — anything else
+  // (reaction, sticker, unknown) must never reach the AI extractor.
+  if (!['text', 'image', 'document'].includes(info.kind)) {
+    log('SKIP — no lead content in kind=' + info.kind + ' (reaction/sticker/etc, already captured above)');
+    return;
+  }
   let src = 'Text', blocks = [];
   try {
     if (info.kind === 'text') {
