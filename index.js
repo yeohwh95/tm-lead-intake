@@ -139,16 +139,27 @@ async function wooCheckStock(query){
   const q = extractProductQuery(query);
   if (!q) return null;
   const auth = 'Basic ' + Buffer.from(`${WOO_USER}:${WOO_APP_PW}`).toString('base64');
-  const url = `${WOO_SITE}/wp-json/wc/v3/products?search=${encodeURIComponent(q)}&status=publish&per_page=5`;
+  // per_page 10 (was 5): the name-token filter below discards loose matches, and a 5-cap could cut
+  // a REAL variant off the list (the Aveta Nova 250 was the 6th search result behind the Marvel 150).
+  const url = `${WOO_SITE}/wp-json/wc/v3/products?search=${encodeURIComponent(q)}&status=publish&per_page=10`;
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), 4000);
   try {
     const r = await fetch(url, { headers: { Authorization: auth }, signal: ctrl.signal });
     if (!r.ok) return null;
     const items = await r.json();
+    // WooCommerce search matches across title+description+SKU — a query like "Aveta 250" also
+    // returns the Marvel 150 (its description mentions 250), and quoting the cheapest price across
+    // those loose matches told a real customer the NOVA 250 was "dari RM 7,988" (the Marvel 150's
+    // price — 2026-07-22 incident, Harith: "did the wrong price stem from checking the wrong bike?"
+    // Yes.). Require every query token to appear in the product NAME itself (normalized to
+    // alphanumerics so "X-MAX"/"xmax" and "368D"/"368 D" still match).
+    const alnum = s => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+    const qTokens = q.split(/\s+/).map(alnum).filter(t => t.length >= 2);
     const matches = (Array.isArray(items) ? items : [])
       .filter(p => p.stock_status !== 'outofstock')
-      .map(p => ({ name: p.name, price: Number(p.price || p.regular_price || 0) }));
+      .filter(p => { const nn = alnum(p.name); return qTokens.every(t => nn.includes(t)); })
+      .map(p => ({ name: String(p.name || '').split('|')[0].trim().slice(0, 48), price: Number(p.price || p.regular_price || 0) }));
     return { matches };
   } catch (e) { log('wooCheckStock err:', String(e.message || e).slice(0, 80)); return null; }
   finally { clearTimeout(timer); }
@@ -465,7 +476,7 @@ function assignLeads(leads, ov, unavail){
     // into Lark instead of leaving it empty and asking the group to reply.
     if (!VALID_BRANDS.has(l.brand)) l.brand = brandFromModel(l.interest || l.name || '') || 'HQ';
     let assignee = ov.assignee || '';
-    if (!assignee) {
+    if (!assignee && !ov.noAssign) {
       let team, pool;
       if (ov.teamOverride && ov.teamOverride.length) {
         // Combined multi-team rotation (e.g. ["HQ","ShahAlam"]) — one shared round-robin
@@ -658,11 +669,56 @@ if (SLA_ON){
 setInterval(() => { drainBulkQueue().catch(e => log('bulk drain err', String(e.message||e))); }, BULK_DRAIN_MS);
 // ---- First-response bot wiring (FIRSTRESPONSE_ON=1) — deps injected AFTER sla so it can register SLA timers ----
 const firstresponse = require('./firstresponse');
+
+// ---- FR lead-distribution window (team 2026-07-22): the bot replies to customers 24/7, but
+// salesmen are only assigned/DM'd Mon–Fri 9am–5pm MYT. Outside the window, assign() writes the
+// lead to Lark UNASSIGNED and queues the staff-facing half here; the drain below releases it when
+// the window opens (round-robin runs at drain, SLA columns stamped so slaSweep doesn't double-DM).
+// NOTE: deliberately narrower than SLA_DAYS (Mon–Sat) — the SAT SLA day covers staff-dropped group
+// leads; the team explicitly wants FR auto-leads held to Mon–Fri. Envs: FR_DIST_DAYS/START/END.
+const FR_DIST_DAYS  = (process.env.FR_DIST_DAYS || '1,2,3,4,5').split(',').map(Number);
+const FR_DIST_START = Number(process.env.FR_DIST_START || 9);
+const FR_DIST_END   = Number(process.env.FR_DIST_END || 17);
+function inFRDistHours(){ const d = new Date(Date.now() + MYT_OFF); return FR_DIST_DAYS.includes(d.getUTCDay()) && d.getUTCHours() >= FR_DIST_START && d.getUTCHours() < FR_DIST_END; }
+const FR_DEFER_FILE = _path.join(__dirname, 'fr_deferred.json');
+let frDeferred = []; try { frDeferred = JSON.parse(_fs.readFileSync(FR_DEFER_FILE, 'utf8')); } catch { /* fresh */ }
+function frDeferPersist(){ try { _fs.writeFileSync(FR_DEFER_FILE, JSON.stringify(frDeferred)); } catch {} }
+function deferStaffNotify(entry){ frDeferred.push({ ...entry, queuedAt: Date.now() }); frDeferPersist(); }
+let frDraining = false;
+async function drainFRDeferred(){
+  if (frDraining || !frDeferred.length || !inFRDistHours()) return;
+  frDraining = true;
+  try {
+    log(`🌅 FR deferred drain: releasing ${frDeferred.length} overnight lead(s)`);
+    while (frDeferred.length && inFRDistHours()){
+      const e = frDeferred[0];
+      try {
+        if (e.kind === 'dm'){                       // trade-in → Fitri (plain DM, no pool/SLA)
+          await waSend(e.to, e.text);
+        } else {                                    // pool lead: rotate NOW, then Lark + DM + SLA
+          const unavail = await getUnavailable();
+          const l = assignLeads([{ phone: e.phone, name: '', interest: e.want, brand: e.brand }], { origin: 'WhatsApp Direct' }, unavail)[0];
+          l.recordId = e.recordId;
+          if (e.recordId && l.staff?.openId) { try { await larkUpdateSalesman(e.recordId, l.staff.openId); } catch(err){ log('FR drain lark err', String(err.message||err).slice(0,60)); } }
+          // stamp SLA cols ourselves — a row with Salesman but no 'SLA Assigned At' would be
+          // re-enrolled (double-DM'd) by slaSweep within 3 minutes
+          if (e.recordId) { try { await larkUpdateSLA(e.recordId, { 'SLA Assigned At': Date.now(), 'SLA Original Salesman': l.assignee, 'SLA Status': 'Pending', 'SLA Reassign Count': 0 }); } catch(err){ log('FR drain SLA-write err', String(err.message||err).slice(0,60)); } }
+          const dmMsgId = await notifyStaff([l]);
+          if (sla && l.staff?.phone) sla.register(l.assignee, l.staff.phone, [{ recordId: e.recordId, summary: e.want, brand: l.brand, custName: '', custPhone: e.phone, override: false }], dmMsgId);
+          log(`FR 🌅 deferred lead assigned → ${l.assignee || '(pool empty?)'} (${e.phone}) "${e.want}"`);
+        }
+      } catch(err){ log('FR drain err', String(err.message||err).slice(0,80)); }
+      frDeferred.shift(); frDeferPersist();         // one entry = one attempt — never retry-loop a bad entry
+    }
+  } finally { frDraining = false; }
+}
+setInterval(() => { drainFRDeferred().catch(e => log('FR drain tick err', String(e.message||e))); }, 60 * 1000);
+
 {
   const FR_EXTRA_INTERNAL = new Set(['60162393812','60108093259','60102304152','60123534271','60182907538','601143991899']);
   const staffLast9 = new Set(Object.values(STAFF).map(s => String(s.phone || '').replace(/\D/g, '').slice(-9)).filter(Boolean));
   const isStaffPhone = p => { const d = String(p || '').replace(/\D/g, ''); return !!d && (staffLast9.has(d.slice(-9)) || FR_EXTRA_INTERNAL.has(d)); };
-  firstresponse.init({ waSend, assignLeads, larkWriteLead, notifyStaff, sla, getUnavailable, log, isStaffPhone, wooCheckStock });
+  firstresponse.init({ waSend, assignLeads, larkWriteLead, notifyStaff, sla, getUnavailable, log, isStaffPhone, wooCheckStock, inDistHours: inFRDistHours, deferStaffNotify });
   if (SLA_ON){   // these belong to the SLA engine — keep them gated exactly as before the FR wiring
     // SLA SWEEP — enrol every new Lark lead (any source) into SLA. OFF unless SLA_SWEEP=1 + SLA_SWEEP_FROM set.
     if (process.env.SLA_SWEEP === '1'){

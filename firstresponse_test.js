@@ -33,6 +33,9 @@ ok(C('hi nk tanya saya nak jual motor vespa sprint 150') === 'sell', 'sell: nak 
 ok(C('Hi, saya dari website TMM dan saya mahu jual motor.') === 'sell', 'sell: mahu jual');
 ok(C('Boss SYM V3i kalau mau jual ambil?') === 'sell', 'sell: mau jual (2026-07-21 Amir chat — was misclassified product/no-stock)');
 ok(C('boss nak tanya moto still under loan aeon boleh jual ke dekat kedai you?') === 'sell', 'sell: boleh jual (2026-07-21 Fazwan chat — was misclassified loan)');
+ok(C('Hello TMM marketing nak tanya outlet tm motorworld dekat shah alam ada jual motor keeway xdv 180 ?') === 'product', 'product: "ada jual motor X" = shop-sells question, NOT sell (2026-07-22 Keeway chat — got trade-in reply)');
+ok(C('kedai jual aveta nova 250 tak bos') === 'product', 'product: "kedai jual" = shop-sells question, not sell');
+ok(C('ada jual tak? saya pun nak jual motor lama saya sekali') === 'sell', 'sell: mixed message — "nak jual" survives the shop-sells strip');
 ok(C('Hi') === 'greeting', 'greeting: Hi');
 ok(C('salam') === 'greeting', 'greeting: salam');
 ok(C('Hello! Can I get more info on this?') === 'greeting', 'greeting: Mudah ad-click prefill');
@@ -64,14 +67,17 @@ ok(fr._tpl('product', 'bm', null, '✅ Ada, stok tersedia — dari RM 12,800.').
 const sent = [], assigned = [], dms = [];
 fr.init({
   waSend: async (to, text) => { sent.push({ to, text }); return 'msg1'; },
-  assignLeads: (leads) => leads.map(l => ({ ...l, want: l.interest, brand: l.brand || 'HQ', origin: 'WhatsApp Direct', assignee: 'Adib', staff: { phone: '+60178869542', openId: 'x' } })),
+  assignLeads: (leads, ov) => leads.map(l => ({ ...l, want: l.interest, brand: l.brand || 'HQ', origin: 'WhatsApp Direct',
+    assignee: (ov && ov.noAssign) ? '' : 'Adib', staff: (ov && ov.noAssign) ? null : { phone: '+60178869542', openId: 'x' } })),
   larkWriteLead: async l => { assigned.push(l); return 'rec1'; },
   notifyStaff: async ls => { dms.push(ls); return 'dm1'; },
   sla: { register: (...a) => assigned.push({ sla: a[0] }) },
   getUnavailable: async () => new Set(),
   log: () => {},
   isStaffPhone: p => String(p).endsWith('123773259'),
-  wooCheckStock: async (q) => /vulcan/i.test(q) ? { matches: [{ name: 'Kawasaki Vulcan S', price: 12800 }] } : { matches: [] },
+  wooCheckStock: async (q) => /aveta 250/i.test(q)
+    ? { matches: [{ name: 'NEW AVETA NOVA 250', price: 14388 }, { name: 'NEW AVETA VANGUARD 250', price: 16300 }, { name: 'NEW AVETA VTM 250 LX', price: 12688 }] }
+    : /vulcan/i.test(q) ? { matches: [{ name: 'Kawasaki Vulcan S', price: 12800 }] } : { matches: [] },
 });
 const wait = ms => new Promise(r => setTimeout(r, ms));
 (async () => {
@@ -119,6 +125,50 @@ ok(/ADIB : 017-8869542/.test(sent[sent.length-1].text), 'flow: reply carries ass
   await wait(120);
   ok(/takde stok untuk model tu/.test(sent[sent.length - 1].text), 'flow: stock check reports out-of-stock');
   ok(assigned.length > nAssigned2, 'flow: out-of-stock model still assigns the lead');
+
+  // multi-match stock (2026-07-22 Aveta 250 incident): several distinct models match → list the
+  // options and ask which one, NEVER quote one cheapest price across different bikes
+  fr.onMessage({ jid: 'cust6@s.whatsapp.net', phone: '60166666666', kind: 'text', text: 'aveta 250 ada stock?' });
+  await wait(120);
+  const multi = sent[sent.length - 1].text;
+  ok(/beberapa pilihan/.test(multi) && /NOVA 250/.test(multi) && /VANGUARD 250/.test(multi), 'flow: ambiguous model lists the in-stock options');
+  ok(/Yang mana satu/.test(multi), 'flow: ambiguous model asks the customer to clarify');
+  ok(!/dari RM/.test(multi), 'flow: ambiguous model never quotes a single lowest price');
+
+  // off-hours deferral (team 2026-07-22: replies 24h, lead distribution Mon–Fri 9–5): outside the
+  // window the customer still gets a reply + Lark record, but NO card, NO staff DM, NO SLA — the
+  // staff-facing half is queued via deferStaffNotify for the drain to release at 9am.
+  const deferred = [];
+  fr.init({
+    waSend: async (to, text) => { sent.push({ to, text }); return 'msg1'; },
+    assignLeads: (leads, ov) => leads.map(l => ({ ...l, want: l.interest, brand: l.brand || 'HQ', origin: 'WhatsApp Direct',
+      assignee: (ov && ov.noAssign) ? '' : 'Adib', staff: (ov && ov.noAssign) ? null : { phone: '+60178869542', openId: 'x' } })),
+    larkWriteLead: async l => { assigned.push(l); return 'recN'; },
+    notifyStaff: async ls => { dms.push(ls); return 'dmN'; },
+    sla: { register: (...a) => assigned.push({ sla: a[0] }) },
+    getUnavailable: async () => new Set(),
+    log: () => {},
+    isStaffPhone: () => false,
+    wooCheckStock: async () => ({ matches: [] }),
+    inDistHours: () => false,
+    deferStaffNotify: e => deferred.push(e),
+  });
+  const nDm = dms.length, nSent2 = sent.length;
+  fr.onMessage({ jid: 'cust7@s.whatsapp.net', phone: '60177777777', kind: 'text', text: 'nak tanya cbr250 masih ada?' });
+  await wait(120);
+  const nightReply = sent[sent.length - 1];
+  ok(sent.length === nSent2 + 1 && nightReply.to === 'cust7@s.whatsapp.net', 'flow: off-hours customer still gets an instant reply');
+  ok(/Waktu operasi kami/.test(nightReply.text), 'flow: off-hours reply says SA will contact during office hours');
+  ok(!/ADIB : /.test(nightReply.text), 'flow: off-hours reply has NO salesman card');
+  ok(assigned.some(a => a.want && /cbr250/i.test(a.want) && !a.assignee), 'flow: off-hours lead written to Lark UNASSIGNED');
+  ok(dms.length === nDm, 'flow: off-hours — no salesman DM sent');
+  ok(deferred.length === 1 && deferred[0].kind === 'pool' && deferred[0].recordId === 'recN', 'flow: off-hours staff notify queued for the 9am drain');
+
+  // off-hours trade-in → Fitri DM deferred the same way
+  fr.onMessage({ jid: 'cust8@s.whatsapp.net', phone: '60188888888', kind: 'text', text: 'nak jual motor y16' });
+  await wait(120);
+  ok(/Waktu operasi kami/.test(sent[sent.length - 1].text) && !/FITRI : /.test(sent[sent.length - 1].text), 'flow: off-hours sell reply — office-hours line, no Fitri card');
+  ok(deferred.some(e => e.kind === 'dm' && /Trade-in Lead/.test(e.text)), 'flow: off-hours Fitri DM queued for the drain');
 
   console.log(`\n${pass} passed, ${fail} failed`);
   process.exit(fail ? 1 : 0);

@@ -26,6 +26,12 @@ const FITRI = { name: 'Fitri', phone: '+60108093259' };
 
 // ---------- classification ----------
 const RE_SELL = /jual\s+motor|nak\s+jual|mahu\s+jual|mau\s+jual|boleh\s+jual|leh\s+jual|trade\s?-?in|tukar\s+motor/i;
+// Malay ambiguity (real misroute 2026-07-22, Keeway XDV180): "ADA jual motor X?" = "do YOU (the shop)
+// sell X?" — a BUY question — while "NAK jual motor" = "I want to sell mine". The bare "jual motor"
+// pattern above can't tell them apart, so strip shop-sells phrasing BEFORE testing sell intent.
+// Stripping (not just vetoing) keeps mixed messages correct: "ada jual tak? sy pun nak jual motor
+// lama" still classifies as sell from the surviving "nak jual".
+const RE_SHOP_SELLS = /\b(ada|kedai|outlet|shop|korang|you\s*all|uols)\s+(ada\s+)?(jual|menjual)\b/gi;
 const RE_TESTRIDE = /test\s?-?ride|test\s?rode/i;
 const RE_LOAN = /\bloan\b|ansuran|\bepp\b|kad\s+kredit|credit\s+card|pinjaman|bulanan\s+(berapa|brp)|0\s?depo|blacklist|ctos|ccris/i;
 // BRAND words (2026-07-22): the list below was all specific MODEL codes — a customer naming just
@@ -42,7 +48,7 @@ function classify(text, hasImage){
   const t = String(text || '').trim();
   if (RE_VENDOR_AUTO.test(t)) return { cat: 'skip' };
   if (RE_TESTRIDE.test(t)) return { cat: 'testride' };
-  if (RE_SELL.test(t)) return { cat: 'sell' };
+  if (RE_SELL.test(t.replace(RE_SHOP_SELLS, ' '))) return { cat: 'sell' };
   if (RE_LOAN.test(t)) return { cat: 'loan' };
   if (RE_BIKE.test(t)) return { cat: 'product' };
   if (/^hello!?\s*can i get more info/i.test(t)) return { cat: 'greeting' };   // Mudah's ad-click prefill
@@ -60,9 +66,16 @@ function saMYT(){ const h = new Date(Date.now() + 8 * 3600e3).getUTCHours(); ret
 const LOAN_SHOP = 'Aeon Credit, Chailease, JCL, Parkson, BSNC';
 const LOAN_EPP  = 'Maybank, Public Bank, UOB, RHB, OCBC, Affin, AmBank, HLB, Alliance Bank, HSBC, Standard Chartered, BSN & AEON Credit Card';
 
-function tpl(cat, lang, card, stockLine){
+function tpl(cat, lang, card, stockLine, offHours){
   const g = saMYT();
-  const c = card ? `\n\n${card.name.toUpperCase()} : ${card.disp}\nhttps://wa.me/${card.digits}` : '';
+  // Off-hours (team 2026-07-22: replies 24h, lead distribution Mon–Fri 9–5): no salesman card at
+  // 2am — tell the customer when the office reopens instead. The card slot carries that line so
+  // every category template picks it up without its own wording change.
+  const c = card ? `\n\n${card.name.toUpperCase()} : ${card.disp}\nhttps://wa.me/${card.digits}`
+    : offHours ? (lang === 'en'
+        ? `\n\n⏰ Our office hours are Mon–Fri, 9am–5pm — our sales advisor will contact you once we're back in office 🙏`
+        : `\n\n⏰ Waktu operasi kami: Isnin–Jumaat, 9 pagi–5 petang. Sales advisor kami akan menghubungi anda bila pejabat dibuka semula ya 🙏`)
+    : '';
   const s = stockLine ? `\n\n${stockLine}` : '';
   if (cat === 'sell') return (lang === 'en'
     ? `Hi! Sure, we do buy & trade-in 👍 Which bike (model, year)? Photos help too. Our purchaser will contact you shortly ya`
@@ -89,11 +102,22 @@ async function stockLineFor(cat, text, lang){
   try { r = await D.wooCheckStock(text); } catch(e){ D.log && D.log('FR stock err:', String(e.message||e).slice(0,60)); }
   if (!r) return '';   // not configured / lookup failed → skip silently, never block the reply
   if (r.matches && r.matches.length){
-    const prices = r.matches.map(m => m.price).filter(p => p > 0);
-    const price = prices.length ? Math.min(...prices) : 0;
+    // Dedupe by name (same bike can be listed used + NEW). ONE match → safe to quote its price.
+    // SEVERAL distinct matches → the customer's model is ambiguous ("Aveta 250" = Nova 250 /
+    // Vanguard 250 / VTM 250...) — list the options and ask which one, never quote a single
+    // cheapest price across different bikes (Harith 2026-07-22: ask to clarify instead).
+    const seen = new Set();
+    const uniq = r.matches.filter(m => { const k = m.name.toLowerCase(); if (seen.has(k)) return false; seen.add(k); return true; });
+    if (uniq.length === 1){
+      const price = uniq[0].price > 0 ? uniq[0].price : 0;
+      return lang === 'en'
+        ? (price ? `✅ Yes, we have stock — from RM ${price.toLocaleString()}.` : `✅ Yes, we have stock available.`)
+        : (price ? `✅ Ada, stok tersedia — dari RM ${price.toLocaleString()}.` : `✅ Ada, stok tersedia.`);
+    }
+    const lines = uniq.slice(0, 4).map(m => `• ${m.name}${m.price > 0 ? ' — RM ' + m.price.toLocaleString() : ''}`).join('\n');
     return lang === 'en'
-      ? (price ? `✅ Yes, we have stock — from RM ${price.toLocaleString()}.` : `✅ Yes, we have stock available.`)
-      : (price ? `✅ Ada, stok tersedia — dari RM ${price.toLocaleString()}.` : `✅ Ada, stok tersedia.`);
+      ? `✅ We have a few options in stock:\n${lines}\nWhich one are you interested in?`
+      : `✅ Ada beberapa pilihan dalam stok:\n${lines}\nYang mana satu bos berminat ya?`;
   }
   return lang === 'en'
     ? `⚠️ That exact model isn't in stock right now, but we have other units — our salesperson can suggest alternatives.`
@@ -101,14 +125,28 @@ async function stockLineFor(cat, text, lang){
 }
 
 // ---------- assignment (the point of it all: category confirmed = lead assigned NOW) ----------
+// Off-hours variant (team 2026-07-22): outside Mon–Fri 9–5 (D.inDistHours() false) the lead is
+// STILL written to Lark immediately (never lost) but left UNASSIGNED — no salesman picked, no DM,
+// no SLA timer. The whole staff-facing half is queued via D.deferStaffNotify() and released by
+// index.js when the distribution window opens (rotation runs at drain time, so overnight leads
+// spread fairly across the pool at 9am instead of hammering whoever was next at 2am). Leaving
+// Salesman blank overnight also keeps slaSweep() from "helpfully" DMing the rep early — the sweep
+// only enrols rows that HAVE a salesman.
 async function assign(cat, jid, phone, wantText){
   const want = String(wantText || '').replace(/\s+/g, ' ').trim().slice(0, 60) || 'WhatsApp direct inquiry';
+  const defer = !!(D.inDistHours && !D.inDistHours() && D.deferStaffNotify);
   if (cat === 'sell'){
     // Trade-in → Fitri (purchaser). Lark record + instant DM to Fitri. (No SLA pool — she's not a rep.)
     let recordId = null;
     try { recordId = await D.larkWriteLead({ phone, name: '', want: 'TRADE-IN: ' + want, brand: '', origin: 'WhatsApp Direct', assignee: 'Fitri', staff: null }); }
     catch(e){ D.log('FR lark err (sell):', String(e.message||e).slice(0,60)); }
-    try { await D.waSend(FITRI.phone, `🔁 *Trade-in Lead (auto)*\n\n🎯 ${want}\n👉 https://wa.me/${phone.replace(/\D/g,'')}\n\nCustomer dah dapat reply pertama — follow up ya.`); }
+    const fitriMsg = `🔁 *Trade-in Lead (auto)*\n\n🎯 ${want}\n👉 https://wa.me/${phone.replace(/\D/g,'')}\n\nCustomer dah dapat reply pertama — follow up ya.`;
+    if (defer){
+      D.deferStaffNotify({ kind: 'dm', to: FITRI.phone, text: fitriMsg });
+      D.log(`FR 🌙 SELL lead deferred to office hours → Fitri (${phone}) "${want}"`);
+      return null;   // no card at night — tpl() shows the office-hours line instead
+    }
+    try { await D.waSend(FITRI.phone, fitriMsg); }
     catch(e){ D.log('FR fitri DM err:', String(e.message||e).slice(0,60)); }
     D.log(`FR ✅ SELL lead assigned → Fitri (${phone}) "${want}"`);
     return { name: 'Fitri', digits: '60108093259', disp: '010-8093259' };
@@ -120,9 +158,14 @@ async function assign(cat, jid, phone, wantText){
   // ("round robin as normal") with zero extra mapping needed.
   const prefix = cat === 'loan' ? 'LOAN: ' : cat === 'testride' ? 'TESTRIDE: ' : '';
   const unavail = await D.getUnavailable();
-  const enriched = D.assignLeads([{ phone, name: '', interest: prefix + want, brand: '' }], { origin: 'WhatsApp Direct' }, unavail);
+  const enriched = D.assignLeads([{ phone, name: '', interest: prefix + want, brand: '' }], { origin: 'WhatsApp Direct', noAssign: defer }, unavail);
   const l = enriched[0];
   try { l.recordId = await D.larkWriteLead(l); } catch(e){ D.log('FR lark err:', String(e.message||e).slice(0,60)); }
+  if (defer){
+    D.deferStaffNotify({ kind: 'pool', phone, want: l.want, brand: l.brand, recordId: l.recordId || null });
+    D.log(`FR 🌙 ${cat.toUpperCase()} lead deferred to office hours (${phone}) "${want}"`);
+    return null;
+  }
   try {
     const dmMsgId = await D.notifyStaff([l]);
     if (D.sla && l.staff?.phone) D.sla.register(l.assignee, l.staff.phone, [{ recordId: l.recordId, summary: l.want, brand: l.brand, custName: '', custPhone: phone, override: false }], dmMsgId);
@@ -153,7 +196,8 @@ async function flush(jid){
     const want = VAGUE(text) && !b.hasImage ? '[ad click — model belum stated, sila probe]' : (text || '[gambar/screenshot iklan]');
     const stockLine = await stockLineFor(finalCat, text, lang);
     const card = await assign(finalCat, jid, b.phone, want);
-    await D.waSend(jid, tpl(finalCat, lang, card, stockLine));
+    const offHours = !!(D.inDistHours && !D.inDistHours());
+    await D.waSend(jid, tpl(finalCat, lang, card, stockLine, offHours));
     return;
   }
   if (cat === 'skip') { D.log('FR skip (unclassified/vendor):', jid.slice(0, 20)); return; }
@@ -164,7 +208,8 @@ async function flush(jid){
   persist();
   const stockLine = await stockLineFor(cat, imageOnly ? '' : text, lang);
   const card = await assign(cat, jid, b.phone, imageOnly ? '[gambar/screenshot iklan]' : text);
-  await D.waSend(jid, tpl(cat, lang, card, stockLine));
+  const offHours = !!(D.inDistHours && !D.inDistHours());
+  await D.waSend(jid, tpl(cat, lang, card, stockLine, offHours));
 }
 
 function onMessage(info){
