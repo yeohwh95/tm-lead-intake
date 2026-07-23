@@ -36,6 +36,10 @@ ok(C('boss nak tanya moto still under loan aeon boleh jual ke dekat kedai you?')
 ok(C('Hello TMM marketing nak tanya outlet tm motorworld dekat shah alam ada jual motor keeway xdv 180 ?') === 'product', 'product: "ada jual motor X" = shop-sells question, NOT sell (2026-07-22 Keeway chat — got trade-in reply)');
 ok(C('kedai jual aveta nova 250 tak bos') === 'product', 'product: "kedai jual" = shop-sells question, not sell');
 ok(C('ada jual tak? saya pun nak jual motor lama saya sekali') === 'sell', 'sell: mixed message — "nak jual" survives the shop-sells strip');
+ok(C('Planning to sell my forza 750 scooter') === 'sell', 'sell: ENGLISH sell intent (2026-07-23 overnight miss — routed product to Azrul)');
+ok(C('Nak tanya kalau saya nk jual moto yg masih dalam loan boleh ke') === 'sell', 'sell: "nk jual moto" short-form (2026-07-23 overnight miss — routed loan to Amir)');
+ok(C('do you sell cbr250?') === 'product', 'product: "do you sell X" = shop-sells question, not sell intent');
+ok(C('best selling scooter ada?') === 'product', 'product: "best selling" never triggers sell');
 ok(C('Hi') === 'greeting', 'greeting: Hi');
 ok(C('salam') === 'greeting', 'greeting: salam');
 ok(C('Hello! Can I get more info on this?') === 'greeting', 'greeting: Mudah ad-click prefill');

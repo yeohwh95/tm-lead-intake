@@ -25,7 +25,10 @@ const buffers = {};                               // jid -> { texts:[], hasImage
 const FITRI = { name: 'Fitri', phone: '+60108093259' };
 
 // ---------- classification ----------
-const RE_SELL = /jual\s+motor|nak\s+jual|mahu\s+jual|mau\s+jual|boleh\s+jual|leh\s+jual|trade\s?-?in|tukar\s+motor/i;
+// 2026-07-23 additions from real overnight misses: "nk jual" short-form + "jual moto" (no r) had
+// slipped to LOAN ("nk jual moto yg masih dalam loan" → Amir instead of Fitri), and ENGLISH sell
+// intent had zero coverage ("Planning to sell my forza 750 scooter" → routed product to Azrul).
+const RE_SELL = /jual\s+moto\w*|nak\s+jual|nk\s+jual|mahu\s+jual|mau\s+jual|boleh\s+jual|leh\s+jual|trade\s?-?in|tukar\s+moto\w*|sell(?:ing)?\s+my\b|(?:want|wan|plan(?:ning)?|nak|how)\s+to\s+sell\b|letting\s+go\s+my/i;
 // Malay ambiguity (real misroute 2026-07-22, Keeway XDV180): "ADA jual motor X?" = "do YOU (the shop)
 // sell X?" — a BUY question — while "NAK jual motor" = "I want to sell mine". The bare "jual motor"
 // pattern above can't tell them apart, so strip shop-sells phrasing BEFORE testing sell intent.
