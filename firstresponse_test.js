@@ -69,7 +69,7 @@ ok(fr._tpl('product', 'bm', null, '✅ Ada, stok tersedia — dari RM 12,800.').
 
 // ---- flow: greeting → model answer assigns; sell assigns to Fitri; staff ignored ----
 const sent = [], assigned = [], dms = [];
-fr.init({
+const DEPS = {
   waSend: async (to, text) => { sent.push({ to, text }); return 'msg1'; },
   assignLeads: (leads, ov) => leads.map(l => ({ ...l, want: l.interest, brand: l.brand || 'HQ', origin: 'WhatsApp Direct',
     assignee: (ov && ov.noAssign) ? '' : 'Adib', staff: (ov && ov.noAssign) ? null : { phone: '+60178869542', openId: 'x' } })),
@@ -84,7 +84,8 @@ fr.init({
     : /vulcan/i.test(q) ? { matches: [{ name: 'Kawasaki Vulcan S', price: 12800 }] }
     : /175x/i.test(q) ? { matches: [], booking: [{ name: 'OPEN FOR BOOKING NEW ZONTES 175X' }] }
     : { matches: [] },
-});
+};
+fr.init(DEPS);
 const wait = ms => new Promise(r => setTimeout(r, ms));
 (async () => {
   fr.onMessage({ jid: 'cust1@s.whatsapp.net', phone: '60111111111', kind: 'text', text: 'Hi' });
@@ -157,6 +158,30 @@ ok(/ADIB : 017-8869542/.test(sent[sent.length-1].text), 'flow: reply carries ass
   ok(/beberapa pilihan/.test(multi) && /NOVA 250/.test(multi) && /VANGUARD 250/.test(multi), 'flow: ambiguous model lists the in-stock options');
   ok(/Yang mana satu/.test(multi), 'flow: ambiguous model asks the customer to clarify');
   ok(!/dari RM/.test(multi), 'flow: ambiguous model never quotes a single lowest price');
+
+  // ---- A (2026-07-24): LLM intent classification, regex fallback ----
+  fr.init({ ...DEPS, aiClassify: async t => {
+    if (/api-down/i.test(t)) throw new Error('timeout');
+    if (/tolak/i.test(t)) return 'sell';
+    return 'not-a-category';
+  } });
+  // real fixture 2026-07-24: "mau tolak moto masih ada loan" (= trade-in, own bike under loan) had
+  // matched the word "loan" and got the buying-loan financier template
+  fr.onMessage({ jid: 'custA1@s.whatsapp.net', phone: '60101010101', kind: 'text', text: 'Kalau mau tolak moto masih ada loan lagi boleh kah ? Moto baru setahun' });
+  await wait(120);
+  const tolak = sent.filter(s => s.to === 'custA1@s.whatsapp.net');
+  ok(tolak.length === 1 && /FITRI/i.test(tolak[0].text) && /jual\/trade-in/i.test(tolak[0].text), 'A: "tolak moto + loan" → sell reply w/ Fitri card (was loan template)');
+  ok(!/loan kedai/i.test(tolak[0].text), 'A: "tolak moto + loan" no longer gets the financier list');
+  ok(assigned.some(a => /^TRADE-IN: Kalau mau tolak/i.test(a.want || '')), 'A: tolak-moto lead recorded as TRADE-IN for Fitri');
+  // LLM returns garbage → regex fallback still classifies correctly
+  fr.onMessage({ jid: 'custA2@s.whatsapp.net', phone: '60102020202', kind: 'text', text: 'nak jual motor y15' });
+  await wait(120);
+  ok(sent.some(s => s.to === 'custA2@s.whatsapp.net' && /FITRI/i.test(s.text)), 'A: garbage LLM output → regex fallback (sell still routes to Fitri)');
+  // LLM throws (down/timeout) → regex fallback, stock line untouched
+  fr.onMessage({ jid: 'custA3@s.whatsapp.net', phone: '60103030303', kind: 'text', text: 'vulcan ada stok tak api-down' });
+  await wait(120);
+  ok(/Ada, stok tersedia.*RM 12,800/.test(sent[sent.length - 1].text), 'A: LLM error → regex fallback (product + stock check still work)');
+  fr.init(DEPS);   // restore plain deps for the off-hours section below
 
   // off-hours deferral (team 2026-07-22: replies 24h, lead distribution Mon–Fri 9–5): outside the
   // window the customer still gets a reply + Lark record, but NO card, NO staff DM, NO SLA — the

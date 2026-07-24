@@ -200,6 +200,29 @@ async function assign(cat, jid, phone, wantText){
   return null;
 }
 
+// A (2026-07-24): LLM intent classification — regex keyword lists kept missing real Malay sell
+// phrasings ("mau tolak moto masih ada loan" got the buying-loan template). gpt-4o (injected
+// D.aiClassify) decides the category; regex classify() is the instant fallback on API
+// error/timeout/garbage output, and still fully handles image-only messages (nothing for the LLM
+// to read) + vendor auto-replies (cheap and certain). An image WITH a short caption keeps the
+// regex verdict when the LLM says greeting/skip — the image carries intent the LLM can't see.
+const AI_CATS = new Set(['sell', 'loan', 'testride', 'product', 'greeting', 'skip']);
+async function classifySmart(text, hasImage){
+  const rx = classify(text, hasImage);
+  const t = String(text || '').trim();
+  if (!D.aiClassify || !t || RE_VENDOR_AUTO.test(t)) return rx;
+  try {
+    const cat = await D.aiClassify(t);
+    if (cat && AI_CATS.has(cat)){
+      if (hasImage && (cat === 'greeting' || cat === 'skip')) return rx;
+      if (cat !== rx.cat) D.log(`FR 🧠 ai overrides regex ${rx.cat}→${cat}: "${t.slice(0, 60)}"`);
+      return { cat, imageOnly: false };
+    }
+    if (cat != null) D.log('FR aiClassify unusable → regex fallback:', String(cat).slice(0, 20));
+  } catch (e) { D.log('FR aiClassify err → regex fallback:', String(e.message || e).slice(0, 60)); }
+  return rx;
+}
+
 // ---------- flow ----------
 const VAGUE = t => !t || t.trim().length < 4 || classify(t, false).cat === 'greeting';
 async function flush(jid){
@@ -208,7 +231,7 @@ async function flush(jid){
   const text = b.texts.join(' \n ').trim();
   const now = Date.now();
   const pend = state.pending[jid];
-  let { cat, imageOnly } = classify(text, b.hasImage);
+  let { cat, imageOnly } = await classifySmart(text, b.hasImage);
   const lang = isEnglish(text) ? 'en' : 'bm';
 
   if (pend && now - pend.ts < PENDING_MODEL_MS){

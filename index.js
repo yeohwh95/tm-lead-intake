@@ -112,64 +112,79 @@ const WOO_FORWARD_URL = process.env.WOO_FORWARD_URL || '';
 const WOO_SITE    = process.env.WOO_SITE || '';       // e.g. https://tmmotoworld.com
 const WOO_USER    = process.env.WOO_USER || '';
 const WOO_APP_PW  = process.env.WOO_APP_PW || '';
-// WooCommerce's product search needs a TIGHT query — it's near-literal, not fuzzy/relevance-based.
-// A stopword blacklist (2026-07-21, first attempt) still failed on real customer messages: audited
-// 5 live conversations same day and found "Moda Moca", "Zontes 368D" (×2 customers) and "Aprilia
-// RSV4" ALL genuinely in stock, yet the bot told every one of them "takde stok" — because words
-// the blacklist never anticipated ("pink", "ade", "moto", "Hye", "tnye", "Biru dn hijau"...) still
-// diluted the query to zero matches. A blacklist can never cover infinite real phrasing.
-// Fixed properly: EXTRACT just the brand/model tokens (reusing firstresponse's own RE_BIKE keyword
-// list, which is guaranteed to have matched somewhere in the text before this function is ever
-// called) plus any digit-bearing token (model numbers like "368D"), plus the word immediately
-// before/after each match (captures compound names like "moda MOCA" / "zontes 368D"). Verified
-// against the live site: all 4 real broken cases above now resolve correctly.
+// B (approved 2026-07-24): LOCAL CATALOG CACHE. WordPress's near-literal search was the root cause
+// of the ER6N false "takde stok" (2026-07-24) — a stray "ada" in the query zeroed a bike with 2
+// units instock, and the bot turned the search miss into a confident negative. (An earlier
+// stopword-blacklist attempt 2026-07-21 and the token-extractor rewrite both still fed WP search.)
+// Now the bot keeps its OWN copy of the whole catalog (~300 products, refreshed every 10 min) and
+// matches model tokens locally, alphanumeric-normalized so er6n = ER-6N = Er 6n. Filler words
+// never reach the matcher. Positive "✅ Ada" claims get a per-product LIVE re-check first (cache
+// can be up to 10 min behind a sale — an MT-07 sold the same morning it was asked about; staff DO
+// flip the Woo status promptly, so the live check catches it). Tune: CATALOG_REFRESH_MS env.
 const RE_BIKE_KEYWORDS = require('./firstresponse').RE_BIKE;
-function extractProductQuery(text){
-  const clean = String(text || '').replace(/[^\w\s-]/g, ' ');
-  const words = clean.split(/\s+/).filter(Boolean);
-  const keepIdx = new Set();
-  words.forEach((w, i) => {
-    if (RE_BIKE_KEYWORDS.test(w)) { keepIdx.add(i); keepIdx.add(i + 1); }        // brand/model word -> also grab the next word (compound names)
-    else if (/\d/.test(w)) { keepIdx.add(i); keepIdx.add(i - 1); }               // model number -> also grab the PRECEDING word (brand prefix)
-  });
-  return [...keepIdx].sort((a, b) => a - b).map(i => words[i]).filter(Boolean).join(' ').trim().slice(0, 60);
-}
-async function wooCheckStock(query){
-  if (!WOO_SITE || !WOO_USER || !WOO_APP_PW) return null;   // not configured — caller must skip silently
-  const q = extractProductQuery(query);
-  if (!q) return null;
-  const auth = 'Basic ' + Buffer.from(`${WOO_USER}:${WOO_APP_PW}`).toString('base64');
-  // per_page 10 (was 5): the name-token filter below discards loose matches, and a 5-cap could cut
-  // a REAL variant off the list (the Aveta Nova 250 was the 6th search result behind the Marvel 150).
-  const url = `${WOO_SITE}/wp-json/wc/v3/products?search=${encodeURIComponent(q)}&status=publish&per_page=10`;
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), 4000);
+const alnumTok = s => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+// Booking/pre-release listings (e.g. "OPEN FOR BOOKING NEW ZONTES 175X", 2026-07-24 incident:
+// quoted its placeholder price RM 8,888.89 as real stock) carry stock_status=instock but the
+// bike isn't released — split into their own bucket so the FR bot answers with the booking
+// pitch instead of a stock/price claim.
+const RE_BOOKING = /open\s+for\s+booking|\bbooking\b|pre-?order|coming\s+soon/i;
+const wooAuth = () => 'Basic ' + Buffer.from(`${WOO_USER}:${WOO_APP_PW}`).toString('base64');
+let CATALOG = { items: [], at: 0 };
+async function catalogRefresh(){
+  const items = [];
   try {
-    const r = await fetch(url, { headers: { Authorization: auth }, signal: ctrl.signal });
+    for (let page = 1; page <= 8; page++){
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), 15000);
+      const r = await fetch(`${WOO_SITE}/wp-json/wc/v3/products?status=publish&per_page=100&page=${page}&_fields=id,name,price,regular_price,stock_status`,
+        { headers: { Authorization: wooAuth() }, signal: ctrl.signal }).finally(() => clearTimeout(timer));
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      const batch = await r.json();
+      if (!Array.isArray(batch)) throw new Error('non-array page');
+      items.push(...batch);
+      if (batch.length < 100) break;
+    }
+    CATALOG = { items, at: Date.now() };
+    log(`catalog refresh: ${items.length} products`);
+  } catch (e) { log('catalog refresh err (keeping previous copy):', String(e.message || e).slice(0, 80)); }
+}
+// Model tokens = RE_BIKE brand/model words + digit-bearing tokens ("368D", "mt07"), nothing else —
+// filler ("ada", "stok", "lg") is what poisoned the old WP-search queries.
+function catalogModelTokens(text){
+  const words = String(text || '').replace(/[^\w\s-]/g, ' ').split(/\s+/).filter(Boolean);
+  return [...new Set(words.filter(w => RE_BIKE_KEYWORDS.test(w) || /\d/.test(w)).map(alnumTok).filter(t => t.length >= 2))];
+}
+async function wooVerifyLive(id){
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 3000);
+  try {
+    const r = await fetch(`${WOO_SITE}/wp-json/wc/v3/products/${id}?_fields=stock_status`, { headers: { Authorization: wooAuth() }, signal: ctrl.signal });
     if (!r.ok) return null;
-    const items = await r.json();
-    // WooCommerce search matches across title+description+SKU — a query like "Aveta 250" also
-    // returns the Marvel 150 (its description mentions 250), and quoting the cheapest price across
-    // those loose matches told a real customer the NOVA 250 was "dari RM 7,988" (the Marvel 150's
-    // price — 2026-07-22 incident, Harith: "did the wrong price stem from checking the wrong bike?"
-    // Yes.). Require every query token to appear in the product NAME itself (normalized to
-    // alphanumerics so "X-MAX"/"xmax" and "368D"/"368 D" still match).
-    const alnum = s => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
-    const qTokens = q.split(/\s+/).map(alnum).filter(t => t.length >= 2);
-    // Booking/pre-release listings (e.g. "OPEN FOR BOOKING NEW ZONTES 175X", 2026-07-24 incident:
-    // quoted its placeholder price RM 8,888.89 as real stock) carry stock_status=instock but the
-    // bike isn't released — split them into their own bucket so the FR bot answers with the
-    // booking pitch instead of a stock/price claim.
-    const RE_BOOKING = /open\s+for\s+booking|\bbooking\b|pre-?order|coming\s+soon/i;
-    const named = (Array.isArray(items) ? items : [])
-      .filter(p => { const nn = alnum(p.name); return qTokens.every(t => nn.includes(t)); })
-      .map(p => ({ name: String(p.name || '').split('|')[0].trim().slice(0, 60), price: Number(p.price || p.regular_price || 0), stock: p.stock_status, booking: RE_BOOKING.test(String(p.name || '')) }));
-    return {
-      matches: named.filter(p => !p.booking && p.stock !== 'outofstock').map(p => ({ name: p.name.slice(0, 48), price: p.price })),
-      booking: named.filter(p => p.booking).map(p => ({ name: p.name })),
-    };
-  } catch (e) { log('wooCheckStock err:', String(e.message || e).slice(0, 80)); return null; }
+    return (await r.json()).stock_status || null;
+  } catch { return null; }
   finally { clearTimeout(timer); }
+}
+async function wooCheckStock(text){
+  if (!WOO_SITE || !WOO_USER || !WOO_APP_PW) return null;   // not configured — caller must skip silently
+  const toks = catalogModelTokens(text);
+  if (!toks.length || !CATALOG.items.length) return null;   // no model named / cache not loaded yet (boot) → no claim either way
+  const named = CATALOG.items
+    .filter(p => { const nn = alnumTok(p.name); return toks.every(t => nn.includes(t)); })
+    .map(p => ({ id: p.id, name: String(p.name || '').split('|')[0].trim().slice(0, 60), price: Number(p.price || p.regular_price || 0), stock: p.stock_status, booking: RE_BOOKING.test(String(p.name || '')) }));
+  const booking = named.filter(p => p.booking).map(p => ({ name: p.name }));
+  let instock = named.filter(p => !p.booking && p.stock !== 'outofstock');
+  // Single distinct model = the case where stockLineFor will assert "✅ Ada — dari RM X", so
+  // live-verify each unit first (a verify failure trusts the ≤10-min-old cache rather than block).
+  const distinct = new Set(instock.map(p => p.name.toLowerCase()));
+  if (distinct.size === 1 && instock.length <= 3){
+    const checks = await Promise.all(instock.map(async p => ({ p, live: await wooVerifyLive(p.id) })));
+    instock = checks.filter(c => c.live !== 'outofstock').map(c => c.p);
+  }
+  return { matches: instock.map(p => ({ name: p.name.slice(0, 48), price: p.price })), booking };
+}
+if (WOO_SITE && WOO_USER && WOO_APP_PW){
+  catalogRefresh();
+  setInterval(catalogRefresh, Number(process.env.CATALOG_REFRESH_MS || 10 * 60 * 1000));
 }
 
 const recent = [];                 // in-memory debug log (wiped on restart)
@@ -352,6 +367,41 @@ Rules:
 - origin: identify the lead's SOURCE. MUST be EXACTLY one of: "Tiktok DM", "Tiktok Get Leads", "TIKTOK LIVE (Get leads)", "Ads Tiktok", "Whatsapp", "FB Ads", "FB/IG comments", "Mudah", "On Site Event", "Bike Continent META". Map: a tag starting "TIKTOK DM" OR a TikTok DM/chat-conversation screenshot (@handle, "Message request accepted") -> "Tiktok DM"; the word "Organic" in the data -> "Tiktok Get Leads"; paid TikTok ad OR TikTok lead-form export -> "Ads Tiktok"; WhatsApp chat screenshot -> "Whatsapp"; Facebook lead ad -> "FB Ads"; FB/IG comment -> "FB/IG comments"; Mudah -> "Mudah"; walk-in / showroom / roadshow / event -> "On Site Event".
 - name: the customer's name. For a chat/DM screenshot, use the contact's display name or @handle shown at the top (e.g. "mas.saifuddin"). Else "".
 Return JSON only.`;
+
+// A (approved 2026-07-24, ~RM 7/mo at ~30 DMs/day): gpt-4o reads the customer's INTENT instead of
+// regex keyword lists. Real incident same morning: "Kalau mau tolak moto masih ada loan lagi boleh
+// kah?" (= trade-in with outstanding loan) matched the word "loan" and got the buying-loan
+// template. Malay has endless sell phrasings (jual/tolak/lepas/let go/...) — a keyword list can
+// never keep up. Regex classify() stays as the instant fallback (API error/timeout/garbage output
+// → exactly the old behavior). Kill switch: FR_AI_CLASSIFY=0 (no redeploy of code needed, env only).
+const CLASSIFY_PROMPT = `You classify the FIRST WhatsApp message a customer sends to TM Motoworld, a Malaysian motorcycle dealer. Messages are Malay (often short-forms: nk, sy, x, bleh, tnya), English, or mixed.
+Answer with EXACTLY one word from: sell, loan, testride, product, greeting, skip
+- sell = customer wants to SELL or TRADE-IN their OWN bike to the shop. Phrasings include jual, tolak, lepas, let go, trade in, tukar ("nak tolak moto", "moto nak let go"). If they mention their own bike still has a loan/hutang while selling ("mau tolak moto masih ada loan boleh kah?"), it is STILL sell.
+- loan = asking about financing to BUY from the shop: loan, ansuran, EPP, kad kredit, bulanan berapa, deposit, blacklist/CTOS/CCRIS.
+- testride = wants to test ride a bike.
+- product = wants to BUY / asks about a model, price, stock, availability, colours. NOTE: "kedai ada jual motor X?" asks whether the SHOP sells X — that is product, NOT sell.
+- greeting = only a greeting / vague ad click with no stated interest ("Hi", "salam", "pagi bos").
+- skip = automated vendor/OTP/verification messages, or long text unrelated to motorcycles.
+Priority for mixed messages: sell beats loan beats product.`;
+async function aiClassify(text){
+  if (!OPENAI_KEY || process.env.FR_AI_CLASSIFY === '0') return null;
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 8000);
+  try {
+    const r = await fetch('https://api.openai.com/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'Authorization': 'Bearer ' + OPENAI_KEY, 'Content-Type': 'application/json' },
+      signal: ctrl.signal,
+      body: JSON.stringify({ model: MODEL, max_tokens: 5, temperature: 0, messages: [
+        { role: 'system', content: CLASSIFY_PROMPT },
+        { role: 'user', content: String(text).slice(0, 1000) },
+      ] }),
+    });
+    const j = await r.json();
+    if (!r.ok) throw new Error('OpenAI HTTP ' + r.status);
+    return String(j.choices?.[0]?.message?.content || '').trim().toLowerCase().replace(/[^a-z]/g, '');
+  } finally { clearTimeout(timer); }
+}
 
 async function aiExtract(blocks){
   if (!OPENAI_KEY) throw new Error('NO_KEY');
@@ -725,7 +775,7 @@ setInterval(() => { drainFRDeferred().catch(e => log('FR drain tick err', String
   const FR_EXTRA_INTERNAL = new Set(['60162393812','60108093259','60102304152','60123534271','60182907538','601143991899']);
   const staffLast9 = new Set(Object.values(STAFF).map(s => String(s.phone || '').replace(/\D/g, '').slice(-9)).filter(Boolean));
   const isStaffPhone = p => { const d = String(p || '').replace(/\D/g, ''); return !!d && (staffLast9.has(d.slice(-9)) || FR_EXTRA_INTERNAL.has(d)); };
-  firstresponse.init({ waSend, assignLeads, larkWriteLead, notifyStaff, sla, getUnavailable, log, isStaffPhone, wooCheckStock, inDistHours: inFRDistHours, deferStaffNotify });
+  firstresponse.init({ waSend, assignLeads, larkWriteLead, notifyStaff, sla, getUnavailable, log, isStaffPhone, wooCheckStock, aiClassify, inDistHours: inFRDistHours, deferStaffNotify });
   if (SLA_ON){   // these belong to the SLA engine — keep them gated exactly as before the FR wiring
     // SLA SWEEP — enrol every new Lark lead (any source) into SLA. OFF unless SLA_SWEEP=1 + SLA_SWEEP_FROM set.
     if (process.env.SLA_SWEEP === '1'){
