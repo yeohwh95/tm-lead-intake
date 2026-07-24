@@ -81,7 +81,9 @@ fr.init({
   isStaffPhone: p => String(p).endsWith('123773259'),
   wooCheckStock: async (q) => /aveta 250/i.test(q)
     ? { matches: [{ name: 'NEW AVETA NOVA 250', price: 14388 }, { name: 'NEW AVETA VANGUARD 250', price: 16300 }, { name: 'NEW AVETA VTM 250 LX', price: 12688 }] }
-    : /vulcan/i.test(q) ? { matches: [{ name: 'Kawasaki Vulcan S', price: 12800 }] } : { matches: [] },
+    : /vulcan/i.test(q) ? { matches: [{ name: 'Kawasaki Vulcan S', price: 12800 }] }
+    : /175x/i.test(q) ? { matches: [], booking: [{ name: 'OPEN FOR BOOKING NEW ZONTES 175X' }] }
+    : { matches: [] },
 });
 const wait = ms => new Promise(r => setTimeout(r, ms));
 (async () => {
@@ -123,12 +125,29 @@ ok(/ADIB : 017-8869542/.test(sent[sent.length-1].text), 'flow: reply carries ass
   await wait(120);
   ok(/Ada, stok tersedia.*RM 12,800/.test(sent[sent.length - 1].text), 'flow: stock check reports real WooCommerce stock');
 
-  // stock check: product question w/ NO WooCommerce match → reply says out of stock, still assigns lead
+  // stock check: NO WooCommerce match → NEUTRAL line, never "takde stok" (2026-07-24: ER6N was
+  // instock + MT-07 physically available, both customers told "takde stok" — a search miss or a
+  // stale Woo flag must never become a confident negative claim). Lead still assigns.
   const nAssigned2 = assigned.length;
   fr.onMessage({ jid: 'cust5@s.whatsapp.net', phone: '60155555555', kind: 'text', text: 'ninja 250 ada ke' });
   await wait(120);
-  ok(/takde stok untuk model tu/.test(sent[sent.length - 1].text), 'flow: stock check reports out-of-stock');
-  ok(assigned.length > nAssigned2, 'flow: out-of-stock model still assigns the lead');
+  ok(/salesman kami akan confirm/.test(sent[sent.length - 1].text), 'flow: no stock match → neutral salesman-will-confirm line');
+  ok(!/takde stok/.test(sent[sent.length - 1].text), 'flow: no stock match never claims out-of-stock');
+  ok(assigned.length > nAssigned2, 'flow: unmatched model still assigns the lead');
+
+  // real fixture 2026-07-24 (ER6N false negative): in-stock bike the search missed → neutral, not "takde stok"
+  fr.onMessage({ jid: 'cust5b@s.whatsapp.net', phone: '60155555556', kind: 'text', text: 'slamat pagi sy mencari motor er6n ada stok lg?' });
+  await wait(120);
+  ok(/salesman kami akan confirm/.test(sent[sent.length - 1].text) && !/takde stok/.test(sent[sent.length - 1].text), 'flow: ER6N-class search miss → neutral BM line');
+
+  // real fixture 2026-07-24 (Zontes 175X): booking-only listing → booking pitch + Steven's Zontes
+  // dealer/mystery-gift lines, NO stock claim, NO placeholder price
+  fr.onMessage({ jid: 'cust5c@s.whatsapp.net', phone: '60155555557', kind: 'text', text: 'Hi morning, zontes 175x expected release around what month ya, is there any info on this? Thanks' });
+  await wait(120);
+  const bk = sent[sent.length - 1].text;
+  ok(/OPEN FOR BOOKING/.test(bk) && /ZONTES 175X/.test(bk), 'flow: booking listing → booking pitch with model name');
+  ok(/mystery gift/i.test(bk) && /Zontes dealer/i.test(bk), 'flow: Zontes booking carries Steven dealer + mystery-gift lines');
+  ok(!/we have stock/i.test(bk) && !/8,888/.test(bk), 'flow: booking listing never claims stock or quotes placeholder price');
 
   // multi-match stock (2026-07-22 Aveta 250 incident): several distinct models match → list the
   // options and ask which one, NEVER quote one cheapest price across different bikes

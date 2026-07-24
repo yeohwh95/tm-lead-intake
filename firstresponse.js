@@ -104,6 +104,20 @@ async function stockLineFor(cat, text, lang){
   let r = null;
   try { r = await D.wooCheckStock(text); } catch(e){ D.log && D.log('FR stock err:', String(e.message||e).slice(0,60)); }
   if (!r) return '';   // not configured / lookup failed → skip silently, never block the reply
+  // Booking/pre-release listing matched (2026-07-24, Zontes 175X: bot claimed "we have stock —
+  // from RM 8,888.889" off the placeholder price of "OPEN FOR BOOKING NEW ZONTES 175X") →
+  // booking pitch, never a stock/price claim. Zontes gets Steven's dealer + mystery-gift lines.
+  if (!(r.matches && r.matches.length) && r.booking && r.booking.length){
+    const raw = r.booking[0].name;
+    const model = raw.replace(/open\s+for\s+booking|pre-?order|coming\s+soon/gi, '').replace(/^\W+|\W+$/g, '').replace(/^new\s+/i, '').trim() || raw;
+    const zontes = /zontes/i.test(raw);
+    if (lang === 'en') return `🏍️ The ${model} isn't released yet — we're OPEN FOR BOOKING now!` + (zontes
+      ? ` We're a Zontes dealer — book early with us to get your unit faster + a mystery gift 🎁 Beli Zontes, beli dengan TM Motoworld 😁`
+      : ` Book early with us to get your unit faster ya 👍`);
+    return `🏍️ ${model} belum release lagi — sekarang OPEN FOR BOOKING!` + (zontes
+      ? ` Kami Zontes dealer — sesiapa book awal dengan kami akan dapat stock cepat & mystery gift 🎁 Beli Zontes, beli dengan TM Motoworld 😁`
+      : ` Book awal dengan kami untuk dapat unit cepat ya 👍`);
+  }
   if (r.matches && r.matches.length){
     // Dedupe by name (same bike can be listed used + NEW). ONE match → safe to quote its price.
     // SEVERAL distinct matches → the customer's model is ambiguous ("Aveta 250" = Nova 250 /
@@ -122,9 +136,14 @@ async function stockLineFor(cat, text, lang){
       ? `✅ We have a few options in stock:\n${lines}\nWhich one are you interested in?`
       : `✅ Ada beberapa pilihan dalam stok:\n${lines}\nYang mana satu bos berminat ya?`;
   }
+  // NO match ≠ NO stock (2026-07-24: ER6N had 2 units instock + MT-07 was flagged outofstock in
+  // Woo while physically available, yet both customers were told "takde stok"). A search miss or a
+  // stale Woo flag must never become a confident negative claim — a wrong "no stock" loses the
+  // sale. Positive claims only when a live instock match exists; everything else defers to the
+  // salesman, neutrally.
   return lang === 'en'
-    ? `⚠️ That exact model isn't in stock right now, but we have other units — our salesperson can suggest alternatives.`
-    : `⚠️ Buat masa ni takde stok untuk model tu, tapi kami ada unit lain — salesman boleh cadangkan pilihan lain ya.`;
+    ? `👍 Our salesperson will confirm the latest stock for that model with you shortly.`
+    : `👍 Untuk stok model tu, salesman kami akan confirm dengan awak sekejap lagi ya.`;
 }
 
 // ---------- assignment (the point of it all: category confirmed = lead assigned NOW) ----------

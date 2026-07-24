@@ -156,11 +156,18 @@ async function wooCheckStock(query){
     // alphanumerics so "X-MAX"/"xmax" and "368D"/"368 D" still match).
     const alnum = s => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
     const qTokens = q.split(/\s+/).map(alnum).filter(t => t.length >= 2);
-    const matches = (Array.isArray(items) ? items : [])
-      .filter(p => p.stock_status !== 'outofstock')
+    // Booking/pre-release listings (e.g. "OPEN FOR BOOKING NEW ZONTES 175X", 2026-07-24 incident:
+    // quoted its placeholder price RM 8,888.89 as real stock) carry stock_status=instock but the
+    // bike isn't released — split them into their own bucket so the FR bot answers with the
+    // booking pitch instead of a stock/price claim.
+    const RE_BOOKING = /open\s+for\s+booking|\bbooking\b|pre-?order|coming\s+soon/i;
+    const named = (Array.isArray(items) ? items : [])
       .filter(p => { const nn = alnum(p.name); return qTokens.every(t => nn.includes(t)); })
-      .map(p => ({ name: String(p.name || '').split('|')[0].trim().slice(0, 48), price: Number(p.price || p.regular_price || 0) }));
-    return { matches };
+      .map(p => ({ name: String(p.name || '').split('|')[0].trim().slice(0, 60), price: Number(p.price || p.regular_price || 0), stock: p.stock_status, booking: RE_BOOKING.test(String(p.name || '')) }));
+    return {
+      matches: named.filter(p => !p.booking && p.stock !== 'outofstock').map(p => ({ name: p.name.slice(0, 48), price: p.price })),
+      booking: named.filter(p => p.booking).map(p => ({ name: p.name })),
+    };
   } catch (e) { log('wooCheckStock err:', String(e.message || e).slice(0, 80)); return null; }
   finally { clearTimeout(timer); }
 }
