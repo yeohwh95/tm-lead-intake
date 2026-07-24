@@ -631,7 +631,10 @@ async function larkWriteLead(l){
     const inH = sla ? sla.inHours(nowMs) : true;
     fields['SLA Assigned At'] = nowMs;
     fields['SLA Original Salesman'] = l.assignee;
-    fields['SLA Status'] = inH ? 'Pending' : 'Off-hours';
+    // 'Queued' = bulk lead whose salesperson DM is still drip-feed-pending (drainBulkQueue flips
+    // it to Pending at real DM time). Keeps the sweep off it (Assigned At is set) AND the boot
+    // rehydrator's timer restore off it (filters Status=Pending), while marking it recoverable.
+    fields['SLA Status'] = l.queued ? 'Queued' : inH ? 'Pending' : 'Off-hours';
     fields['SLA Reassign Count'] = 0;
   }
   const r = await fetch(`${LARK_BASE}/bitable/v1/apps/${LARK_APP_TOKEN}/tables/${LARK_TABLE_ID}/records`, { method: 'POST', headers: { 'Authorization': 'Bearer ' + tok, 'Content-Type': 'application/json' }, body: JSON.stringify({ fields }) });
@@ -784,6 +787,32 @@ async function rehydrateFromLark(){
     }
     if (n){ frDeferPersist(); log(`rehydrate: ${n} deferred off-hours lead(s) re-queued from Lark`); }
   } catch(e){ log('rehydrate deferred err:', String(e.message||e).slice(0,80)); }
+  // 4) Bulk drip-feed queue (2026-07-24 evening) — rows stamped SLA Status='Queued' are bulk leads
+  // whose salesperson DM never went out before the disk was wiped. Rebuild them into ONE job so
+  // drainBulkQueue resumes the throttled trickle (batches of BULK_BATCH_SIZE, business hours).
+  // override:false — Queued only ever comes from the bulk round-robin path.
+  try {
+    const items = await larkSearch({
+      filter: { conjunction: 'and', conditions: [{ field_name: 'SLA Status', operator: 'is', value: ['Queued'] }] },
+      sort: [{ field_name: 'date created', desc: false }],
+    });
+    const have = new Set(bulkQueue.flatMap(j => j.batches.flat()).map(l => l.recordId).filter(Boolean));
+    const leads = [];
+    for (const it of items){
+      if (have.has(it.record_id)) continue;
+      const f = it.fields || {};
+      if (now - (slaRecCreated(f) || 0) > 7 * 24 * 3600e3) continue;
+      const oid = Array.isArray(f['Salesman']) ? (f['Salesman'][0]?.id || '') : '';
+      const rep = STAFF_BY_OPENID[oid];
+      if (!rep) continue;
+      leads.push({ recordId: it.record_id, phone: slaFieldText(f['Phone number']), name: '', want: slaFieldText(f['Customer want']), brand: slaFieldText(f['Brand']), assignee: rep.name, staff: { phone: rep.phone, openId: oid }, override: false });
+    }
+    if (leads.length){
+      bulkQueue.push({ chatId: INTAKE_GROUP_JID, screenshotUrl: '', total: leads.length, sent: 0, batches: chunk(leads, BULK_BATCH_SIZE) });
+      bulkPersist();
+      log(`rehydrate: ${leads.length} bulk-queued lead(s) rebuilt from Lark (drip-feed resumes)`);
+    }
+  } catch(e){ log('rehydrate bulk err:', String(e.message||e).slice(0,80)); }
 }
 
 // ---- SLA: pick the next rep in the brand's region pool (skip current + unavailable) ----
@@ -919,6 +948,11 @@ async function drainBulkQueue(){
   if (!batch) { bulkQueue.shift(); bulkPersist(); return; }
   try {
     await notifyBatch(batch, job.screenshotUrl);
+    // DM actually sent now → flip Queued→Pending with a fresh Assigned At (rep-fair clock start;
+    // also takes the row out of the rehydrator's queue-rebuild set).
+    for (const l of batch){
+      if (l.recordId) { try { await larkUpdateSLA(l.recordId, { 'SLA Assigned At': Date.now(), 'SLA Status': 'Pending' }); } catch(e){ log('bulk drain SLA-flip err', String(e.message||e).slice(0,60)); } }
+    }
     job.sent += batch.length;
     const left = job.total - job.sent;
     if (job.batches.length === 0) {
@@ -1142,6 +1176,14 @@ async function handle(payload){
     // contain a misleading brand/team word (e.g. the Zontes/KTM test-ride Excel's own filename
     // contains "ktm", which silently overrode Harith's actual "shah alam + hq" caption instruction).
     const enriched = assignLeads(leads, fileOverrides(info.caption || info.fileName), unavail);
+    // Bulk-queue durability (2026-07-24): leads beyond the first batch are stamped SLA Status =
+    // 'Queued' in Lark (instead of Pending) so (a) the boot rehydrator can rebuild the drip-feed
+    // queue after a deploy wipes bulk_queue.json, and (b) the timer rehydrate never registers a
+    // 60/75-min clock for a lead whose DM hasn't actually been sent. drainBulkQueue flips each
+    // lead to Pending + a fresh Assigned At at real DM time (also makes the Lark timestamp
+    // rep-fair — it used to say write-time while the rep only got the DM hours later).
+    const isBulk = enriched.length > BULK_THRESHOLD;
+    if (isBulk) enriched.forEach((l, i) => { if (i >= BULK_BATCH_SIZE) l.queued = true; });
     if (LIVE_LARK) {
       // Lark write happens for EVERY lead immediately, bulk or not — the CRM record is always
       // safe and fully assigned even though the WhatsApp notify below may be staggered.
@@ -1152,7 +1194,6 @@ async function handle(payload){
     // misleading (2026-07-21 incident: card said "21 leads notified, Nazrin/Aso/Roy 7 each"
     // when only the first 15 had actually been sent to WhatsApp — the other 6 were still
     // queued). One accurate message per event instead of two conflicting ones.
-    const isBulk = enriched.length > BULK_THRESHOLD;
     if (!isBulk) {
       await waSend(info.chatId, renderCard(src, enriched, LIVE_LARK));
       if (enriched.length <= 3) await askMissing(info.chatId, enriched);   // ❓ small drop with blank Brand → ask the group (Option A)
