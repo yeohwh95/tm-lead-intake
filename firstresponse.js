@@ -282,5 +282,15 @@ function markHuman(jid){
   if (humanTouched.size > 5000) humanTouched.clear();
 }
 
+// Boot rehydrate (2026-07-24): a Render deploy wipes fr_state.json, so the bot would re-greet
+// chats it already touched. index.js rebuilds the greeted map from Lark (WhatsApp Direct leads,
+// last 7d) and hands it here. Existing entries win — never overwrite live state.
+function rehydrateGreeted(entries){
+  let n = 0;
+  for (const e of entries || []){ if (e.jid && !state.greeted[e.jid]) { state.greeted[e.jid] = e.ts || Date.now(); n++; } }
+  if (n) persist();
+  return n;
+}
+
 function init(deps){ D = deps; D.log('firstresponse init — ON:', ON(), 'debounce:', DEBOUNCE_MS + 'ms'); }
-module.exports = { init, onMessage, markHuman, _classify: classify, _tpl: tpl, _isEnglish: isEnglish, _state: () => state, RE_BIKE };
+module.exports = { init, onMessage, markHuman, rehydrateGreeted, _classify: classify, _tpl: tpl, _isEnglish: isEnglish, _state: () => state, RE_BIKE };

@@ -704,6 +704,88 @@ async function slaSweep(){
   if (done) log(`SLA sweep: enrolled ${done} lead(s) (cap ${SLA_SWEEP_CAP})`);
   else if (skipRep) log(`SLA sweep: 0 enrolled — ${skipRep} candidate(s) have a salesperson not in the roster (check STAFF map)`);   // precutoff-only = steady state, stay quiet
 }
+// ---- Rehydrate-from-Lark on boot (2026-07-24, Benjamin approved): Render deploys wipe the
+// ephemeral disk (sla_store.json / fr_state.json / fr_deferred.json). Lark is the durable record —
+// rebuild what matters from it so a deploy stops costing in-flight SLA timers, stops re-greeting
+// chats the bot already touched (2026-07-24 12:24 artifact), and stops losing queued off-hours
+// leads. Kill switch: REHYDRATE=0. Runs once, ~20s after boot.
+const REHYDRATE_ON = process.env.REHYDRATE !== '0';
+async function rehydrateFromLark(){
+  if (!REHYDRATE_ON || !LIVE_LARK) return;
+  const now = Date.now();
+  // 1) Pending SLA timers assigned in the last 4h — restored with their ORIGINAL assign time so
+  // the 60/75-min clocks resume, not restart. No DM re-send (reps already have it). override=true:
+  // after a restart we can't tell round-robin from deliberate, and wrongly auto-moving a
+  // deliberate lead is the worse failure (nudge/escalate still fire).
+  try {
+    if (sla){
+      const items = await larkSearch({
+        filter: { conjunction: 'and', conditions: [
+          { field_name: 'SLA Assigned At', operator: 'isNotEmpty', value: [] },
+          { field_name: 'SLA Status', operator: 'is', value: ['Pending'] },
+        ]},
+        sort: [{ field_name: 'date created', desc: true }],
+      });
+      let n = 0;
+      for (const it of items){
+        const f = it.fields || {};
+        const at = parseInt(slaFieldText(f['SLA Assigned At']), 10) || 0;
+        if (!at || now - at > 4 * 3600e3) continue;
+        const oid = Array.isArray(f['Salesman']) ? (f['Salesman'][0]?.id || '') : '';
+        const orig = slaFieldText(f['SLA Original Salesman']);
+        const rep = STAFF_BY_OPENID[oid] || (STAFF[orig] ? { name: orig, phone: STAFF[orig].phone } : null);
+        if (!rep) continue;
+        sla.register(rep.name, rep.phone, [{ recordId: it.record_id, summary: slaFieldText(f['Customer want']), brand: slaFieldText(f['Brand']), custName: '', custPhone: slaFieldText(f['Phone number']), override: true, assignedAt: at, firstAssignedAt: at }], null);
+        n++;
+      }
+      if (n) log(`rehydrate: ${n} pending SLA timer(s) restored from Lark`);
+    }
+  } catch(e){ log('rehydrate SLA err:', String(e.message||e).slice(0,80)); }
+  // 2) FR greeted map — WhatsApp Direct leads from the last 7 days → never re-greet those chats.
+  try {
+    const items = await larkSearch({
+      filter: { conjunction: 'and', conditions: [{ field_name: 'Origin', operator: 'is', value: ['WhatsApp Direct'] }] },
+      sort: [{ field_name: 'date created', desc: true }],
+    });
+    const entries = [];
+    for (const it of items){
+      const f = it.fields || {};
+      const created = slaRecCreated(f);
+      if (!created || now - created > 7 * 24 * 3600e3) continue;
+      const digits = slaFieldText(f['Phone number']).replace(/\D/g, '');
+      if (digits) entries.push({ jid: digits + '@s.whatsapp.net', ts: created });
+    }
+    const n = firstresponse.rehydrateGreeted(entries);
+    if (n) log(`rehydrate: ${n} greeted chat(s) restored (no re-greets after deploy)`);
+  } catch(e){ log('rehydrate greeted err:', String(e.message||e).slice(0,80)); }
+  // 3) Off-hours FR leads still UNASSIGNED in Lark (<36h) whose deferred staff-notify queue died
+  // with the disk → re-queue for the 9am drain. Trade-ins excluded (Fitri DM text isn't safely
+  // reconstructable); dedup by recordId so a plain restart (queue intact) adds nothing.
+  try {
+    const items = await larkSearch({
+      filter: { conjunction: 'and', conditions: [
+        { field_name: 'Origin', operator: 'is', value: ['WhatsApp Direct'] },
+        { field_name: 'Salesman', operator: 'isEmpty', value: [] },
+      ]},
+      sort: [{ field_name: 'date created', desc: true }],
+    });
+    const have = new Set(frDeferred.map(e => e.recordId).filter(Boolean));
+    let n = 0;
+    for (const it of items){
+      const f = it.fields || {};
+      const created = slaRecCreated(f);
+      const want = slaFieldText(f['Customer want']);
+      if (!created || now - created > 36 * 3600e3) continue;
+      if (/^TRADE-IN:/i.test(want) || f['SLA Assigned At'] || have.has(it.record_id)) continue;
+      const digits = slaFieldText(f['Phone number']).replace(/\D/g, '');
+      if (!digits) continue;
+      frDeferred.push({ kind: 'pool', phone: digits, want: want || 'WhatsApp direct inquiry', brand: slaFieldText(f['Brand']), recordId: it.record_id, queuedAt: created });
+      n++;
+    }
+    if (n){ frDeferPersist(); log(`rehydrate: ${n} deferred off-hours lead(s) re-queued from Lark`); }
+  } catch(e){ log('rehydrate deferred err:', String(e.message||e).slice(0,80)); }
+}
+
 // ---- SLA: pick the next rep in the brand's region pool (skip current + unavailable) ----
 async function pickNextRep(brand, currentKey, exclude){
   const ex = new Set(exclude && exclude.length ? exclude : [currentKey]);
@@ -776,6 +858,7 @@ setInterval(() => { drainFRDeferred().catch(e => log('FR drain tick err', String
   const staffLast9 = new Set(Object.values(STAFF).map(s => String(s.phone || '').replace(/\D/g, '').slice(-9)).filter(Boolean));
   const isStaffPhone = p => { const d = String(p || '').replace(/\D/g, ''); return !!d && (staffLast9.has(d.slice(-9)) || FR_EXTRA_INTERNAL.has(d)); };
   firstresponse.init({ waSend, assignLeads, larkWriteLead, notifyStaff, sla, getUnavailable, log, isStaffPhone, wooCheckStock, aiClassify, inDistHours: inFRDistHours, deferStaffNotify });
+  setTimeout(() => rehydrateFromLark().catch(e => log('rehydrate err:', String(e.message||e).slice(0,80))), 20000);
   if (SLA_ON){   // these belong to the SLA engine — keep them gated exactly as before the FR wiring
     // SLA SWEEP — enrol every new Lark lead (any source) into SLA. OFF unless SLA_SWEEP=1 + SLA_SWEEP_FROM set.
     if (process.env.SLA_SWEEP === '1'){

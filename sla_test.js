@@ -100,6 +100,14 @@ sla.init(deps, { now: () => clock });
   ok('pre-cutoff lead NOT moved (new-leads-only guard)', sla._state().reps.Aso.leads.rec7.status === 'flagged_noreassign');
   process.env.SLA_REASSIGN_FROM = '';
 
+  // REHYDRATE (2026-07-24): register with an ORIGINAL assignedAt (boot restore after deploy) —
+  // the 60-min nudge must fire relative to the original time, not the restore time.
+  sla.register('Roy', '+60123943259', [{ recordId: 'recR', summary: 'rehydrated', brand: 'HQ', custName: '', custPhone: '+60177778888', override: true, assignedAt: clock - 61 * MIN, firstAssignedAt: clock - 61 * MIN }], null);
+  ok('rehydrated lead keeps original assignedAt', sla._state().reps.Roy.leads.recR.assignedAt === clock - 61 * MIN);
+  clock += 1 * MIN; await sla.tick();   // 62 min after ORIGINAL assign (still in hours) → nudge due, reassign not yet
+  ok('rehydrated timer resumes (nudge fires past T+60 of original assign)', calls.sent.some(s => s.phone === '+60123943259' && /Not acknowledged yet/.test(s.text)));
+  ok('rehydrated lead not reassigned before T+75', sla._state().reps.Roy.leads.recR.status === 'pending');
+
   // off-hours: register at Sunday → skipped
   let clock2 = Date.UTC(2026, 5, 28, 4, 0, 0); // Sunday 12:00 MYT
   sla.init(deps, { now: () => clock2 });

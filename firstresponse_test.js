@@ -181,6 +181,14 @@ ok(/ADIB : 017-8869542/.test(sent[sent.length-1].text), 'flow: reply carries ass
   fr.onMessage({ jid: 'custA3@s.whatsapp.net', phone: '60103030303', kind: 'text', text: 'vulcan ada stok tak api-down' });
   await wait(120);
   ok(/Ada, stok tersedia.*RM 12,800/.test(sent[sent.length - 1].text), 'A: LLM error → regex fallback (product + stock check still work)');
+  // ---- rehydrateGreeted (2026-07-24): restored chats are NOT re-greeted after a deploy ----
+  const nRe = fr.rehydrateGreeted([{ jid: 'custR1@s.whatsapp.net', ts: Date.now() - 3600e3 }, { jid: 'cust1@s.whatsapp.net', ts: 1 }]);
+  ok(nRe === 1, 'rehydrate: only unknown chats added (live greeted state never overwritten)');
+  const nSentR = sent.length;
+  fr.onMessage({ jid: 'custR1@s.whatsapp.net', phone: '60104040404', kind: 'text', text: 'Hi' });
+  await wait(120);
+  ok(sent.length === nSentR, 'rehydrate: restored chat gets NO duplicate greeting');
+
   fr.init(DEPS);   // restore plain deps for the off-hours section below
 
   // off-hours deferral (team 2026-07-22: replies 24h, lead distribution Mon–Fri 9–5): outside the

@@ -41,7 +41,9 @@ function register(repKey, repPhone, leads, dmMsgId) {
   r.phone = repPhone; r.lids = r.lids || [];
   for (const l of leads) {
     if (r.leads[l.recordId]) continue;
-    r.leads[l.recordId] = { recordId: l.recordId, summary: l.summary, brand: l.brand || '', custName: l.custName || '', custPhone: l.custPhone || '', assignedAt: now(), firstAssignedAt: now(), dmMsgId, status: 'pending', reassignCount: 0, contactedAt: 0, override: !!l.override };
+    // assignedAt may be supplied by the boot rehydrator (original Lark timestamp) so restored
+    // timers resume where they were instead of restarting the 75-min clock (2026-07-24).
+    r.leads[l.recordId] = { recordId: l.recordId, summary: l.summary, brand: l.brand || '', custName: l.custName || '', custPhone: l.custPhone || '', assignedAt: l.assignedAt || now(), firstAssignedAt: l.firstAssignedAt || l.assignedAt || now(), dmMsgId, status: 'pending', reassignCount: 0, contactedAt: 0, override: !!l.override };
   }
   persist();
   (deps.log || console.log)('SLA register:', repKey, '←', leads.length, 'lead(s)');
