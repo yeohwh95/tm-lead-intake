@@ -2,6 +2,13 @@
 
 WhatsApp lead → AI extract → Lark CRM + notify the assigned salesperson. **LIVE.**
 
+## 🟢 FR STOCK v2 — 2026-07-24 (`341c412`): search miss ≠ "takde stok" + booking-listing pitch
+Steven/Benjamin reported 4 real same-morning misfires. Root causes + fixes:
+1. **ER6N + MT-07 told "takde stok" while available.** `extractProductQuery`'s neighbor-word grab put "ada" into the query/name-filter tokens → real in-stock ER6N filtered to zero; MT-07 additionally is marked `outofstock` in Woo itself (data issue — both 2019 MT-07 listings; team to correct). Fix (asymmetric claims): zero-match / outofstock now sends a NEUTRAL "salesman kami akan confirm stock" line — the bot only makes the positive "✅ Ada — dari RM X" claim on a live instock name-match. A search miss or stale Woo flag can never again become a confident negative to a customer.
+2. **Zontes 175X quoted "we have stock — from RM 8,888.889"** off the placeholder price of the listing titled "OPEN FOR BOOKING NEW ZONTES 175X". Fix: `wooCheckStock` splits name-matches into `{matches, booking}` (booking = /open for booking|booking|pre-?order|coming soon/ in the title); `stockLineFor` answers booking-only matches with the booking pitch (BM/EN), never stock/price. Zontes bookings carry Steven's lines: Zontes dealer, book early = faster stock + mystery gift, "Beli Zontes, beli dengan TM Motoworld 😁".
+3. **"mau tolak moto" (sell) misrouted to LOAN template** — keyword-list gap, NOT fixed by this deploy. Long-term fix approved-in-principle = LLM intent classification (gpt-4o, ~RM 7/mo) — awaiting Benjamin's go, together with (B) local catalog cache (fetch all ~300 Woo products every 10 min, forgiving local matching) which is what would make ER6N-class queries return the correct positive answer instead of the neutral line.
+Tests 83/83 (real 2026-07-24 messages added as fixtures).
+
 ## 🟢 BULK LEAD THROTTLE — LIVE 2026-07-21 (event Excel/form drops no longer blast the team)
 Staff sometimes drop an entire event's leads at once (e.g. a test-ride registration Excel, 100+ rows). Benjamin flagged the risk: assigning + DMing + starting SLA timers for all of them in one shot dumps dozens of leads on a 4-person brand pool instantly (guaranteed SLA reassign storm) and is exactly the kind of automated burst that risks the WhatsApp number.
 - **Fully automatic — staff do nothing differently.** They drop the file into the group exactly as before.
