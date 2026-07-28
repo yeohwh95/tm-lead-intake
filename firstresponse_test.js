@@ -226,6 +226,19 @@ ok(/ADIB : 017-8869542/.test(sent[sent.length-1].text), 'flow: reply carries ass
   ok(/Waktu operasi kami/.test(sent[sent.length - 1].text) && !/FITRI : /.test(sent[sent.length - 1].text), 'flow: off-hours sell reply — office-hours line, no Fitri card');
   ok(deferred.some(e => e.kind === 'dm' && /Trade-in Lead/.test(e.text)), 'flow: off-hours Fitri DM queued for the drain');
 
+  // 🐛→✅ 2026-07-28: click-to-chat customers arrive with a @lid privacy jid — WaSenderAPI can't
+  // deliver to that address, so the reply must go to the real phone-based jid instead (real
+  // incident: +60186528335 "Hi, nak tanya pasal moto" got classified + assigned but never replied to).
+  fr.init(DEPS);
+  const nSentLid = sent.length;
+  fr.onMessage({ jid: '143499823448076@lid', phone: '60186528335', kind: 'text', text: 'Hi, nak tanya pasal moto' });
+  await wait(120);
+  ok(sent.length === nSentLid + 1 && sent[sent.length - 1].to === '60186528335@s.whatsapp.net', 'flow: @lid customer greeting sent to real phone jid, not the @lid address');
+  fr.onMessage({ jid: '143499823448076@lid', phone: '60186528335', kind: 'text', text: 'z900rs' });
+  await wait(120);
+  ok(sent[sent.length - 1].to === '60186528335@s.whatsapp.net', 'flow: @lid customer model-answer reply also sent to real phone jid');
+  ok(assigned.some(a => a.want && /z900rs/i.test(a.want)), 'flow: @lid customer lead still written to Lark');
+
   console.log(`\n${pass} passed, ${fail} failed`);
   process.exit(fail ? 1 : 0);
 })();

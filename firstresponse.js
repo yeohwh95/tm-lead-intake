@@ -224,6 +224,15 @@ async function classifySmart(text, hasImage){
 }
 
 // ---------- flow ----------
+// 🐛→✅ 2026-07-28: customers arriving via a "click to chat" link get a @lid privacy JID as
+// remoteJid (WhatsApp's newer addressing mode) instead of the normal <phone>@s.whatsapp.net.
+// State (buffers/pending/greeted/humanTouched) still keys off the raw jid — markHuman() sees the
+// same @lid for a human's outbound reply in that chat, so that matching stays consistent. But
+// WaSenderAPI's /send-message can't deliver to a @lid address — it silently no-ops, so the bot
+// classified + assigned the lead correctly but the customer never got a reply. Resolve the actual
+// SEND target to the real phone (captured in b.phone from cleanedSenderPn/senderPn) whenever the
+// jid is a @lid — never touches normal contacts.
+const sendTarget = (jid, phone) => (jid && jid.includes('@lid') && phone) ? (phone + '@s.whatsapp.net') : jid;
 const VAGUE = t => !t || t.trim().length < 4 || classify(t, false).cat === 'greeting';
 async function flush(jid){
   const b = buffers[jid]; delete buffers[jid];
@@ -242,19 +251,19 @@ async function flush(jid){
     const stockLine = await stockLineFor(finalCat, text, lang);
     const card = await assign(finalCat, jid, b.phone, want);
     const offHours = !!(D.inDistHours && !D.inDistHours());
-    await D.waSend(jid, tpl(finalCat, lang, card, stockLine, offHours));
+    await D.waSend(sendTarget(jid, b.phone), tpl(finalCat, lang, card, stockLine, offHours));
     return;
   }
   if (cat === 'skip') { D.log('FR skip (unclassified/vendor):', jid.slice(0, 20)); return; }
   if (state.greeted[jid] && now - state.greeted[jid] < REGREET_MS) return;   // one touch per 7d
   state.greeted[jid] = now;
 
-  if (cat === 'greeting'){ state.pending[jid] = { ts: now }; persist(); await D.waSend(jid, tpl('greeting', lang)); return; }
+  if (cat === 'greeting'){ state.pending[jid] = { ts: now }; persist(); await D.waSend(sendTarget(jid, b.phone), tpl('greeting', lang)); return; }
   persist();
   const stockLine = await stockLineFor(cat, imageOnly ? '' : text, lang);
   const card = await assign(cat, jid, b.phone, imageOnly ? '[gambar/screenshot iklan]' : text);
   const offHours = !!(D.inDistHours && !D.inDistHours());
-  await D.waSend(jid, tpl(cat, lang, card, stockLine, offHours));
+  await D.waSend(sendTarget(jid, b.phone), tpl(cat, lang, card, stockLine, offHours));
 }
 
 function onMessage(info){
