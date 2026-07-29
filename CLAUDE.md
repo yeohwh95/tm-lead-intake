@@ -2,6 +2,31 @@
 
 WhatsApp lead → AI extract → Lark CRM + notify the assigned salesperson. **LIVE.**
 
+## 👤 ROSTER 2026-07-29 — IKHWAN added to the HQ pool (was in Lark but invisible to the bot)
+`IKHWAN +60129593259` → `STAFF` + `POOLS.HQ` (now 6: Adib, Syahrin, Fazwan, Azrul, Amir, Ikhwan).
+- **He was already row 21 of the Lark "Salesman Availability" tab, marked YES** — but the sheet only ever tells the bot who to SKIP (`getUnavailable` collects `NO` rows). Rotation membership comes from `POOLS` in code, so a name present in Lark and absent from `POOLS` receives **zero leads, silently, forever**. That was Ikhwan since whenever the team added him. ⚠️ **Lesson: adding a salesperson to the Lark sheet does NOT enrol them — the code roster is the source of truth for rotation.** Worth a periodic diff of sheet names vs `POOLS` (Azwin is still row 8 of the sheet though removed from `POOLS.KS` on 07-21 as resigned — harmless direction, but the same drift).
+- `openId` deliberately left `''` until he assigns ONE Lark row and we read the id back off that exact row (never name-harvest — duplicate/stale accounts have burned us twice). Both write paths guard on empty (`larkWriteLead` line ~627, `larkUpdateSalesman` line ~648), so his WhatsApp DM + SLA timers work now and only the Lark `Salesman` cell stays blank.
+- Adding him to `STAFF` also auto-protects his number from being treated as a customer (`staffLast9` derives from `STAFF`). Verified no last-9 phone collision — Jue `129653259` vs Ikhwan `129593259`. Tests 93/93 + 27/27.
+
+## 🐛→✅ FIXED 2026-07-28 (`b5ccf02`) — @lid click-to-chat customers got zero reply
+Benjamin flagged a real chat screenshot: +60186528335 sent "Hi, nak tanya pasal moto" at 9:23am on the
+93210 number and got no bot reply at all — nothing in Render logs looked wrong. Traced via the VPS console
+capture (`tm-motoworld-lead-intake` channel forwards every webhook, not just intake-group ones): the
+message's `remoteJid` was `143499823448076@lid` (`entryPointConversionSource: click_to_chat_link` in the
+raw payload) — WhatsApp's newer privacy addressing for customers who arrive via a wa.me/click-to-chat
+link, instead of the normal `<phone>@s.whatsapp.net`. `firstresponse.js` was passing that raw `@lid` jid
+straight into `D.waSend(jid, ...)` as the reply target — WaSenderAPI's `/send-message` silently no-ops on
+a `@lid` address (no error, no 4xx). The bot classified the message correctly and wrote the lead to Lark;
+it just never actually messaged the customer back.
+**Fix:** new `sendTarget(jid, phone)` helper in `firstresponse.js` — resolves the SEND target to
+`<phone>@s.whatsapp.net` whenever `jid` is `@lid` and a real phone was extracted (`cleanedSenderPn`/
+`senderPn`, already captured at the `index.js` webhook layer). State (`buffers`/`state.pending`/
+`state.greeted`/`humanTouched`) still keys off the raw `jid` unchanged — `markHuman()` sees the same
+`@lid` for a human's outbound reply in that same chat, so human-takeover detection stays consistent.
+Tests 93/93 (+3 new, using this exact real message as a fixture). Deployed live same day.
+General pattern (not TM-specific) now documented in `skills/wasenderapi_integration.md`.
+⚠️ The 9:23am customer never got a reply before the fix shipped — needs a manual follow-up, the bot won't retry an already-flushed message.
+
 ## 🟢 FR STOCK v2 — 2026-07-24 (`341c412`): search miss ≠ "takde stok" + booking-listing pitch
 Steven/Benjamin reported 4 real same-morning misfires. Root causes + fixes:
 1. **ER6N + MT-07 told "takde stok" while available.** `extractProductQuery`'s neighbor-word grab put "ada" into the query/name-filter tokens → real in-stock ER6N filtered to zero; MT-07 additionally is marked `outofstock` in Woo itself (data issue — both 2019 MT-07 listings; team to correct). Fix (asymmetric claims): zero-match / outofstock now sends a NEUTRAL "salesman kami akan confirm stock" line — the bot only makes the positive "✅ Ada — dari RM X" claim on a live instock name-match. A search miss or stale Woo flag can never again become a confident negative to a customer.

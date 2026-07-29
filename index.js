@@ -195,7 +195,7 @@ function remember(o){ recent.unshift({ at: new Date().toISOString(), ...o }); if
 // ---- Rotation pools (updated roster 2026-06-17) ----
 const POOLS = {
   KS:       ['Jebat','Nabil','Allysa','Jue','Amirul','Nazrin','Aso','Roy'],  // Lambretta/Thunder (Klang + Shah Alam) — Azwin removed 2026-07-21 (resigned)
-  HQ:       ['Adib','Syahrin','Fazwan','Azrul','Amir'],            // HQ / Suzuki
+  HQ:       ['Adib','Syahrin','Fazwan','Azrul','Amir','Ikhwan'],   // HQ / Suzuki — Ikhwan added 2026-07-29
   Honda:    ['Bella','Syaza','Anis','Syafa','Zeera'],              // Honda Kapar
   ShahAlam: ['Amirul','Nazrin','Aso','Roy'],                      // KTM / Zontes
 };
@@ -449,6 +449,7 @@ const STAFF = {
   Syaza:   { phone: '+60123773259', openId: 'ou_88cd7c9e006835a4300c5104f19185f5' },   // Honda (Syaza Rahman — PIC-confirmed 2026-06-18)
   Roy:     { phone: '+60122653259', openId: 'ou_6bf42b3e72ca59355e8278d71ae10123' },   // Shah Alam (Roy Abdullah)
   Zeera:   { phone: '+601118583259', openId: 'ou_47e1634c959f08b7bb43f2ba87cf400b' },  // Honda (Hazirah Zulaika Binti Mohd Asri — reactivated acct, NOT old ou_7cde)
+  Ikhwan:  { phone: '+60129593259', openId: '' },   // HQ — added 2026-07-29. openId PENDING: have him assign ONE Lark row, then read the id back off that exact row (never name-harvest — duplicate/stale accounts exist). Until then WhatsApp DM + rotation work; the Lark Salesman cell stays blank (both write paths guard on empty openId).
 };
 
 // ---- Deterministic filename/caption flags ----
