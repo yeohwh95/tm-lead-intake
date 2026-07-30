@@ -663,6 +663,7 @@ const AVAIL_SHEET = process.env.AVAIL_SHEET || 'YjLTslshkhRGeXt9V5DlJi8cgdl';
 // phone and Lark ID, zero warnings.)
 const ROSTER_FROM_SHEET = process.env.ROSTER_FROM_SHEET === '1';   // not yet enabled — shadow only
 let _rosterSnap = null, _rosterTs = 0, _rosterAlertedAt = 0;
+let _rosterAppliedKey = '';
 async function readSheetRoster(){
   const tok = await larkToken();
   const sid = await availSheetId(tok);
@@ -673,10 +674,36 @@ async function readSheetRoster(){
 async function rosterShadowTick(){
   try {
     const parsed = await readSheetRoster();
-    if (!parsed.ok) { log('⚠️ ROSTER SHEET unusable — ' + parsed.warnings.join(' | ')); return; }
-    _rosterSnap = parsed; _rosterTs = Date.now();
-    const diff = roster.diffRoster(parsed, STAFF, POOLS);
     for (const w of parsed.warnings) log('⚠️ ROSTER SHEET: ' + w);
+    if (!parsed.ok) { log('⚠️ ROSTER SHEET unusable — keeping the roster currently in use'); return; }
+    _rosterSnap = parsed; _rosterTs = Date.now();
+    // Always diff against the PRISTINE compiled-in copy so this stays meaningful once the sheet is
+    // driving assignment — it then tells me the code copy is stale and should be updated to match.
+    const diff = roster.diffRoster(parsed, CODE_STAFF, CODE_POOLS);
+
+    if (ROSTER_FROM_SHEET) {
+      const bad = rosterSanity(parsed);
+      if (bad) {
+        log('🚨 ROSTER REFUSED — ' + bad + ' · keeping the roster currently in use');
+        if (Date.now() - _rosterAlertedAt > 60 * 60 * 1000) {
+          _rosterAlertedAt = Date.now();
+          await alertReview(`🚨 *Roster sheet REJECTED*\n⚠️ ${bad}\n\nThe bot is still using the previous list — nobody has lost their leads. Please check the *Salesman Availability* tab (Branch / Phone columns).`);
+        }
+        return;
+      }
+      const key = JSON.stringify([Object.keys(parsed.staff).sort(), parsed.pools]);
+      if (key !== _rosterAppliedKey) {
+        applyRoster(parsed);
+        _rosterAppliedKey = key;
+        log('🔁 ROSTER APPLIED from sheet — ' + Object.keys(STAFF).length + ' people · '
+          + Object.entries(POOLS).map(([k, v]) => `${k}:${v.length}`).join(' '));
+        for (const w of identity.rosterWarnings(STAFF)) log('⚠️ ROSTER: ' + w);
+        if (diff.length) log('ℹ️ sheet differs from the compiled-in copy (' + diff.length + ') — update the code roster to match: ' + diff.join(' | '));
+      }
+      return;
+    }
+
+    // ---- shadow mode: report only; assignment still runs off the compiled-in roster ----
     if (!diff.length) { log('roster shadow: sheet matches code ✅ (' + Object.keys(parsed.staff).length + ' people)'); return; }
     log('⚠️ ROSTER SHADOW DIFF (' + diff.length + '): ' + diff.join(' | '));
     // Escalate to the group at most hourly — a real drift means someone edited the sheet and the
@@ -797,9 +824,25 @@ async function larkUpdateSLA(recordId, fields){
 // working-hours only. This means it can never blast the 5,700 historical rows.
 // Blank openIds are FILTERED OUT here — see identity.js for the incident this prevents (Fitri's
 // Salesman-less trade-in rows resolving to Ikhwan, who carries `openId: ''`).
-const STAFF_BY_OPENID = identity.byOpenId(STAFF);
+let STAFF_BY_OPENID = identity.byOpenId(STAFF);
 // Roster drift must be LOUD, not silent (cf. the POOLS-vs-Lark-sheet drift that hid Ikhwan for weeks).
 for (const w of identity.rosterWarnings(STAFF)) log('⚠️ ROSTER: ' + w);
+
+// ---- LIVE ROSTER SWAP (2026-07-30) ----
+// STAFF / POOLS / ALL_NAMES / STAFF_BY_LAST9 / STAFF_BY_OPENID are swapped IN PLACE so all ~20
+// existing references — and every closure that captured them — see the new roster with no call-site
+// changes. Chosen deliberately over rewriting every site in the live lead-assignment path.
+// CODE_* keeps the pristine compiled-in copy: it is what the shadow diff compares against (so the
+// diff stays meaningful once the sheet is driving), and the fallback if the sheet is ever unusable.
+// The swap and its safety gate live in roster.js so they are unit-testable — this file boots a server.
+const CODE_STAFF = JSON.parse(JSON.stringify(STAFF));
+const CODE_POOLS = JSON.parse(JSON.stringify(POOLS));
+const ROSTER_MIN_PEOPLE = Number(process.env.ROSTER_MIN_PEOPLE || 10);
+const rosterSanity = (parsed) => roster.sanityCheck(parsed, POOLS, ROSTER_MIN_PEOPLE);
+function applyRoster(parsed){
+  roster.applyInPlace(parsed, { staff: STAFF, pools: POOLS, allNames: ALL_NAMES, byLast9: STAFF_BY_LAST9 });
+  STAFF_BY_OPENID = identity.byOpenId(STAFF);   // held by value → must be rebuilt after the swap
+}
 const SLA_SWEEP_FROM = parseInt(process.env.SLA_SWEEP_FROM || '0', 10);   // 0 = disabled (no cutoff → never enrol)
 const SLA_SWEEP_CAP  = parseInt(process.env.SLA_SWEEP_CAP  || '15', 10);
 function slaFieldText(v){ if (Array.isArray(v)) return v.map(slaFieldText).join(' '); if (v && typeof v === 'object') return v.text || v.name || ''; return v == null ? '' : String(v); }
@@ -1042,8 +1085,10 @@ setInterval(() => { drainFRDeferred().catch(e => log('FR drain tick err', String
 
 {
   const FR_EXTRA_INTERNAL = new Set(['60162393812','60108093259','60102304152','60123534271','60182907538','601143991899']);
-  const staffLast9 = new Set(Object.values(STAFF).map(s => String(s.phone || '').replace(/\D/g, '').slice(-9)).filter(Boolean));
-  const isStaffPhone = p => { const d = String(p || '').replace(/\D/g, ''); return !!d && (staffLast9.has(d.slice(-9)) || FR_EXTRA_INTERNAL.has(d)); };
+  // Derived LIVE from STAFF_BY_LAST9 (rebuilt on every roster swap) rather than a Set snapshotted at
+  // boot: a snapshot would keep treating a departed rep as staff, and would treat a NEWLY added rep's
+  // own messages as customer leads, until the next deploy.
+  const isStaffPhone = p => { const d = String(p || '').replace(/\D/g, ''); return !!d && (!!identity.nameByPhone(STAFF_BY_LAST9, d) || FR_EXTRA_INTERNAL.has(d)); };
   firstresponse.init({ waSend, assignLeads, larkWriteLead, notifyStaff, sla, getUnavailable, log, isStaffPhone, wooCheckStock, aiClassify, inDistHours: inFRDistHours, inOpenHours: inFROpenHours, deferStaffNotify, hoursLabel });
   log('🕘 Operating hours (told to customers): ' + hoursLabel().en + ' / ' + hoursLabel().bm);
   log('🕘 Lead auto-assignment window: ' + fmtHours(FR_DIST_DAYS, FR_DIST_START, FR_DIST_END).en + ' — deliberately narrower than operating hours');

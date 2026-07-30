@@ -95,5 +95,43 @@ d = diffRoster(sheet, { Nabil:{phone:'+60124164828',openId:'ou_nabil'}, Adib:{ph
                { KS:['Nabil','Adib'], HQ:[], Honda:[], ShahAlam:[] });
 ok('spots a pool membership mismatch', d.some(x => /~ pool KS/.test(x)));
 
+console.log('\n--- sanityCheck: REFUSE anything that would gut the roster ---');
+const { sanityCheck, applyInPlace } = require('./roster');
+const CUR = { KS:['Jebat','Nabil'], HQ:['Adib'], Honda:['Bella'], ShahAlam:['Roy'] };
+const good = parseRoster([HDR,
+  ['JEBAT','YES','Klang','012-867 4828','ou_j',''], ['NABIL','YES','Klang','012-416 4828','ou_n',''],
+  ['ADIB','YES','HQ','017-886 9542','ou_a',''],     ['BELLA','YES','Honda','010-969 3259','ou_b',''],
+  ['ROY','YES','Shah Alam','012-265 3259','ou_r',''],
+], KNOWN);
+eq('a healthy sheet passes', sanityCheck(good, CUR, 5), null);
+ok('too few people → refused', /at least 8/.test(sanityCheck(good, CUR, 8) || ''));
+ok('zero rows → refused', /zero rows/.test(sanityCheck(parseRoster([HDR], KNOWN), CUR, 1) || ''));
+ok('null parse → refused', !!sanityCheck(null, CUR, 1));
+// the nightmare: someone clears the Branch column for a whole branch
+const gutted = parseRoster([HDR,
+  ['JEBAT','YES','Klang','012-867 4828','ou_j',''], ['NABIL','YES','Klang','012-416 4828','ou_n',''],
+  ['ADIB','YES','','017-886 9542','ou_a',''],       ['BELLA','YES','Honda','010-969 3259','ou_b',''],
+  ['ROY','YES','Shah Alam','012-265 3259','ou_r',''],
+], KNOWN);
+ok('a pool going EMPTY → refused', /pool HQ would become EMPTY/.test(sanityCheck(gutted, CUR, 5) || ''));
+ok('an already-empty pool staying empty is fine',
+   sanityCheck(good, { ...CUR, Honda: [] }, 5) === null);
+
+console.log('\n--- applyInPlace: every reference must see the swap ---');
+const staff = { Old: { phone:'+60111111111', openId:'ou_old' } };
+const pools = { KS:['Old'], HQ:[], Honda:[], ShahAlam:[] };
+const allNames = Object.keys(staff);
+const byLast9 = { '111111111':'Old' };
+const refStaff = staff, refPools = pools, refNames = allNames, refLast9 = byLast9;   // aliases = the ~20 call sites
+applyInPlace(good, { staff, pools, allNames, byLast9 });
+ok('same object identity kept (aliases still valid)', refStaff === staff && refPools === pools && refNames === allNames && refLast9 === byLast9);
+ok('stale person GONE from staff', !staff.Old);
+ok('new people present', !!staff.Jebat && !!staff.Adib && Object.keys(staff).length === 5);
+// KS legitimately contains Roy too — Shah Alam reps are in KS AND ShahAlam (Lambretta/Thunder + KTM/Zontes)
+ok('pools replaced, seen through the alias', refPools.KS.join(',') === 'Jebat,Nabil,Roy' && refPools.HQ.join(',') === 'Adib' && refPools.ShahAlam.join(',') === 'Roy');
+ok('ALL_NAMES rebuilt through the alias', refNames.length === 5 && refNames.includes('Roy') && !refNames.includes('Old'));
+ok('phone→name map rebuilt, stale entry dropped', refLast9['111111111'] === undefined && refLast9['128674828'] === 'Jebat');
+ok('a pool absent from the sheet is emptied, not left stale', Array.isArray(pools.Honda) && pools.Honda.join(',') === 'Bella');
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

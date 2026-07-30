@@ -112,4 +112,46 @@ function diffRoster(sheet, codeStaff, codePools) {
   return d;
 }
 
-module.exports = { parseRoster, diffRoster, normPhone, titleCase, BRANCH_POOLS, POOL_KEYS };
+// ---- SAFETY GATE ----
+// Refuse a sheet that would do catastrophic damage. A bad edit (wrong tab, someone clearing a column,
+// a half-finished paste) must NEVER silently empty the roster: keeping the LAST GOOD list is always
+// safer than obeying a broken one, because an empty pool means leads with nobody to go to.
+// Returns null when safe, or a human-readable reason to refuse.
+function sanityCheck(parsed, currentPools = {}, minPeople = 10) {
+  if (!parsed || !parsed.ok) return 'sheet parsed to zero rows';
+  const n = Object.keys(parsed.staff).length;
+  if (n < minPeople) return `only ${n} people parsed (expected at least ${minPeople}) — looks truncated`;
+  for (const k of POOL_KEYS) {
+    const now = (currentPools[k] || []).length;
+    const next = ((parsed.pools || {})[k] || []).length;
+    if (now && !next) return `pool ${k} would become EMPTY (has ${now} now)`;
+  }
+  return null;
+}
+
+// Swap the roster IN PLACE so every existing reference — and every closure that captured these
+// containers — sees the new list without touching ~20 call sites in the live assignment path.
+// `c.staff`/`c.pools` are objects and `c.allNames`/`c.byLast9` are the derived containers.
+// Returns nothing; the caller rebuilds anything it holds by value (e.g. the openId map).
+function applyInPlace(parsed, c) {
+  for (const k of Object.keys(c.staff)) delete c.staff[k];
+  Object.assign(c.staff, parsed.staff);
+  for (const k of Object.keys(c.pools)) delete c.pools[k];
+  Object.assign(c.pools, parsed.pools);
+  if (c.allNames) { c.allNames.length = 0; c.allNames.push(...Object.keys(c.staff)); }
+  if (c.byLast9) {
+    for (const k of Object.keys(c.byLast9)) delete c.byLast9[k];
+    Object.assign(c.byLast9, byLast9From(c.staff));
+  }
+}
+// local copy of identity.byLast9 so roster.js stays dependency-free and independently testable
+function byLast9From(staff) {
+  const out = {};
+  for (const [name, v] of Object.entries(staff || {})) {
+    const d = String((v && v.phone) || '').replace(/\D/g, '');
+    if (d.length >= 9) out[d.slice(-9)] = name;
+  }
+  return out;
+}
+
+module.exports = { parseRoster, diffRoster, sanityCheck, applyInPlace, normPhone, titleCase, BRANCH_POOLS, POOL_KEYS };
