@@ -277,31 +277,40 @@ let _sendChain = Promise.resolve();
 let _lastSend = 0;
 function waSend(to, text, imageUrl){
   _sendChain = _sendChain.then(async () => {
-    if (!WASENDER_TOKEN) { log('waSend skipped — no token'); return; }
+    if (!WASENDER_TOKEN) { log('waSend skipped — no token'); return null; }
     const wait = SEND_GAP - (Date.now() - _lastSend);
     if (wait > 0) await new Promise(r => setTimeout(r, wait));
     if (text && text.length > 4096) text = text.slice(0, 4080) + '\n…';   // WhatsApp hard 4096-char limit — never 422
-    const payload = imageUrl ? { to, imageUrl, text } : { to, text };
-    for (let attempt = 1; attempt <= 3; attempt++) {
-      const r = await fetch(WASENDER_BASE + '/send-message', {
-        method: 'POST',
-        headers: { 'Authorization': 'Bearer ' + WASENDER_TOKEN, 'Content-Type': 'application/json', 'User-Agent': UA },
-        body: JSON.stringify(payload),
-      });
-      _lastSend = Date.now();
-      if (r.status === 429) {
-        let ra = 5; try { ra = JSON.parse(await r.text()).retry_after || 5; } catch {}
-        log('waSend 429 → retry after', ra, 's (attempt ' + attempt + ')');
-        await new Promise(res => setTimeout(res, (ra + 0.6) * 1000));
-        continue;
-      }
-      if (!r.ok) { log('waSend HTTP', r.status, (await r.text()).slice(0, 150)); return null; }
-      try { const j = await r.json(); return j.data?.msgId || j.data?.id || null; } catch { return null; }   // msgId → SLA deletes it on reassign
-    }
-    log('waSend gave up after 3 attempts to', to);
-    return null;
+    // Retry policy + per-attempt timeout live in wasend.js (unit-tested). Previously this retried ONLY
+    // on 429, so a transient HTTP 520 silently dropped a real customer's reply (2026-07-30), and an
+    // untimed fetch could hang and stall this shared chain — i.e. every queued message.
+    const res = await wasend.sendWithRetry({
+      fetchImpl: fetch, base: WASENDER_BASE, token: WASENDER_TOKEN, ua: UA,
+      to, text, imageUrl, log,
+      attempts:  Number(process.env.SEND_ATTEMPTS   || 3),
+      timeoutMs: Number(process.env.SEND_TIMEOUT_MS || 20000),
+    });
+    _lastSend = Date.now();
+    if (!res.ok) alertSendFailure(to, text, res);
+    return res.msgId;   // unchanged contract: msgId on success, null on failure (SLA deletes it on reassign)
   }).catch(e => log('send chain err', String(e.message || e)));
   return _sendChain;
+}
+// An undelivered outbound is invisible to everyone: the 2026-07-30 Zontes-368D customer got nothing
+// and the ONLY record was one log line nobody reads. After all retries fail, tell a human.
+// Throttled to 1 alert / 5 min (with a suppressed count) so a WaSenderAPI outage can't spam the group.
+// NOTE: alertReview() uses REVIEW_TOKEN and its own fetch — it does NOT route back through waSend,
+// so a failing send can never recurse into another failing send.
+let _sendFailAlertAt = 0, _sendFailSuppressed = 0;
+function alertSendFailure(to, text, res){
+  const who = String(to || '').replace(/\D/g, '') || String(to || '?');
+  log(`waSend ❌ UNDELIVERED to ${who} after ${res.attempts} attempt(s) — ${res.error}`);
+  const now = Date.now();
+  if (now - _sendFailAlertAt < 5 * 60 * 1000) { _sendFailSuppressed++; return; }
+  const extra = _sendFailSuppressed ? `\n\n(+${_sendFailSuppressed} more suppressed in the last 5 min)` : '';
+  _sendFailAlertAt = now; _sendFailSuppressed = 0;
+  alertReview(`🚨 *Message NOT delivered*\n👤 ${who}\n⚠️ ${res.error} — gave up after ${res.attempts} attempt(s)\n\n📝 ${String(text || '').slice(0, 180)}\n\n👉 Please follow up manually — the bot will NOT retry this one.${extra}`)
+    .catch(e => log('send-failure alert err', String(e.message || e)));
 }
 // delete a previously-sent WhatsApp message (used by SLA on reassign). Confirmed: DELETE /messages/{id}
 async function waDelete(msgId){
@@ -531,6 +540,7 @@ function matchStaff(raw){
 // matchStaff() above stays fuzzy, but ONLY for caption/filename overrides, which STAFF write.
 // Deciding "is this inbound sender a rep?" goes through the phone number, never the pushname.
 const identity = require('./identity');
+const wasend = require('./wasend');
 const STAFF_BY_LAST9 = identity.byLast9(STAFF);
 function staffNameByPhone(phone){ return identity.nameByPhone(STAFF_BY_LAST9, phone); }
 function fileOverrides(name){

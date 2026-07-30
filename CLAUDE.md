@@ -16,7 +16,26 @@ Harith disputed the 6PM SLA card of 07-29 ("yesterday only passed 1 lead, not 3,
 **Fix:** new `slaWindowStats(since, until)` reads the window from **Lark** (the durable record) — a restart can no longer rewrite history. Buckets (`acked`/`waiting`/`missed`/`moved`/`other`) are mutually exclusive and **must sum to `assigned`**, so a client-facing card can never print numbers that don't add up (a **PASS is a response but NOT an ack** — it lands in `moved`). Verified by replaying both 07-29 windows against live Lark: 28=28 and 17=17. Also: adds `⏱️ within-60min`, an explicit note when the read hit the 100-row page cap (no silent truncation), an honest "couldn't read Lark" line instead of falling back to a snapshot, and `ℹ️ Bot restarted at HH:MM — the lists above may be incomplete` whenever boot time falls inside the window. `digestTick` is now async and claims its slot BEFORE awaiting, so a slow Lark read can't double-fire.
 
 Tests: identity 24/24 · sla 34/34 (+6 identity cases, real incident fixtures) · fr 93/93.
-**Open manual follow-ups:** +60129717912 needs a human reply (bot won't retry a flushed message) · Jue/Amir/Fazwan's 4 falsely-acked Lark rows need correcting · Ikhwan's real `openId` still pending.
+**Follow-ups:** ✅ the 4 falsely-acked Lark rows were corrected + verified same day (Fazwan ×2 → No-Response; Amir → his real 10:07 reply, 66min, outside SLA; Jue → her real 10:38 reply, 43min, within SLA — the logs proved Amir and Jue DID reply, just after the customer had stolen the ack, so their real replies logged as `noop`). ✅ Ikhwan's real `openId` captured (see ROSTER above). ⚠️ STILL OPEN: **+60129717912 never got a reply** (Zontes 368G, 10:05am) — the bot won't retry a flushed message, needs a human. Benjamin chose to leave it.
+
+## 🐛→✅ FIXED 2026-07-30 — a transient HTTP 520 silently dropped a real customer's reply
+Benjamin flagged a live chat: +60192822043 sent "Slmt ptg" (15:06, bot greeted correctly), then **"Boleh sy nk tau zontes 368D" (15:07) and got NOTHING**. The bot was fine — it classified the message, wrote the lead, assigned **Nazrin** and DM'd him (he acked at 15:08). The failure was one line later:
+```
+07:07:24Z  SLA register: Nazrin ← 1 lead(s)          ← salesperson DM sent OK
+07:07:24Z  FR ✅ PRODUCT lead assigned → Nazrin
+07:08:12Z  waSend HTTP 520 <!DOCTYPE html>           ← the CUSTOMER's reply, dropped
+```
+**Root cause:** `waSend`'s retry loop retried **only on 429**. Every other outcome hit `if (!r.ok) { log(...); return null; }` — one transient Cloudflare 520 on WaSenderAPI's side and the message was gone, with no retry and **no alert**: the sole record was a log line nobody reads. Frequency measured before fixing: 1 occurrence in 28h of logs — rare, but permanently silent.
+**Second, worse problem found while fixing it:** `fetch` had **no timeout**. All sends share ONE serialized chain (`_sendChain`, 5.2s spacing), so a single hung request stalls *every queued outbound* — which presents exactly as "the bot stopped responding".
+**Fix — new `wasend.js`** (+`wasend_test.js`, 25 tests) holding the retry policy, `index.js` keeps the chain:
+- **Retries** 429 (honouring `retry_after`, unchanged) **plus** 408/425/5xx/520-527 and network errors — 3 attempts, 3s then 8s backoff.
+- **Does NOT retry** ordinary 4xx (400/401/403/404/422): a malformed payload or bad token never fixes itself and retrying just delays the whole chain.
+- **Per-attempt `AbortController` timeout** (`SEND_TIMEOUT_MS`, default 20s) so one hung request can never stall the chain.
+- **`alertSendFailure()`** → on final failure, a `🚨 Message NOT delivered` post to the review group naming the number + the text + "the bot will NOT retry this one". Throttled to 1/5min with a suppressed count, so a WaSender outage can't spam. ⚠️ `alertReview` uses `REVIEW_TOKEN` and its own `fetch` — it does NOT route back through `waSend`, so a failing send cannot recurse.
+- Contract unchanged: returns `msgId` on success, `null` on failure (SLA still deletes by msgId on reassign). Envs: `SEND_ATTEMPTS`, `SEND_TIMEOUT_MS`.
+- Tests cover the exact incident (520→200 recovers · 520 always → gives up with the status kept for the alert), 502/503/524, network errors, persistent 429, all five permanent 4xx, hang→abort→retry, and payload shape.
+⚠️ **The customer never got their reply** — the bot won't retry a flushed message. Nazrin holds the lead and acked it, so follow-up is his.
+⚠️ **Cross-client:** the retry-only-on-429 pattern (and the missing timeout) exists in the KoonKen, Metal Age, U Fresh, FSS and SFF bots. Same fix applies — sweep them after TM is proven clean.
 
 ## 🕘 HOURS 2026-07-30 — TWO windows, deliberately different. Do NOT merge them.
 Harith: *"can help change operation hour to isnin–sabtu, 9 pagi–6 petang?"* — flagged off a real customer chat (+60122607096, 6:44pm) where the bot quoted **"Isnin–Jumaat, 9 pagi–5 petang"**. Root cause: **two sources of truth for one fact.** The sentence was HARDCODED in `firstresponse.js` `tpl()` while the window it described lived in `FR_DIST_DAYS/START/END`. They drifted and the bot spent 8 days quoting hours TM doesn't keep.
@@ -43,7 +62,7 @@ Benjamin then corrected the obvious-looking fix: *"they are working on Saturday 
 
 ## 👤 ROSTER — IKHWAN's real Lark openId, read 2026-07-30
 `ou_5dff90be7f04fd6222d29c2f6f502ae0`, read off row `recvqPiX6HbIx8` ("test lead", 601121246061, Tiktok Get Leads) which **Ikhwan assigned to himself** — the never-name-harvest rule, and it matters: a full scan of all 6,944 rows found **8 Salesman openIds not in the code roster**, including a STALE Zeera account (`ou_7cde75e1…`, "Hazirah Zulaika", 248 rows) and a second Syaza (`ou_93719870…`, "Syaza Hanaa"). Searching by name would have picked a wrong one. His `SLA Original Salesman`/Lark `Salesman` cell now fills in normally.
-Also confirmed in that scan: **Fitri HAS a real Lark account** (`ou_9dbd1258…`, 122 rows) — but `firstresponse.assign` still writes trade-ins with `staff:null`, so those rows carry no `Salesman`. That's what made them stealable by the blank-openId bug. Filling it in would be tidier and is now safe (sweep skips rows with `SLA Assigned At` set; rehydrate skips openIds not in `STAFF`) — **not done, needs Benjamin's go.**
+Also confirmed in that scan: **Fitri HAS a real Lark account** (`ou_9dbd1258…`, 122 rows). ✅ **DONE same day** (Benjamin approved, `1fd78d0`) — trade-ins now carry her `Salesman`; see the TRADE-INS section above.
 
 ## 👤 ROSTER 2026-07-29 — IKHWAN added to the HQ pool (was in Lark but invisible to the bot)
 `IKHWAN +60129593259` → `STAFF` + `POOLS.HQ` (now 6: Adib, Syahrin, Fazwan, Azrul, Amir, Ikhwan).
