@@ -649,13 +649,30 @@ async function larkToken(){
 
 // ---- Salesman availability (Lark Sheet) → set of names marked "NO" (skip them in rotation). Cached 5 min. ----
 const AVAIL_SHEET = process.env.AVAIL_SHEET || 'YjLTslshkhRGeXt9V5DlJi8cgdl';
+// Resolve the availability TAB BY TITLE, not by position (2026-07-30). Both reads below used
+// `sheets[0]` — the first tab in the UI. That spreadsheet ("AI REFERENCE SHEET") has a SECOND tab
+// ("mudah group info"), and it is edited by humans: drag the tabs, or add one at the front, and the
+// bot would read the wrong tab, find no YES/NO names, and **silently stop skipping unavailable reps**
+// — with no alert, because pollAvailability() treats an empty read as "skip, don't reset baseline".
+// Tab ids survive renames, so caching the resolved id is safe.
+const AVAIL_TAB_TITLE = process.env.AVAIL_TAB_TITLE || 'Salesman Availability';
+let _availSid = null;
+async function availSheetId(tok){
+  if (_availSid) return _availSid;
+  const meta = await (await fetch(`${LARK_BASE}/sheets/v3/spreadsheets/${AVAIL_SHEET}/sheets/query`, { headers: { 'Authorization': 'Bearer ' + tok } })).json();
+  const sheets = (meta.data && meta.data.sheets) || [];
+  const hit = sheets.find(x => String(x.title || '').trim().toLowerCase() === AVAIL_TAB_TITLE.toLowerCase());
+  if (hit) { _availSid = hit.sheet_id; return _availSid; }
+  log('⚠️ AVAILABILITY: tab "' + AVAIL_TAB_TITLE + '" NOT FOUND (tabs: ' + sheets.map(x => x.title).join(' | ') + ') — falling back to the first tab, availability may be WRONG');
+  _availSid = sheets[0] && sheets[0].sheet_id;
+  return _availSid;
+}
 let _unavail = new Set(), _unavailTs = 0;
 async function getUnavailable(){
   if (Date.now() - _unavailTs < 5 * 60 * 1000) return _unavail;
   try {
     const tok = await larkToken();
-    const meta = await (await fetch(`${LARK_BASE}/sheets/v3/spreadsheets/${AVAIL_SHEET}/sheets/query`, { headers: { 'Authorization': 'Bearer ' + tok } })).json();
-    const sid = meta.data.sheets[0].sheet_id;
+    const sid = await availSheetId(tok);
     const vals = await (await fetch(`${LARK_BASE}/sheets/v2/spreadsheets/${AVAIL_SHEET}/values/${sid}!A1:B60`, { headers: { 'Authorization': 'Bearer ' + tok } })).json();
     const rows = (vals.data && vals.data.valueRange && vals.data.valueRange.values) || [];
     const un = new Set();
@@ -670,8 +687,7 @@ async function getUnavailable(){
 let _availSnap = null;   // name -> 'YES'/'NO' (last full state); null until baselined
 async function readAvail(){
   const tok = await larkToken();
-  const meta = await (await fetch(`${LARK_BASE}/sheets/v3/spreadsheets/${AVAIL_SHEET}/sheets/query`, { headers: { 'Authorization': 'Bearer ' + tok } })).json();
-  const sid = meta.data.sheets[0].sheet_id;
+  const sid = await availSheetId(tok);
   const vals = await (await fetch(`${LARK_BASE}/sheets/v2/spreadsheets/${AVAIL_SHEET}/values/${sid}!A1:B60`, { headers: { 'Authorization': 'Bearer ' + tok } })).json();
   const rows = (vals.data && vals.data.valueRange && vals.data.valueRange.values) || [];
   const m = {};

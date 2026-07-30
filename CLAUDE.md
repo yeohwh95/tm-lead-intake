@@ -18,6 +18,12 @@ Harith disputed the 6PM SLA card of 07-29 ("yesterday only passed 1 lead, not 3,
 Tests: identity 24/24 · sla 34/34 (+6 identity cases, real incident fixtures) · fr 93/93.
 **Follow-ups:** ✅ the 4 falsely-acked Lark rows were corrected + verified same day (Fazwan ×2 → No-Response; Amir → his real 10:07 reply, 66min, outside SLA; Jue → her real 10:38 reply, 43min, within SLA — the logs proved Amir and Jue DID reply, just after the customer had stolen the ack, so their real replies logged as `noop`). ✅ Ikhwan's real `openId` captured (see ROSTER above). ⚠️ STILL OPEN: **+60129717912 never got a reply** (Zontes 368G, 10:05am) — the bot won't retry a flushed message, needs a human. Benjamin chose to leave it.
 
+## 🐛→✅ FIXED 2026-07-30 — availability tab was read BY POSITION, not by name
+`getUnavailable()` and `readAvail()` both took `meta.data.sheets[0]` — the FIRST tab in the UI. The spreadsheet behind `AVAIL_SHEET` is the Lark wiki doc **"AI REFERENCE SHEET"** (`YjLTslshkhRGeXt9V5DlJi8cgdl`, wiki node `QI0BwlzF2iffE7kYWdvlOTRVgHf`) and it has **two** human-edited tabs: `11b1e9` "Salesman Availability" (index 0) and `28oJvT` "mudah group info" (index 1).
+**The risk:** anyone dragging the tabs, or adding a tab at the front, would make the bot read the wrong tab → zero YES/NO names parsed → `_unavail` empty → **unavailable reps silently start receiving leads again**. And no alert would fire, because `pollAvailability()` deliberately treats an empty read as "skip, don't reset the baseline". Classic silent failure that looks healthy.
+**Fix:** `availSheetId(tok)` resolves the tab by TITLE (`AVAIL_TAB_TITLE`, default `Salesman Availability`), caches the id (tab ids survive renames), and if the title is missing it logs `⚠️ AVAILABILITY: tab … NOT FOUND` listing the real tabs before falling back to index 0. Same helper used by both readers.
+**Also confirmed:** the app CAN write to this sheet (probed an empty corner cell `11b1e9!T200` and blanked it again) — so extending this sheet is viable without any Lark permission change, unlike creating a Bitable table (`1254302 RolePermNotAllow`).
+
 ## 🐛→✅ FIXED 2026-07-30 — a transient HTTP 520 silently dropped a real customer's reply
 Benjamin flagged a live chat: +60192822043 sent "Slmt ptg" (15:06, bot greeted correctly), then **"Boleh sy nk tau zontes 368D" (15:07) and got NOTHING**. The bot was fine — it classified the message, wrote the lead, assigned **Nazrin** and DM'd him (he acked at 15:08). The failure was one line later:
 ```
