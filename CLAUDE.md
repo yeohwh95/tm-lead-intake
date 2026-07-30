@@ -18,11 +18,28 @@ Harith disputed the 6PM SLA card of 07-29 ("yesterday only passed 1 lead, not 3,
 Tests: identity 24/24 · sla 34/34 (+6 identity cases, real incident fixtures) · fr 93/93.
 **Open manual follow-ups:** +60129717912 needs a human reply (bot won't retry a flushed message) · Jue/Amir/Fazwan's 4 falsely-acked Lark rows need correcting · Ikhwan's real `openId` still pending.
 
-## 🕘 OPERATING HOURS 2026-07-30 — Mon–Sat 9am–6pm everywhere (Harith, superseding his 07-22 Mon–Fri 9–5)
-Harith: *"can help change operation hour to isnin–sabtu, 9 pagi–6 petang?"* — flagged off a real customer chat (+60122607096, 6:44pm) where the bot quoted **"Isnin–Jumaat, 9 pagi–5 petang"**. Root cause was **two sources of truth for one fact**: the sentence was HARDCODED in `firstresponse.js` `tpl()` while the window it described lived in `FR_DIST_DAYS/START/END`. They drifted, and the bot spent 8 days quoting hours TM doesn't keep.
-- **`FR_DIST_DAYS` default 1-5 → `1,2,3,4,5,6`, `FR_DIST_END` 17 → `18`.** FR lead distribution now MATCHES the SLA engine's window (`SLA_DAYS`, 9–18) instead of being deliberately narrower — the two windows are the same again, one fewer thing to drift. ⚠️ This REVERSES the 07-22 "team explicitly wants FR held to Mon–Fri" note; Harith is the same PIC and this is the newer instruction. Practical effect: leads arriving **Saturdays and 5–6pm weekdays now assign + DM a rep immediately** instead of deferring to the next Monday/morning drain.
-- **New `hours.js`** (+`hours_test.js`, 16 tests) GENERATES the customer sentence from that same config, in EN + BM (`Mon–Sat, 9am–6pm` / `Isnin–Sabtu, 9 pagi–6 petang`), handling non-contiguous days, `tengah hari` vs `petang`, and noon/midnight edges. `firstresponse.js` consumes it via the injected `hoursLabel` dep with the correct string as a fallback. `firstresponse_test.js` asserts the reply quotes the REAL window and that the old wording is gone (+2 tests, 95/95). Boot logs `🕘 FR distribution window: …`.
-- ⚠️ **Never hardcode a customer-facing fact that also exists as config.** Change the window, the sentence follows. Same lesson as the SLA report reading Lark instead of memory.
+## 🕘 HOURS 2026-07-30 — TWO windows, deliberately different. Do NOT merge them.
+Harith: *"can help change operation hour to isnin–sabtu, 9 pagi–6 petang?"* — flagged off a real customer chat (+60122607096, 6:44pm) where the bot quoted **"Isnin–Jumaat, 9 pagi–5 petang"**. Root cause: **two sources of truth for one fact.** The sentence was HARDCODED in `firstresponse.js` `tpl()` while the window it described lived in `FR_DIST_DAYS/START/END`. They drifted and the bot spent 8 days quoting hours TM doesn't keep.
+Benjamin then corrected the obvious-looking fix: *"they are working on Saturday but we don't assign lead on Sat."* So there are genuinely **two facts**, and collapsing them into one window would be wrong:
+
+| | Config | Value | Governs |
+|---|---|---|---|
+| **OPERATING hours** | `FR_HOURS_DAYS/START/END` | **Mon–Sat 9am–6pm** | ONLY what customers are TOLD (`hoursLabel`) |
+| **DISTRIBUTION window** | `FR_DIST_DAYS/START/END` | **Mon–Fri 9am–5pm** | when the bot auto-assigns + DMs a salesperson |
+
+**Three reply states** (`tpl()`'s 5th arg is now `closed`, was `offHours`):
+1. **In distribution** → salesman card, as before.
+2. **Open but not distributing** (Saturday, or 5–6pm weekday) → no card, and **NO "bila pejabat dibuka semula" line** — the shop IS open and a human watches the inbox, so telling the customer we're shut is the same wrongness Harith flagged. They get the normal "sales advisor akan menghubungi anda" and the lead still drains to a rep Monday 9am as a backstop. Benjamin picked this wording explicitly.
+3. **Genuinely closed** (outside operating hours) → the operating-hours + reopen line.
+- **`hours.js`** (+`hours_test.js`, 16 tests) GENERATES the sentence from the OPERATING config in EN + BM, handling non-contiguous days, `tengah hari` vs `petang`, and noon/midnight edges. Injected as the `hoursLabel` dep. `firstresponse_test.js` covers all three states incl. the Saturday case (104/104).
+- Boot logs BOTH windows so the split is visible: `🕘 Operating hours (told to customers): …` + `🕘 Lead auto-assignment window: … — deliberately narrower`.
+- ⚠️ **Never hardcode a customer-facing fact that also exists as config** — change the config, the sentence follows. And ⚠️ **never "tidy" these two windows into one**: a future reader will see Mon–Sat 9–6 next to Mon–Fri 9–5 and assume drift. It isn't. TM works Saturdays but does not auto-assign then.
+- 🔜 If Harith later wants weekday assignment to run to 6pm too, that's `FR_DIST_END=18` (Benjamin chose to keep 5pm, 2026-07-30).
+
+## 🔁 TRADE-INS now carry Fitri's Lark Salesman (2026-07-30, Benjamin approved)
+`firstresponse.assign()` used to write trade-in rows with `staff: null` → Lark `Salesman` cell EMPTY. That emptiness is precisely what let the blank-openId bug attribute her 3 leads to Ikhwan and report them to the client as his misses. `FITRI` now carries `openId: ou_9dbd12586dfb70716c3ee77aefe010ed` (confirmed live, 122 existing rows).
+**Safe because:** `slaSweep` only picks rows with NO `SLA Assigned At` (trade-ins always have one) → no DM to Fitri; `rehydrateFromLark` maps openId→`STAFF`, where she is deliberately ABSENT → skipped, so she never gets SLA timers. She is the purchaser, not a rep on the round-robin.
+**Also fixed the reporting side:** trade-ins get `SLA Status=Pending` at write time but can never be acknowledged (no rep, no timer), so they used to sit in the digest's `waiting` bucket **forever**, silently inflating the sales team's outstanding count. `slaWindowStats` now counts them separately and prints `🔁 N trade-in(s) → Fitri (purchaser, no SLA clock)` — excluded from the rep scoreboard, never hidden.
 
 ## 👤 ROSTER — IKHWAN's real Lark openId, read 2026-07-30
 `ou_5dff90be7f04fd6222d29c2f6f502ae0`, read off row `recvqPiX6HbIx8` ("test lead", 601121246061, Tiktok Get Leads) which **Ikhwan assigned to himself** — the never-name-harvest rule, and it matters: a full scan of all 6,944 rows found **8 Salesman openIds not in the code roster**, including a STALE Zeera account (`ou_7cde75e1…`, "Hazirah Zulaika", 248 rows) and a second Syaza (`ou_93719870…`, "Syaza Hanaa"). Searching by name would have picked a wrong one. His `SLA Original Salesman`/Lark `Salesman` cell now fills in normally.

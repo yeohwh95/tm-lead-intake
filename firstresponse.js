@@ -21,8 +21,14 @@ const persist = () => { try { fs.writeFileSync(STATE_FILE, JSON.stringify(state)
 const humanTouched = new Set();                   // jids where a HUMAN (fromMe) has spoken since boot
 const buffers = {};                               // jid -> { texts:[], hasImage, phone, timer }
 
-// Fitri = TM purchaser (trade-ins go to her — confirmed from staff behavior 2026-07-17)
-const FITRI = { name: 'Fitri', phone: '+60108093259' };
+// Fitri = TM purchaser (trade-ins go to her — confirmed from staff behavior 2026-07-17).
+// openId added 2026-07-30 (Benjamin approved): trade-in rows used to be written with the Lark
+// `Salesman` cell EMPTY, and that emptiness is exactly what let the blank-openId bug attribute her 3
+// leads to Ikhwan and report them to the client as his misses. Filling it in is safe: `slaSweep` only
+// looks at rows with NO `SLA Assigned At` (trade-ins always have one), and `rehydrateFromLark` maps
+// openId→STAFF, where she is deliberately absent, so she is skipped — she is a purchaser, not a rep
+// on the round-robin, and must never get SLA timers. Verified present in Lark with 122 existing rows.
+const FITRI = { name: 'Fitri', phone: '+60108093259', openId: 'ou_9dbd12586dfb70716c3ee77aefe010ed' };
 
 // ---------- classification ----------
 // 2026-07-23 additions from real overnight misses: "nk jual" short-form + "jual moto" (no r) had
@@ -69,19 +75,20 @@ function saMYT(){ const h = new Date(Date.now() + 8 * 3600e3).getUTCHours(); ret
 const LOAN_SHOP = 'Aeon Credit, Chailease, JCL, Parkson, BSNC';
 const LOAN_EPP  = 'Maybank, Public Bank, UOB, RHB, OCBC, Affin, AmBank, HLB, Alliance Bank, HSBC, Standard Chartered, BSN & AEON Credit Card';
 
-function tpl(cat, lang, card, stockLine, offHours){
+// `closed` = outside TM's OPERATING hours (genuinely shut). NOT the same as "outside the
+// distribution window" — see the three-state comment in index.js. On a Saturday, or 5–6pm on a
+// weekday, the shop is OPEN and a human watches the inbox; the bot just doesn't auto-assign. Telling
+// those customers "we'll contact you when we reopen" was wrong, so that line is now reserved for
+// genuinely-closed hours and they simply get no salesman card (Benjamin's call, 2026-07-30).
+function tpl(cat, lang, card, stockLine, closed){
   const g = saMYT();
-  // Off-hours (replies 24h, lead distribution inside the window only): no salesman card at 2am —
-  // tell the customer when the office reopens instead. The card slot carries that line so every
-  // category template picks it up without its own wording change.
-  // ⚠️ The hours SENTENCE is generated from the SAME config that gates distribution (`D.hoursLabel`,
-  // fed by FR_DIST_DAYS/START/END in index.js) — it must never be hardcoded again. It was, and it
-  // drifted: the message said "Isnin–Jumaat, 9 pagi–5 petang" while TM actually operates Mon–Sat
-  // 9–6, so the bot was quoting the wrong hours to customers (Harith flagged it 2026-07-30 with a
-  // real screenshot). Change the window and the sentence follows automatically.
+  // ⚠️ The hours SENTENCE is generated from the OPERATING-hours config (`D.hoursLabel`, fed by
+  // FR_HOURS_DAYS/START/END in index.js) — never hardcoded again. It was, and it drifted: the message
+  // said "Isnin–Jumaat, 9 pagi–5 petang" while TM actually operates Mon–Sat 9–6, so the bot quoted
+  // hours TM doesn't keep for 8 days (Harith flagged it 2026-07-30 with a real screenshot).
   const H = (D.hoursLabel && D.hoursLabel()) || { en: 'Mon–Sat, 9am–6pm', bm: 'Isnin–Sabtu, 9 pagi–6 petang' };
   const c = card ? `\n\n${card.name.toUpperCase()} : ${card.disp}\nhttps://wa.me/${card.digits}`
-    : offHours ? (lang === 'en'
+    : closed ? (lang === 'en'
         ? `\n\n⏰ Our office hours are ${H.en} — our sales advisor will contact you once we're back in office 🙏`
         : `\n\n⏰ Waktu operasi kami: ${H.bm}. Sales advisor kami akan menghubungi anda bila pejabat dibuka semula ya 🙏`)
     : '';
@@ -166,7 +173,7 @@ async function assign(cat, jid, phone, wantText){
   if (cat === 'sell'){
     // Trade-in → Fitri (purchaser). Lark record + instant DM to Fitri. (No SLA pool — she's not a rep.)
     let recordId = null;
-    try { recordId = await D.larkWriteLead({ phone, name: '', want: 'TRADE-IN: ' + want, brand: '', origin: 'WhatsApp Direct', assignee: 'Fitri', staff: null }); }
+    try { recordId = await D.larkWriteLead({ phone, name: '', want: 'TRADE-IN: ' + want, brand: '', origin: 'WhatsApp Direct', assignee: 'Fitri', staff: FITRI }); }
     catch(e){ D.log('FR lark err (sell):', String(e.message||e).slice(0,60)); }
     const fitriMsg = `🔁 *Trade-in Lead (auto)*\n\n🎯 ${want}\n👉 https://wa.me/${phone.replace(/\D/g,'')}\n\nCustomer dah dapat reply pertama — follow up ya.`;
     if (defer){
@@ -256,8 +263,8 @@ async function flush(jid){
     const want = VAGUE(text) && !b.hasImage ? '[ad click — model belum stated, sila probe]' : (text || '[gambar/screenshot iklan]');
     const stockLine = await stockLineFor(finalCat, text, lang);
     const card = await assign(finalCat, jid, b.phone, want);
-    const offHours = !!(D.inDistHours && !D.inDistHours());
-    await D.waSend(sendTarget(jid, b.phone), tpl(finalCat, lang, card, stockLine, offHours));
+    const closed = !!(D.inOpenHours && !D.inOpenHours());   // genuinely shut, NOT merely outside the assign window
+    await D.waSend(sendTarget(jid, b.phone), tpl(finalCat, lang, card, stockLine, closed));
     return;
   }
   if (cat === 'skip') { D.log('FR skip (unclassified/vendor):', jid.slice(0, 20)); return; }
@@ -268,8 +275,8 @@ async function flush(jid){
   persist();
   const stockLine = await stockLineFor(cat, imageOnly ? '' : text, lang);
   const card = await assign(cat, jid, b.phone, imageOnly ? '[gambar/screenshot iklan]' : text);
-  const offHours = !!(D.inDistHours && !D.inDistHours());
-  await D.waSend(sendTarget(jid, b.phone), tpl(cat, lang, card, stockLine, offHours));
+  const closed = !!(D.inOpenHours && !D.inOpenHours());   // genuinely shut, NOT merely outside the assign window
+  await D.waSend(sendTarget(jid, b.phone), tpl(cat, lang, card, stockLine, closed));
 }
 
 function onMessage(info){

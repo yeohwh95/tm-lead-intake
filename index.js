@@ -65,13 +65,17 @@ async function slaWindowStats(sinceMs, untilMs){
     filter: { conjunction: 'and', conditions: [{ field_name: 'SLA Assigned At', operator: 'isNotEmpty', value: [] }] },
     sort: [{ field_name: 'date created', desc: true }],
   });
-  const out = { assigned: 0, acked: 0, waiting: 0, missed: 0, moved: 0, within: 0, other: 0, capped: items.length >= 100 };
+  const out = { assigned: 0, acked: 0, waiting: 0, missed: 0, moved: 0, within: 0, other: 0, tradeins: 0, capped: items.length >= 100 };
   for (const it of items){
     const f = it.fields || {};
     const at = parseInt(slaFieldText(f['SLA Assigned At']), 10) || 0;
     if (!at || at < sinceMs || at > untilMs) continue;
     const st = slaFieldText(f['SLA Status']);
     if (st === 'Queued') continue;                       // bulk lead, DM not sent yet → not this window's workload
+    // TRADE-INS go to Fitri the PURCHASER, who is not on the round-robin and gets no SLA timer — so
+    // they can never be acknowledged and would otherwise sit in `waiting` forever, silently inflating
+    // the sales team's outstanding count. Counted and REPORTED separately, never hidden.
+    if (/^TRADE-IN:/i.test(slaFieldText(f['Customer want']))){ out.tradeins++; continue; }
     out.assigned++;
     const fr = parseInt(slaFieldText(f['SLA First Response At']), 10) || 0;
     const act = slaFieldText(f['SLA Response Action']);   // 'Keep' = acknowledged · 'Pass' = handed on
@@ -100,6 +104,7 @@ async function buildDigest(label, sinceMs){
     L.push(`🔔 ${w.assigned} assigned · ✅ ${w.acked} acknowledged · ⏳ ${w.waiting} waiting${w.missed ? ` · ⏰ ${w.missed} no-response` : ''}${w.moved ? ` · 🔄 ${w.moved} passed/reassigned` : ''}${w.other ? ` · ❔ ${w.other} unclear` : ''}`);
     if (w.acked) L.push(`⏱️ ${w.within}/${w.acked} answered within 60 min · auto-reassign *${reassign}*`);
     else L.push(`auto-reassign *${reassign}*`);
+    if (w.tradeins) L.push(`🔁 ${w.tradeins} trade-in${w.tradeins > 1 ? 's' : ''} → Fitri (purchaser, no SLA clock)`);
     // NO SILENT CAPS: say so rather than letting a truncated read look like full coverage.
     if (w.capped) L.push(`⚠️ read from the newest 100 Lark rows — older rows in this window may be uncounted`);
   } else {
@@ -908,18 +913,32 @@ const firstresponse = require('./firstresponse');
 // salesmen are only assigned/DM'd Mon–Fri 9am–5pm MYT. Outside the window, assign() writes the
 // lead to Lark UNASSIGNED and queues the staff-facing half here; the drain below releases it when
 // the window opens (round-robin runs at drain, SLA columns stamped so slaSweep doesn't double-DM).
-// 2026-07-30 (Harith, superseding his 07-22 Mon–Fri 9–5 request): TM's real operating hours are
-// **Mon–Sat 9am–6pm**, so FR distribution now MATCHES the SLA engine's window (SLA_DAYS, 9–18)
-// instead of being deliberately narrower. Both windows are the same again — one fewer thing to drift.
-// He flagged it because a customer was quoted "Isnin–Jumaat, 9 pagi–5 petang" in a real chat.
-const FR_DIST_DAYS  = (process.env.FR_DIST_DAYS || '1,2,3,4,5,6').split(',').map(Number);
+// ⚠️ TWO DIFFERENT WINDOWS — they are genuinely different facts, do not "tidy" them into one
+// (Benjamin, 2026-07-30: "they are working on Saturday but we don't assign lead on Sat"):
+//
+//   OPERATING hours  Mon–Sat 9am–6pm  = when TM is open / staff are in. What CUSTOMERS are told.
+//   DISTRIBUTION     Mon–Fri 9am–5pm  = when the bot auto-assigns + DMs a salesperson.
+//
+// Saturdays (and 5–6pm weekdays) therefore sit in between: the shop IS open and a human watches the
+// WhatsApp inbox, but the bot does not hand the lead to anyone. The customer must NOT be told
+// "we're closed, we'll contact you when we reopen" then — that was inaccurate, and it's the same
+// class of wrongness Harith flagged. Three states, handled in firstresponse.js `tpl()`:
+//   in distribution   → salesman card
+//   open, not dist.   → "advisor will contact you shortly", NO card, NO reopen line
+//   closed            → the operating-hours + "bila pejabat dibuka semula" line
+const FR_DIST_DAYS  = (process.env.FR_DIST_DAYS || '1,2,3,4,5').split(',').map(Number);
 const FR_DIST_START = Number(process.env.FR_DIST_START || 9);
-const FR_DIST_END   = Number(process.env.FR_DIST_END || 18);
+const FR_DIST_END   = Number(process.env.FR_DIST_END || 17);
 function inFRDistHours(){ const d = new Date(Date.now() + MYT_OFF); return FR_DIST_DAYS.includes(d.getUTCDay()) && d.getUTCHours() >= FR_DIST_START && d.getUTCHours() < FR_DIST_END; }
-// The customer-facing hours SENTENCE is generated from the window above — never hardcoded, so the
-// message and the behaviour cannot disagree (they did, for 8 days). See hours.js for the incident.
+// OPERATING hours — drives only what the customer is TOLD (Harith 2026-07-30: "isnin–sabtu, 9 pagi–6 petang").
+const FR_HOURS_DAYS  = (process.env.FR_HOURS_DAYS || '1,2,3,4,5,6').split(',').map(Number);
+const FR_HOURS_START = Number(process.env.FR_HOURS_START || 9);
+const FR_HOURS_END   = Number(process.env.FR_HOURS_END || 18);
+function inFROpenHours(){ const d = new Date(Date.now() + MYT_OFF); return FR_HOURS_DAYS.includes(d.getUTCDay()) && d.getUTCHours() >= FR_HOURS_START && d.getUTCHours() < FR_HOURS_END; }
+// The customer-facing hours SENTENCE is generated from the OPERATING window — never hardcoded, so
+// what we say and when we're open cannot disagree (they did, for 8 days). See hours.js.
 const { hoursLabel: fmtHours } = require('./hours');
-function hoursLabel(){ return fmtHours(FR_DIST_DAYS, FR_DIST_START, FR_DIST_END); }
+function hoursLabel(){ return fmtHours(FR_HOURS_DAYS, FR_HOURS_START, FR_HOURS_END); }
 const FR_DEFER_FILE = _path.join(__dirname, 'fr_deferred.json');
 let frDeferred = []; try { frDeferred = JSON.parse(_fs.readFileSync(FR_DEFER_FILE, 'utf8')); } catch { /* fresh */ }
 function frDeferPersist(){ try { _fs.writeFileSync(FR_DEFER_FILE, JSON.stringify(frDeferred)); } catch {} }
@@ -958,8 +977,9 @@ setInterval(() => { drainFRDeferred().catch(e => log('FR drain tick err', String
   const FR_EXTRA_INTERNAL = new Set(['60162393812','60108093259','60102304152','60123534271','60182907538','601143991899']);
   const staffLast9 = new Set(Object.values(STAFF).map(s => String(s.phone || '').replace(/\D/g, '').slice(-9)).filter(Boolean));
   const isStaffPhone = p => { const d = String(p || '').replace(/\D/g, ''); return !!d && (staffLast9.has(d.slice(-9)) || FR_EXTRA_INTERNAL.has(d)); };
-  firstresponse.init({ waSend, assignLeads, larkWriteLead, notifyStaff, sla, getUnavailable, log, isStaffPhone, wooCheckStock, aiClassify, inDistHours: inFRDistHours, deferStaffNotify, hoursLabel });
-  log('🕘 FR distribution window: ' + hoursLabel().en + ' (' + hoursLabel().bm + ')');
+  firstresponse.init({ waSend, assignLeads, larkWriteLead, notifyStaff, sla, getUnavailable, log, isStaffPhone, wooCheckStock, aiClassify, inDistHours: inFRDistHours, inOpenHours: inFROpenHours, deferStaffNotify, hoursLabel });
+  log('🕘 Operating hours (told to customers): ' + hoursLabel().en + ' / ' + hoursLabel().bm);
+  log('🕘 Lead auto-assignment window: ' + fmtHours(FR_DIST_DAYS, FR_DIST_START, FR_DIST_END).en + ' — deliberately narrower than operating hours');
   setTimeout(() => rehydrateFromLark().catch(e => log('rehydrate err:', String(e.message||e).slice(0,80))), 20000);
   if (SLA_ON){   // these belong to the SLA engine — keep them gated exactly as before the FR wiring
     // SLA SWEEP — enrol every new Lark lead (any source) into SLA. OFF unless SLA_SWEEP=1 + SLA_SWEEP_FROM set.

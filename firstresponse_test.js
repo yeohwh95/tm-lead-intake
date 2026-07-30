@@ -207,8 +207,9 @@ ok(/ADIB : 017-8869542/.test(sent[sent.length-1].text), 'flow: reply carries ass
     isStaffPhone: () => false,
     wooCheckStock: async () => ({ matches: [] }),
     inDistHours: () => false,
-    // Wired to the REAL generator off the REAL window, so the reply's quoted hours can never drift
-    // from the window that gates distribution again (the 2026-07-30 "Isnin–Jumaat 9–5" incident).
+    inOpenHours: () => false,          // 2am — the shop is genuinely SHUT
+    // Wired to the REAL generator off the REAL OPERATING window, so the quoted hours can never drift
+    // from when TM is actually open again (the 2026-07-30 "Isnin–Jumaat 9–5" incident).
     hoursLabel: () => require('./hours').hoursLabel([1,2,3,4,5,6], 9, 18),
     deferStaffNotify: e => deferred.push(e),
   });
@@ -230,6 +231,40 @@ ok(/ADIB : 017-8869542/.test(sent[sent.length-1].text), 'flow: reply carries ass
   await wait(120);
   ok(/Waktu operasi kami/.test(sent[sent.length - 1].text) && !/FITRI : /.test(sent[sent.length - 1].text), 'flow: off-hours sell reply — office-hours line, no Fitri card');
   ok(deferred.some(e => e.kind === 'dm' && /Trade-in Lead/.test(e.text)), 'flow: off-hours Fitri DM queued for the drain');
+
+  // ---- SATURDAY / 5–6pm weekday: shop OPEN, but the bot does not auto-assign (Benjamin 2026-07-30) ----
+  // "they are working on Saturday but we don't assign lead on Sat". So this is a THIRD state, distinct
+  // from both "in the assign window" and "closed": no salesman card, and crucially NO "we'll contact
+  // you when we reopen" line — the office is open, saying otherwise is the same wrongness Harith
+  // flagged. A human watches the inbox; the lead still drains to a rep on Monday 9am as a backstop.
+  const satDeferred = [];
+  fr.init({ ...DEPS,
+    inDistHours: () => false,          // Saturday → bot does not hand the lead out
+    inOpenHours: () => true,           // …but the shop IS open
+    hoursLabel: () => require('./hours').hoursLabel([1,2,3,4,5,6], 9, 18),
+    deferStaffNotify: e => satDeferred.push(e),
+    larkWriteLead: async l => { assigned.push(l); return 'recSAT'; },
+  });
+  const nSentSat = sent.length;
+  fr.onMessage({ jid: 'custsat@s.whatsapp.net', phone: '60199111222', kind: 'text', text: 'nak tanya ninja 250 ada stok?' });
+  await wait(120);
+  const satReply = sent[sent.length - 1];
+  ok(sent.length === nSentSat + 1, 'saturday: customer still gets an instant reply');
+  ok(!/Waktu operasi kami|bila pejabat dibuka semula/.test(satReply.text), 'saturday: NO "we are closed / when we reopen" line — the shop is open');
+  ok(!/ADIB : |https:\/\/wa\.me\/60178869542/.test(satReply.text), 'saturday: NO salesman card — nobody is auto-assigned');
+  ok(/menghubungi anda/.test(satReply.text), 'saturday: still promises an advisor will be in touch');
+  ok(satDeferred.some(e => e.kind === 'pool'), 'saturday: staff-facing half queued for the Monday 9am drain (backstop)');
+
+  // Trade-in on a Saturday → Fitri's DM defers, and her Lark Salesman cell IS now filled in
+  // (2026-07-30: an EMPTY Salesman is what let the blank-openId bug charge her leads to Ikhwan).
+  fr.onMessage({ jid: 'custsat2@s.whatsapp.net', phone: '60199333444', kind: 'text', text: 'nak jual motor vespa' });
+  await wait(120);
+  const tradeRow = assigned.filter(a => a.want && /^TRADE-IN:/.test(a.want)).pop();
+  ok(!!tradeRow, 'trade-in: row written to Lark');
+  ok(tradeRow && tradeRow.assignee === 'Fitri', 'trade-in: attributed to Fitri');
+  ok(tradeRow && tradeRow.staff && tradeRow.staff.openId === 'ou_9dbd12586dfb70716c3ee77aefe010ed',
+     'trade-in: Fitri\'s Lark openId now set, so the Salesman cell is never left empty');
+  ok(!/Waktu operasi kami/.test(sent[sent.length - 1].text), 'trade-in on saturday: no "closed" line either');
 
   // 🐛→✅ 2026-07-28: click-to-chat customers arrive with a @lid privacy jid — WaSenderAPI can't
   // deliver to that address, so the reply must go to the real phone-based jid instead (real
