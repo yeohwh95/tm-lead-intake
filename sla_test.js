@@ -108,6 +108,36 @@ sla.init(deps, { now: () => clock });
   ok('rehydrated timer resumes (nudge fires past T+60 of original assign)', calls.sent.some(s => s.phone === '+60123943259' && /Not acknowledged yet/.test(s.text)));
   ok('rehydrated lead not reassigned before T+75', sla._state().reps.Roy.leads.recR.status === 'pending');
 
+  // ---- IDENTITY (2026-07-30): a @lid may only be LEARNED alongside a verified staff PHONE ----
+  // Before this, any successful match learned the sender's @lid onto that rep. A customer whose
+  // pushname fuzzy-matched a rep ("Joel"→Jue) therefore had their OWN @lid permanently bound to her,
+  // so every later message from that customer became an ack — no phone check ever again.
+  try { fs.unlinkSync(process.env.SLA_STORE); } catch {}
+  sla.init(deps, { now: () => clock });
+  sla.register('Jue', '+60129653259', [{ recordId: 'recJ1', summary: 'Zontes 368', brand: 'Zontes', custName: '', custPhone: '+60111222333' }], 9101);
+
+  // A NAME-only match (no phone) must not leave a trace of the sender's @lid on the rep.
+  let r = await sla.onReply('', 'hello', 'Jue', '191379598766297@lid');   // the real customer @lid from 10:05
+  ok('name-only match still acks (repHint is phone-derived by the caller)', r && r.action === 'ack' && r.via === 'name');
+  ok('name-only match does NOT learn the sender @lid', !(sla._state().reps.Jue.lids || []).includes('191379598766297@lid'));
+
+  // A PHONE match is trustworthy → learn the @lid so the rep matches instantly next time.
+  sla.register('Jue', '+60129653259', [{ recordId: 'recJ2', summary: 'Zontes 368 again', brand: 'Zontes', custName: '', custPhone: '+60111222444' }], 9102);
+  r = await sla.onReply('60129653259', 'ok noted', 'Jue', '193080993046686@lid');   // Jue's real @lid
+  ok('phone match acks', r && r.action === 'ack' && r.via === 'phone');
+  ok('phone match DOES learn the rep @lid', (sla._state().reps.Jue.lids || []).includes('193080993046686@lid'));
+
+  // The learned @lid alone now identifies her, and reports via:'lid' so the caller can trust it.
+  sla.register('Jue', '+60129653259', [{ recordId: 'recJ3', summary: 'third', brand: 'Zontes', custName: '', custPhone: '+60111222555' }], 9103);
+  r = await sla.onReply('', 'ok', '', '193080993046686@lid');
+  ok('learned @lid acks with via=lid', r && r.action === 'ack' && r.via === 'lid');
+
+  // An unknown sender — no phone, no name, unknown @lid — must match nothing at all.
+  sla.register('Jue', '+60129653259', [{ recordId: 'recJ4', summary: 'fourth', brand: 'Zontes', custName: '', custPhone: '+60111222666' }], 9104);
+  r = await sla.onReply('60129717912', 'Hello, I am looking to purchase a 368g, whats your best deal?', '', '191379598766297@lid');
+  ok('real customer (+60129717912) matches NO rep', r === null);
+  ok("customer's message left Jue's lead pending", sla._state().reps.Jue.leads.recJ4.status === 'pending');
+
   // off-hours: register at Sunday → skipped
   let clock2 = Date.UTC(2026, 5, 28, 4, 0, 0); // Sunday 12:00 MYT
   sla.init(deps, { now: () => clock2 });

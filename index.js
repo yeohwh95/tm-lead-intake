@@ -48,14 +48,65 @@ function chunk(arr, size){ const out = []; for (let i = 0; i < arr.length; i += 
 const BIZ_DAYS = (process.env.SLA_DAYS || '1,2,3,4,5,6').split(',').map(Number);
 function inBusinessHours(){ const d = new Date(Date.now() + MYT_OFF); return BIZ_DAYS.includes(d.getUTCDay()) && d.getUTCHours() >= 9 && d.getUTCHours() < 18; }
 function mytNow(){ const d = new Date(Date.now() + MYT_OFF); return { date: d.toISOString().slice(0,10), h: d.getUTCHours(), m: d.getUTCMinutes() }; }
-function buildDigest(label, sinceMs){
+function hhmmMYT(ms){ const d = new Date(ms + MYT_OFF); return String(d.getUTCHours()).padStart(2,'0') + ':' + String(d.getUTCMinutes()).padStart(2,'0'); }
+const BOOT_AT = Date.now();
+
+// ---- Window-scoped SLA counters, read from LARK (2026-07-30) ----
+// The 12PM/6PM card claims "here's what happened in this window". It used to be built from
+// `sla.stats()` — a LIVE snapshot of the in-memory store, which lives on Render's EPHEMERAL disk.
+// Seen live 07-29: a 17:40 deploy wiped the store, so the 18:00 card reported the desk as it looked
+// 20 minutes later ("5 assigned") and claimed "0 acknowledged" — while Amir, Fazwan ×2 and Roy had
+// all genuinely acknowledged that afternoon. And because `rehydrateFromLark` restores only
+// `SLA Status=Pending` rows, acknowledged leads are UNRESTORABLE by construction → "0 acknowledged"
+// after ANY deploy, permanently. Lark is the durable record, so the counters now come from Lark and
+// a restart cannot rewrite history.
+async function slaWindowStats(sinceMs, untilMs){
+  const items = await larkSearch({
+    filter: { conjunction: 'and', conditions: [{ field_name: 'SLA Assigned At', operator: 'isNotEmpty', value: [] }] },
+    sort: [{ field_name: 'date created', desc: true }],
+  });
+  const out = { assigned: 0, acked: 0, waiting: 0, missed: 0, moved: 0, within: 0, other: 0, capped: items.length >= 100 };
+  for (const it of items){
+    const f = it.fields || {};
+    const at = parseInt(slaFieldText(f['SLA Assigned At']), 10) || 0;
+    if (!at || at < sinceMs || at > untilMs) continue;
+    const st = slaFieldText(f['SLA Status']);
+    if (st === 'Queued') continue;                       // bulk lead, DM not sent yet → not this window's workload
+    out.assigned++;
+    const fr = parseInt(slaFieldText(f['SLA First Response At']), 10) || 0;
+    const act = slaFieldText(f['SLA Response Action']);   // 'Keep' = acknowledged · 'Pass' = handed on
+    // A PASS is a response but NOT an acknowledgement — the rep declined the lead, so it must land in
+    // `moved`, never inflate `acked`. Buckets are mutually exclusive and MUST sum to `assigned`, so a
+    // client-facing card can never print numbers that don't add up.
+    if (st === 'Acknowledged' || (fr && act === 'Keep')){ out.acked++; if (f['SLA Within SLA?'] === true) out.within++; }
+    else if (st === 'Pending') out.waiting++;
+    else if (st === 'No-Response' || st === 'Escalated') out.missed++;
+    else if (st === 'Reassigned' || act === 'Pass') out.moved++;
+    else out.other++;                                    // unknown/blank status — surfaced, never hidden
+  }
+  return out;
+}
+async function buildDigest(label, sinceMs){
   const evs = digest.events.filter(e => e.t >= sinceMs);
   const flags = evs.filter(e => e.type === 'flag');
   const moves = evs.filter(e => e.type === 'reassign');
   const escs  = evs.filter(e => e.type === 'escalate');
-  const s = (typeof sla !== 'undefined' && sla) ? sla.stats() : null;
+  const reassign = (typeof sla !== 'undefined' && sla) ? sla.stats().reassign : '?';
   const L = [`📊 *TM SLA — ${label}*  (${mytNow().date})`];
-  if (s) L.push(`🔔 ${s.tracked} assigned · ✅ ${s.byStatus.contacted || 0} acknowledged · ⏳ ${s.pending.length} waiting · auto-reassign *${s.reassign}*`);
+  let w = null;
+  try { w = await slaWindowStats(sinceMs, Date.now()); }
+  catch (e){ log('digest lark stats err', String(e.message || e).slice(0, 80)); }
+  if (w){
+    L.push(`🔔 ${w.assigned} assigned · ✅ ${w.acked} acknowledged · ⏳ ${w.waiting} waiting${w.missed ? ` · ⏰ ${w.missed} no-response` : ''}${w.moved ? ` · 🔄 ${w.moved} passed/reassigned` : ''}${w.other ? ` · ❔ ${w.other} unclear` : ''}`);
+    if (w.acked) L.push(`⏱️ ${w.within}/${w.acked} answered within 60 min · auto-reassign *${reassign}*`);
+    else L.push(`auto-reassign *${reassign}*`);
+    // NO SILENT CAPS: say so rather than letting a truncated read look like full coverage.
+    if (w.capped) L.push(`⚠️ read from the newest 100 Lark rows — older rows in this window may be uncounted`);
+  } else {
+    // Lark unreachable → degrade HONESTLY. Printing a live in-memory snapshot as if it were the
+    // window is exactly the failure this function was rewritten to remove.
+    L.push(`⚠️ Couldn't read this window's totals from Lark — counts unavailable · auto-reassign *${reassign}*`);
+  }
   if (escs.length){
     L.push('', `🚨 *Needs a manager (${escs.length})* — not picked up:`);
     escs.slice(0, 10).forEach(e => L.push(`   • ${e.who} (${e.brand}) — ${e.why}`));
@@ -70,19 +121,23 @@ function buildDigest(label, sinceMs){
     L.push('', `🔄 *Reassigned / passed (${moves.length})*:`);
     Object.entries(byPair).sort((a,b)=>b[1]-a[1]).forEach(([k,n]) => L.push(`   • ${k} — ${n}`));
   }
-  if (!flags.length && !moves.length) L.push('', '✅ No SLA misses this window — all assigned leads acknowledged.');
+  if (!flags.length && !moves.length && !(w && w.missed)) L.push('', '✅ No SLA misses this window — all assigned leads acknowledged.');
+  // A mid-window restart can only cost us the flag/reassign LISTS (in-memory buffer). Say so, instead
+  // of letting a short list read as a quiet window — the 07-29 report's whole failure mode.
+  if (BOOT_AT > sinceMs) L.push('', `ℹ️ Bot restarted at ${hhmmMYT(BOOT_AT)} — the lists above may be incomplete. The totals are read from Lark and unaffected.`);
   return L.join('\n');
 }
 // checks every 5 min; fires once when it crosses 12:00 and 18:00 MYT (health poller keeps the bot awake)
-function digestTick(){
+async function digestTick(){
   const p = mytNow();
   const windows = [[12, 'Midday update (9AM–12PM)', 0], [18, 'End-of-day update (12PM–6PM)', 12]];
   for (const [hr, label, startHr] of windows){
     const key = `${p.date}:${hr}`;
     if (p.h === hr && p.m < 15 && !digest.sent[key]){
       const since = Date.parse(p.date + 'T00:00:00Z') - MYT_OFF + startHr * 3600 * 1000;
-      alertReview(buildDigest(label, since)).catch(e => log('digest send err', String(e.message||e)));
-      digest.sent[key] = true;
+      digest.sent[key] = true;   // claim the slot BEFORE the awaited build/send so a slow Lark read can't double-fire
+      try { await alertReview(await buildDigest(label, since)); }
+      catch (e){ log('digest send err', String(e.message || e)); }
       const cut = Date.now() - 26 * 3600 * 1000;
       digest.events = digest.events.filter(e => e.t >= cut);
       for (const k of Object.keys(digest.sent)) if (k < p.date) delete digest.sent[k];
@@ -467,6 +522,12 @@ function matchStaff(raw){
   }
   return { name: hit || '', requested: raw.trim() };
 }
+// ---- Reply identity: PHONE ONLY (2026-07-30) — full rationale + tests in identity.js ----
+// matchStaff() above stays fuzzy, but ONLY for caption/filename overrides, which STAFF write.
+// Deciding "is this inbound sender a rep?" goes through the phone number, never the pushname.
+const identity = require('./identity');
+const STAFF_BY_LAST9 = identity.byLast9(STAFF);
+function staffNameByPhone(phone){ return identity.nameByPhone(STAFF_BY_LAST9, phone); }
 function fileOverrides(name){
   const f = (name || '');
   const am = f.match(/\(([^)]+)\)/);
@@ -662,7 +723,11 @@ async function larkUpdateSLA(recordId, fields){
 // Any row that HAS a salesperson but NO SLA timer yet → DM the rep, start the 75-min clock, stamp SLA cols.
 // Safety: gated by SLA_SWEEP=1, only touches leads created at/after SLA_SWEEP_FROM (epoch-ms), capped per run,
 // working-hours only. This means it can never blast the 5,700 historical rows.
-const STAFF_BY_OPENID = Object.fromEntries(Object.entries(STAFF).map(([name, v]) => [v.openId, { name, phone: v.phone }]));
+// Blank openIds are FILTERED OUT here — see identity.js for the incident this prevents (Fitri's
+// Salesman-less trade-in rows resolving to Ikhwan, who carries `openId: ''`).
+const STAFF_BY_OPENID = identity.byOpenId(STAFF);
+// Roster drift must be LOUD, not silent (cf. the POOLS-vs-Lark-sheet drift that hid Ikhwan for weeks).
+for (const w of identity.rosterWarnings(STAFF)) log('⚠️ ROSTER: ' + w);
 const SLA_SWEEP_FROM = parseInt(process.env.SLA_SWEEP_FROM || '0', 10);   // 0 = disabled (no cutoff → never enrol)
 const SLA_SWEEP_CAP  = parseInt(process.env.SLA_SWEEP_CAP  || '15', 10);
 function slaFieldText(v){ if (Array.isArray(v)) return v.map(slaFieldText).join(' '); if (v && typeof v === 'object') return v.text || v.name || ''; return v == null ? '' : String(v); }
@@ -896,7 +961,7 @@ setInterval(() => { drainFRDeferred().catch(e => log('FR drain tick err', String
       log('🧹 SLA sweep ON — every ' + '3min, from ' + (SLA_SWEEP_FROM || 'DISABLED (no cutoff)') + ', cap ' + SLA_SWEEP_CAP);
     }
     // GROUP UPDATES: no more 1-by-1 spam — ONE batched summary at 12PM + 6PM MYT (routine flags/reassigns buffered via digestPush)
-    setInterval(() => { try { digestTick(); } catch (e) { log('digest tick err', String(e.message || e)); } }, 5 * 60 * 1000);
+    setInterval(() => { digestTick().catch(e => log('digest tick err', String(e.message || e))); }, 5 * 60 * 1000);
     log('⏱️ SLA engine ON — reassign ' + (process.env.SLA_REASSIGN === '1' ? 'ON' : 'PAUSED') + ', group summary 12PM+6PM');
   }
 }
@@ -1058,13 +1123,22 @@ async function handle(payload){
     const k = (pickMessages(payload.data || {}).key) || {};
     const realPhone = String(k.cleanedSenderPn || k.senderPn || k.participantPn || '').replace(/\D/g, '')
       || (info.chatId.includes('@lid') ? '' : (info.chatId.split('@')[0] || '').replace(/\D/g, ''));
-    const repHint = matchStaff((info.sender || '').split(/\s+/)[0] || '').name;   // name fallback
+    // Identity comes from the PHONE, never from the pushname (see staffNameByPhone above).
+    const repHint = staffNameByPhone(realPhone);
+    const senderIsStaff = !!repHint;
     const text = info.kind === 'text' ? info.text : '';   // sticker/image reply = acknowledgement too (empty text)
     const res = await sla.onReply(realPhone, text, repHint, info.chatId);   // phone (real) → name → learned-lid
     // OBSERVABILITY: every potential rep reply logs a distinct line so we can SEE ack-tracking working.
-    if (res && res.action === 'pass') { const to = (STAFF[res.repKey] && STAFF[res.repKey].phone) || info.chatId; log('SLA ✅MATCH pass: ' + res.repKey + ' passed ' + (res.count||0) + ' lead(s) [phone=' + realPhone + ' name=' + repHint + ' jid=' + info.chatId + ']'); await waSend(to, '🔄 Got it — passing this lead to another salesperson.'); return; }
-    if (res && res.action === 'ack')  { const to = (STAFF[res.repKey] && STAFF[res.repKey].phone) || info.chatId; log('SLA ✅MATCH ack: ' + res.repKey + ' acknowledged ' + (res.count||0) + ' lead(s) [phone=' + realPhone + ' name=' + repHint + ' jid=' + info.chatId + ']'); await waSend(to, '✅ Noted — thanks! Marked as acknowledged.'); return; }
-    if (res && res.action === 'noop') { log('SLA ·match noop: ' + res.repKey + ' replied but has no pending leads (already acked?) [phone=' + realPhone + ' name=' + repHint + ' jid=' + info.chatId + ']'); }
+    // BELT-AND-BRACES (2026-07-30): an ack/pass may only short-circuit the handler for a sender we
+    // TRUST — a verified staff phone, or a @lid learned alongside one. Anything else falls through to
+    // first-response, so a mis-identified sender costs us a log line, never a customer's enquiry.
+    const trusted = senderIsStaff || res?.via === 'lid';
+    if (res && (res.action === 'ack' || res.action === 'pass') && !trusted) {
+      log('SLA ⚠️REFUSED ' + res.action + ': sender is not a known staff phone — treating as CUSTOMER [phone=' + realPhone + ' claimed=' + res.repKey + ' jid=' + info.chatId + ']');
+    }
+    else if (res && res.action === 'pass') { const to = (STAFF[res.repKey] && STAFF[res.repKey].phone) || info.chatId; log('SLA ✅MATCH pass: ' + res.repKey + ' passed ' + (res.count||0) + ' lead(s) [phone=' + realPhone + ' via=' + res.via + ' jid=' + info.chatId + ']'); await waSend(to, '🔄 Got it — passing this lead to another salesperson.'); return; }
+    else if (res && res.action === 'ack')  { const to = (STAFF[res.repKey] && STAFF[res.repKey].phone) || info.chatId; log('SLA ✅MATCH ack: ' + res.repKey + ' acknowledged ' + (res.count||0) + ' lead(s) [phone=' + realPhone + ' via=' + res.via + ' jid=' + info.chatId + ']'); await waSend(to, '✅ Noted — thanks! Marked as acknowledged.'); return; }
+    else if (res && res.action === 'noop') { log('SLA ·match noop: ' + res.repKey + ' replied but has no pending leads (already acked?) [phone=' + realPhone + ' via=' + res.via + ' jid=' + info.chatId + ']'); }
     else if (!res) { log('SLA ✖NO-MATCH: personal reply not tracked to any rep [phone=' + realPhone + ' name=' + repHint + ' jid=' + info.chatId + ' text="' + String(text).slice(0,40) + '"]'); }
   }
   // FIRST-RESPONSE BOT (Product/Loan/Trade-in, Benjamin 2026-07-17): instant first touch on

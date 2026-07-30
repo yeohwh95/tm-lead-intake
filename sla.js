@@ -52,29 +52,36 @@ function register(repKey, repPhone, leads, dmMsgId) {
 // Rep sent a message to the TM number.
 //   ANY message → acknowledged → confirm ALL their pending leads (no reassign).
 //   contains "pass" → reassign each pending lead NOW.
-// Match by PHONE (real-phone JID) OR by NAME (replies come from a @lid privacy JID, so repHint =
-// their WhatsApp name matched to the roster). Returns null, or { repKey, action:'ack'|'pass' }.
+// Match by PHONE (real-phone JID), by a previously LEARNED @lid, or by NAME.
+// ⚠️ `repHint` MUST be derived from the sender's PHONE (index.js `staffNameByPhone`) — never from their
+// WhatsApp pushname. A pushname is sender-controlled, so fuzzy-matching it to the roster let customers
+// impersonate reps ("Joel"→Jue) and swallow their own enquiry as that rep's ack (2026-07-30).
+// Returns null, or { repKey, action:'ack'|'pass'|'noop', via:'lid'|'phone'|'name' }.
 async function onReply(fromPhone, text, repHint, fromJid) {
   const digits = String(fromPhone).replace(/\D/g, '');
   for (const [repKey, r] of Object.entries(state.reps)) {
-    const lidMatch = fromJid && (r.lids || []).includes(fromJid);          // exact — learned from a past reply
+    const lidMatch = fromJid && (r.lids || []).includes(fromJid);          // exact — learned from a past VERIFIED reply
     const phoneMatch = digits.length >= 6 && String(r.phone).replace(/\D/g, '').slice(-9) === digits.slice(-9);
     const nameMatch = repHint && String(repHint).toLowerCase() === repKey.toLowerCase();
     if (!lidMatch && !phoneMatch && !nameMatch) continue;
-    if (fromJid) { r.lids = r.lids || []; if (!r.lids.includes(fromJid)) r.lids.push(fromJid); }   // LEARN this rep's JID → instant match next time
+    const via = phoneMatch ? 'phone' : (lidMatch ? 'lid' : 'name');
+    // LEARN this rep's @lid → instant match next time. ONLY when it arrived with a verified staff
+    // PHONE: learning on a name match let a customer whose pushname resembled a rep permanently bind
+    // their own @lid to that rep, making every later message from them an ack (2026-07-30).
+    if (fromJid && phoneMatch) { r.lids = r.lids || []; if (!r.lids.includes(fromJid)) r.lids.push(fromJid); }
     // A reply acknowledges leads that are still open OR were flagged No-Response / skipped-offhours
     // while unattended (LATE ACK). Bug fixed 2026-07-03: a reply arriving after the 75-min flag (or in
     // the split-second before a lead registered) was dropped as "noop", mis-scoring the rep as silent.
     // flagged_noreassign & skipped_offhours leads stay in r.leads (only deleted on a real reassign,
     // which is paused), so they can be recovered here.
     const ackable = Object.values(r.leads).filter(l => RECOVERABLE.has(l.status));
-    if (!ackable.length) return { repKey, action: 'noop' };   // matched a rep, but genuinely nothing to ack
+    if (!ackable.length) return { repKey, action: 'noop', via };   // matched a rep, but genuinely nothing to ack
     if (/\bpass\b/i.test(text || '')) {
       for (const l of ackable) {
         await slaWrite(l.recordId, { 'SLA First Response At': now(), 'SLA Response Action': 'Pass', 'SLA Response Time (min)': mins(now() - l.assignedAt) });
         await reassignLead(repKey, r, l, 'passed');
       }
-      persist(); return { repKey, action: 'pass', count: ackable.length };
+      persist(); return { repKey, action: 'pass', count: ackable.length, via };
     }
     let lateCount = 0;
     for (const l of ackable) {   // any other message = acknowledged ("Keep")
@@ -85,7 +92,7 @@ async function onReply(fromPhone, text, repHint, fromJid) {
       await slaWrite(l.recordId, { 'SLA First Response At': now(), 'SLA Response Action': 'Keep', 'SLA Status': 'Acknowledged', 'SLA Response Time (min)': rt, 'SLA Customer Wait (min)': cw, 'SLA Within SLA?': rt <= 60 });
       if (late) (deps.log || console.log)('SLA late-ack recovered:', l.recordId, repKey, `(${rt}min after assign)`);
     }
-    persist(); return { repKey, action: 'ack', count: ackable.length, late: lateCount };
+    persist(); return { repKey, action: 'ack', count: ackable.length, late: lateCount, via };
   }
   return null;   // no tracked rep matched this reply
 }
