@@ -541,6 +541,7 @@ function matchStaff(raw){
 // Deciding "is this inbound sender a rep?" goes through the phone number, never the pushname.
 const identity = require('./identity');
 const wasend = require('./wasend');
+const roster = require('./roster');
 const STAFF_BY_LAST9 = identity.byLast9(STAFF);
 function staffNameByPhone(phone){ return identity.nameByPhone(STAFF_BY_LAST9, phone); }
 function fileOverrides(name){
@@ -649,6 +650,46 @@ async function larkToken(){
 
 // ---- Salesman availability (Lark Sheet) → set of names marked "NO" (skip them in rotation). Cached 5 min. ----
 const AVAIL_SHEET = process.env.AVAIL_SHEET || 'YjLTslshkhRGeXt9V5DlJi8cgdl';
+// ---- ROSTER-FROM-SHEET, SHADOW MODE (2026-07-30) ----
+// The team list lives in FOUR places (this file's POOLS/STAFF, tiktok-lead-engine POOL_*,
+// tm-daily-report TEAM_KW, and the Lark sheet). Drift between them has silently cost leads four
+// times — see roster.js for the list. Columns C–F were added to the sheet so it can become the single
+// source: Branch (which rotations), Phone, Lark ID.
+// SHADOW FIRST, deliberately: every 5 min the bot parses the sheet and REPORTS any disagreement with
+// the compiled-in roster, while assignment keeps running off the code exactly as before. Nothing in
+// the lead path changes until the diff has been empty for a while and `ROSTER_FROM_SHEET=1` is set.
+// Rationale: this is the live lead-assignment path for a paying client — prove the data first.
+// (At wiring time the sheet already reproduced the code roster EXACTLY: 20 people, all 4 pools, every
+// phone and Lark ID, zero warnings.)
+const ROSTER_FROM_SHEET = process.env.ROSTER_FROM_SHEET === '1';   // not yet enabled — shadow only
+let _rosterSnap = null, _rosterTs = 0, _rosterAlertedAt = 0;
+async function readSheetRoster(){
+  const tok = await larkToken();
+  const sid = await availSheetId(tok);
+  const vals = await (await fetch(`${LARK_BASE}/sheets/v2/spreadsheets/${AVAIL_SHEET}/values/${sid}!A1:F60`, { headers: { 'Authorization': 'Bearer ' + tok } })).json();
+  const rows = (vals.data && vals.data.valueRange && vals.data.valueRange.values) || [];
+  return roster.parseRoster(rows, Object.keys(STAFF));
+}
+async function rosterShadowTick(){
+  try {
+    const parsed = await readSheetRoster();
+    if (!parsed.ok) { log('⚠️ ROSTER SHEET unusable — ' + parsed.warnings.join(' | ')); return; }
+    _rosterSnap = parsed; _rosterTs = Date.now();
+    const diff = roster.diffRoster(parsed, STAFF, POOLS);
+    for (const w of parsed.warnings) log('⚠️ ROSTER SHEET: ' + w);
+    if (!diff.length) { log('roster shadow: sheet matches code ✅ (' + Object.keys(parsed.staff).length + ' people)'); return; }
+    log('⚠️ ROSTER SHADOW DIFF (' + diff.length + '): ' + diff.join(' | '));
+    // Escalate to the group at most hourly — a real drift means someone edited the sheet and the
+    // code has not caught up, which is exactly the failure this whole exercise exists to kill.
+    if (Date.now() - _rosterAlertedAt > 60 * 60 * 1000) {
+      _rosterAlertedAt = Date.now();
+      await alertReview('⚠️ *Roster sheet vs bot mismatch*\n' + diff.slice(0, 12).map(x => '• ' + x).join('\n')
+        + (diff.length > 12 ? `\n…and ${diff.length - 12} more` : '')
+        + '\n\nThe bot is still using its built-in list. Someone edited the sheet — I need to sync the code.');
+    }
+  } catch (e) { log('roster shadow err', String(e.message || e).slice(0, 120)); }
+}
+
 // Resolve the availability TAB BY TITLE, not by position (2026-07-30). Both reads below used
 // `sheets[0]` — the first tab in the UI. That spreadsheet ("AI REFERENCE SHEET") has a SECOND tab
 // ("mudah group info"), and it is edited by humans: drag the tabs, or add one at the front, and the
@@ -1015,6 +1056,9 @@ setInterval(() => { drainFRDeferred().catch(e => log('FR drain tick err', String
     }
     // GROUP UPDATES: no more 1-by-1 spam — ONE batched summary at 12PM + 6PM MYT (routine flags/reassigns buffered via digestPush)
     setInterval(() => { digestTick().catch(e => log('digest tick err', String(e.message || e))); }, 5 * 60 * 1000);
+    // roster shadow: compare the Lark sheet against the built-in roster (reports only — see rosterShadowTick)
+    setTimeout(() => rosterShadowTick(), 25000);
+    setInterval(() => rosterShadowTick(), 5 * 60 * 1000);
     log('⏱️ SLA engine ON — reassign ' + (process.env.SLA_REASSIGN === '1' ? 'ON' : 'PAUSED') + ', group summary 12PM+6PM');
   }
 }
