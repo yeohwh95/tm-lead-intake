@@ -504,7 +504,7 @@ const STAFF = {
   Syaza:   { phone: '+60123773259', openId: 'ou_88cd7c9e006835a4300c5104f19185f5' },   // Honda (Syaza Rahman — PIC-confirmed 2026-06-18)
   Roy:     { phone: '+60122653259', openId: 'ou_6bf42b3e72ca59355e8278d71ae10123' },   // Shah Alam (Roy Abdullah)
   Zeera:   { phone: '+601118583259', openId: 'ou_47e1634c959f08b7bb43f2ba87cf400b' },  // Honda (Hazirah Zulaika Binti Mohd Asri — reactivated acct, NOT old ou_7cde)
-  Ikhwan:  { phone: '+60129593259', openId: '' },   // HQ — added 2026-07-29. openId PENDING: have him assign ONE Lark row, then read the id back off that exact row (never name-harvest — duplicate/stale accounts exist). Until then WhatsApp DM + rotation work; the Lark Salesman cell stays blank (both write paths guard on empty openId).
+  Ikhwan:  { phone: '+60129593259', openId: 'ou_5dff90be7f04fd6222d29c2f6f502ae0' },   // HQ — added 2026-07-29; real openId read 2026-07-30 off row recvqPiX6HbIx8 ("test lead", 601121246061) which he assigned to HIMSELF, per the never-name-harvest rule (Zeera has a stale ou_7cde… with 248 rows attached, and there are two "Syaza" accounts — searching by name has burned us twice).
 };
 
 // ---- Deterministic filename/caption flags ----
@@ -908,12 +908,18 @@ const firstresponse = require('./firstresponse');
 // salesmen are only assigned/DM'd Mon–Fri 9am–5pm MYT. Outside the window, assign() writes the
 // lead to Lark UNASSIGNED and queues the staff-facing half here; the drain below releases it when
 // the window opens (round-robin runs at drain, SLA columns stamped so slaSweep doesn't double-DM).
-// NOTE: deliberately narrower than SLA_DAYS (Mon–Sat) — the SAT SLA day covers staff-dropped group
-// leads; the team explicitly wants FR auto-leads held to Mon–Fri. Envs: FR_DIST_DAYS/START/END.
-const FR_DIST_DAYS  = (process.env.FR_DIST_DAYS || '1,2,3,4,5').split(',').map(Number);
+// 2026-07-30 (Harith, superseding his 07-22 Mon–Fri 9–5 request): TM's real operating hours are
+// **Mon–Sat 9am–6pm**, so FR distribution now MATCHES the SLA engine's window (SLA_DAYS, 9–18)
+// instead of being deliberately narrower. Both windows are the same again — one fewer thing to drift.
+// He flagged it because a customer was quoted "Isnin–Jumaat, 9 pagi–5 petang" in a real chat.
+const FR_DIST_DAYS  = (process.env.FR_DIST_DAYS || '1,2,3,4,5,6').split(',').map(Number);
 const FR_DIST_START = Number(process.env.FR_DIST_START || 9);
-const FR_DIST_END   = Number(process.env.FR_DIST_END || 17);
+const FR_DIST_END   = Number(process.env.FR_DIST_END || 18);
 function inFRDistHours(){ const d = new Date(Date.now() + MYT_OFF); return FR_DIST_DAYS.includes(d.getUTCDay()) && d.getUTCHours() >= FR_DIST_START && d.getUTCHours() < FR_DIST_END; }
+// The customer-facing hours SENTENCE is generated from the window above — never hardcoded, so the
+// message and the behaviour cannot disagree (they did, for 8 days). See hours.js for the incident.
+const { hoursLabel: fmtHours } = require('./hours');
+function hoursLabel(){ return fmtHours(FR_DIST_DAYS, FR_DIST_START, FR_DIST_END); }
 const FR_DEFER_FILE = _path.join(__dirname, 'fr_deferred.json');
 let frDeferred = []; try { frDeferred = JSON.parse(_fs.readFileSync(FR_DEFER_FILE, 'utf8')); } catch { /* fresh */ }
 function frDeferPersist(){ try { _fs.writeFileSync(FR_DEFER_FILE, JSON.stringify(frDeferred)); } catch {} }
@@ -952,7 +958,8 @@ setInterval(() => { drainFRDeferred().catch(e => log('FR drain tick err', String
   const FR_EXTRA_INTERNAL = new Set(['60162393812','60108093259','60102304152','60123534271','60182907538','601143991899']);
   const staffLast9 = new Set(Object.values(STAFF).map(s => String(s.phone || '').replace(/\D/g, '').slice(-9)).filter(Boolean));
   const isStaffPhone = p => { const d = String(p || '').replace(/\D/g, ''); return !!d && (staffLast9.has(d.slice(-9)) || FR_EXTRA_INTERNAL.has(d)); };
-  firstresponse.init({ waSend, assignLeads, larkWriteLead, notifyStaff, sla, getUnavailable, log, isStaffPhone, wooCheckStock, aiClassify, inDistHours: inFRDistHours, deferStaffNotify });
+  firstresponse.init({ waSend, assignLeads, larkWriteLead, notifyStaff, sla, getUnavailable, log, isStaffPhone, wooCheckStock, aiClassify, inDistHours: inFRDistHours, deferStaffNotify, hoursLabel });
+  log('🕘 FR distribution window: ' + hoursLabel().en + ' (' + hoursLabel().bm + ')');
   setTimeout(() => rehydrateFromLark().catch(e => log('rehydrate err:', String(e.message||e).slice(0,80))), 20000);
   if (SLA_ON){   // these belong to the SLA engine — keep them gated exactly as before the FR wiring
     // SLA SWEEP — enrol every new Lark lead (any source) into SLA. OFF unless SLA_SWEEP=1 + SLA_SWEEP_FROM set.

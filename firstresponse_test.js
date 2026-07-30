@@ -207,6 +207,9 @@ ok(/ADIB : 017-8869542/.test(sent[sent.length-1].text), 'flow: reply carries ass
     isStaffPhone: () => false,
     wooCheckStock: async () => ({ matches: [] }),
     inDistHours: () => false,
+    // Wired to the REAL generator off the REAL window, so the reply's quoted hours can never drift
+    // from the window that gates distribution again (the 2026-07-30 "Isnin–Jumaat 9–5" incident).
+    hoursLabel: () => require('./hours').hoursLabel([1,2,3,4,5,6], 9, 18),
     deferStaffNotify: e => deferred.push(e),
   });
   const nDm = dms.length, nSent2 = sent.length;
@@ -215,6 +218,8 @@ ok(/ADIB : 017-8869542/.test(sent[sent.length-1].text), 'flow: reply carries ass
   const nightReply = sent[sent.length - 1];
   ok(sent.length === nSent2 + 1 && nightReply.to === 'cust7@s.whatsapp.net', 'flow: off-hours customer still gets an instant reply');
   ok(/Waktu operasi kami/.test(nightReply.text), 'flow: off-hours reply says SA will contact during office hours');
+  ok(/Isnin–Sabtu, 9 pagi–6 petang/.test(nightReply.text), 'flow: off-hours reply quotes the REAL window (Mon–Sat 9–6), generated not hardcoded');
+  ok(!/Isnin–Jumaat|9 pagi–5 petang/.test(nightReply.text), 'flow: the old wrong hours (Mon–Fri 9–5) are gone');
   ok(!/ADIB : /.test(nightReply.text), 'flow: off-hours reply has NO salesman card');
   ok(assigned.some(a => a.want && /cbr250/i.test(a.want) && !a.assignee), 'flow: off-hours lead written to Lark UNASSIGNED');
   ok(dms.length === nDm, 'flow: off-hours — no salesman DM sent');

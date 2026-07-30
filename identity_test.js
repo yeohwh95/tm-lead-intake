@@ -60,7 +60,7 @@ eq('lookup of "" (row with no Salesman)',    OPENID[''], undefined);
 eq('lookup of undefined Salesman id',        OPENID[undefined], undefined);
 eq('Ikhwan absent from openId map',          Object.values(OPENID).some(v => v.name === 'Ikhwan'), false);
 eq('a real rep still resolves by openId',    (OPENID['ou_jue'] || {}).name, 'Jue');
-eq('openId map size = reps with a real id',  Object.keys(OPENID).length, 19);
+eq("openId map size = reps with a real id",  Object.keys(OPENID).length, 19);
 
 console.log('\n--- roster drift is reported, not silent ---');
 const warns = id.rosterWarnings(STAFF);

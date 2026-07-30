@@ -71,13 +71,19 @@ const LOAN_EPP  = 'Maybank, Public Bank, UOB, RHB, OCBC, Affin, AmBank, HLB, All
 
 function tpl(cat, lang, card, stockLine, offHours){
   const g = saMYT();
-  // Off-hours (team 2026-07-22: replies 24h, lead distribution Mon–Fri 9–5): no salesman card at
-  // 2am — tell the customer when the office reopens instead. The card slot carries that line so
-  // every category template picks it up without its own wording change.
+  // Off-hours (replies 24h, lead distribution inside the window only): no salesman card at 2am —
+  // tell the customer when the office reopens instead. The card slot carries that line so every
+  // category template picks it up without its own wording change.
+  // ⚠️ The hours SENTENCE is generated from the SAME config that gates distribution (`D.hoursLabel`,
+  // fed by FR_DIST_DAYS/START/END in index.js) — it must never be hardcoded again. It was, and it
+  // drifted: the message said "Isnin–Jumaat, 9 pagi–5 petang" while TM actually operates Mon–Sat
+  // 9–6, so the bot was quoting the wrong hours to customers (Harith flagged it 2026-07-30 with a
+  // real screenshot). Change the window and the sentence follows automatically.
+  const H = (D.hoursLabel && D.hoursLabel()) || { en: 'Mon–Sat, 9am–6pm', bm: 'Isnin–Sabtu, 9 pagi–6 petang' };
   const c = card ? `\n\n${card.name.toUpperCase()} : ${card.disp}\nhttps://wa.me/${card.digits}`
     : offHours ? (lang === 'en'
-        ? `\n\n⏰ Our office hours are Mon–Fri, 9am–5pm — our sales advisor will contact you once we're back in office 🙏`
-        : `\n\n⏰ Waktu operasi kami: Isnin–Jumaat, 9 pagi–5 petang. Sales advisor kami akan menghubungi anda bila pejabat dibuka semula ya 🙏`)
+        ? `\n\n⏰ Our office hours are ${H.en} — our sales advisor will contact you once we're back in office 🙏`
+        : `\n\n⏰ Waktu operasi kami: ${H.bm}. Sales advisor kami akan menghubungi anda bila pejabat dibuka semula ya 🙏`)
     : '';
   const s = stockLine ? `\n\n${stockLine}` : '';
   if (cat === 'sell') return (lang === 'en'
