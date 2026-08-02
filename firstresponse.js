@@ -286,8 +286,28 @@ function onMessage(info){
     if (!info.jid || info.jid.endsWith('@g.us')) return;
     if (D.isStaffPhone && D.isStaffPhone(info.phone)) return;
     if (humanTouched.has(info.jid) && !state.pending[info.jid]) return;   // a human already owns this chat
-    const num = (info.phone || info.jid.split('@')[0] || '').replace(/\D/g, '');
-    if (!num || num.startsWith('447') || num.length > 13) return;
+    // 🐛→✅ 2026-08-02 — a @lid customer with NO phone at all.
+    // WhatsApp sometimes discloses no phone whatsoever for a privacy-addressed chat: the raw webhook
+    // carries only `key.remoteJid` + `key.senderLid`, both the @lid, and WaSender's /api/contacts has
+    // no mapping for them (4,193 of 8,491 contacts resolve, these did not). Pretending otherwise
+    // caused TWO separate silent failures over the weekend, 5 real customers:
+    //   1. `info.jid.split('@')[0]` used the LID DIGITS as a phone → sent to <lid>@s.whatsapp.net →
+    //      HTTP 422 "JID does not exist" → customer got no reply, AND the Lark row carried a fake
+    //      13-digit "phone" no salesperson could ever call.
+    //   2. LIDs are 13–15 digits, so `num.length > 13` — a guard written for junk PHONE numbers —
+    //      silently dropped every 14/15-digit @lid customer: no reply, no lead, no log line at all.
+    // Sending to the raw @lid DOES work (proven 2026-08-02: two @lid threads where the customer
+    // replied immediately after our outbound). The July "@lid silently no-ops" note is obsolete —
+    // note that a send to a FABRICATED @lid still returns success:true and still gets a fromMe echo,
+    // so neither of those proves delivery; only a customer replying afterwards does.
+    // Rule: never invent a phone. Leave it blank and address the @lid.
+    const isLid = String(info.jid).includes('@lid');
+    const num = String(info.phone || '').replace(/\D/g, '')
+             || (isLid ? '' : String(info.jid).split('@')[0].replace(/\D/g, ''));
+    // The junk-number guards below only make sense for a REAL phone. An @lid chat with no phone is a
+    // genuine customer and must never be filtered out by rules written for phone numbers.
+    if (num) { if (num.startsWith('447') || num.length > 13) return; }
+    else if (!isLid) return;                       // no phone and not a @lid → nothing to work with
     const b = buffers[info.jid] = buffers[info.jid] || { texts: [], hasImage: false, phone: num, timer: null };
     if (info.kind === 'image') b.hasImage = true;
     const t = info.text || info.caption || '';

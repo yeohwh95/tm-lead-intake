@@ -1113,7 +1113,11 @@ setInterval(() => { drainFRDeferred().catch(e => log('FR drain tick err', String
 function notifyText(leads){
   if (leads.length === 1) {
     const l = leads[0]; const d = (l.phone || '').replace(/\D/g, '');
-    return [`🔔 *New Lead — ${l.brand || 'TM Motoworld'}*`, ``, `👤 ${l.name || '—'}`, `🎯 Wants: ${l.want}`, `📍 From: ${l.origin}`, d ? `👉 https://wa.me/${d}` : ''].filter(Boolean).join('\n');
+    // No phone = a @lid privacy chat where WhatsApp disclosed no number (2026-08-02). The rep can
+    // still serve them — but only by replying in the 93210 inbox — so say that instead of leaving
+    // them with a lead they have no way to action.
+    return [`🔔 *New Lead — ${l.brand || 'TM Motoworld'}*`, ``, `👤 ${l.name || '—'}`, `🎯 Wants: ${l.want}`, `📍 From: ${l.origin}`,
+      d ? `👉 https://wa.me/${d}` : `⚠️ Customer's number is hidden by WhatsApp — reply to them directly in the *TM Marketing (93210)* inbox`].filter(Boolean).join('\n');
   }
   const head = `🔔 *${leads.length} New Leads*`;
   const blocks = leads.map((l, i) => {

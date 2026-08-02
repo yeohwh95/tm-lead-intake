@@ -232,6 +232,49 @@ ok(/ADIB : 017-8869542/.test(sent[sent.length-1].text), 'flow: reply carries ass
   ok(/Waktu operasi kami/.test(sent[sent.length - 1].text) && !/FITRI : /.test(sent[sent.length - 1].text), 'flow: off-hours sell reply — office-hours line, no Fitri card');
   ok(deferred.some(e => e.kind === 'dm' && /Trade-in Lead/.test(e.text)), 'flow: off-hours Fitri DM queued for the drain');
 
+  // ---- @lid customer with NO phone at all (2026-08-02 incident, 5 real customers) ----
+  // WhatsApp discloses no number for some privacy-addressed chats. Previously the LID digits were
+  // used AS a phone (→ HTTP 422, no reply, fake number in Lark) and 14/15-digit LIDs were dropped
+  // outright by a guard meant for junk phone numbers (→ no reply, no lead, no log line).
+  const noPhoneSent = [], noPhoneLark = [], noPhoneDms = [];
+  fr.init({ ...DEPS,
+    waSend: async (to, text) => { noPhoneSent.push({ to, text }); return 'm1'; },
+    larkWriteLead: async l => { noPhoneLark.push(l); return 'recLID'; },
+    notifyStaff: async ls => { noPhoneDms.push(ls); return 'dmLID'; },
+  });
+  const n0 = noPhoneSent.length;
+  fr.onMessage({ jid: '1924279574737@lid', phone: '', kind: 'text', text: 'Boleh saya tahu detail tentang CBR150' });
+  await wait(120);
+  ok(noPhoneSent.length === n0 + 1, 'no-phone @lid (13 digits): customer still gets a reply');
+  ok(noPhoneSent[noPhoneSent.length - 1].to === '1924279574737@lid',
+     'no-phone @lid: reply addressed to the @lid, NOT a fabricated <lid>@s.whatsapp.net');
+  const lark13 = noPhoneLark[noPhoneLark.length - 1];
+  ok(lark13 && !lark13.phone, 'no-phone @lid: Lark row gets a BLANK phone, never the LID digits');
+
+  // 15-digit LID — the length guard used to drop these silently
+  const n1 = noPhoneSent.length;
+  fr.onMessage({ jid: '235450526621777@lid', phone: '', kind: 'text', text: 'slip gaji part time boleh guna untuk loan ?' });
+  await wait(120);
+  ok(noPhoneSent.length === n1 + 1, '15-digit @lid: no longer silently dropped — customer gets a reply');
+  ok(noPhoneSent[noPhoneSent.length - 1].to === '235450526621777@lid', '15-digit @lid: addressed to the @lid');
+
+  // a REAL phone on a @lid chat still resolves to the phone JID (the 2026-07-28 fix must not regress)
+  const n2 = noPhoneSent.length;
+  // NOTE: distinct jid — reusing the 07-28 fixture's jid marks it greeted and breaks that test later
+  fr.onMessage({ jid: '900000000000001@lid', phone: '60186528999', kind: 'text', text: 'nak tanya pasal cbr250' });
+  await wait(120);
+  ok(noPhoneSent[noPhoneSent.length - 1].to === '60186528999@s.whatsapp.net',
+     '@lid WITH a real phone still goes to the phone JID (07-28 fix intact)');
+
+  // junk-number guards must still work on REAL phones
+  const n3 = noPhoneSent.length;
+  fr.onMessage({ jid: '447700900123@s.whatsapp.net', phone: '447700900123', kind: 'text', text: 'hello' });
+  await wait(120);
+  ok(noPhoneSent.length === n3, 'UK 447* number still ignored');
+  fr.onMessage({ jid: '60123456789012345@s.whatsapp.net', phone: '60123456789012345', kind: 'text', text: 'hello' });
+  await wait(120);
+  ok(noPhoneSent.length === n3, 'over-long REAL phone still ignored');
+
   // ---- SATURDAY / 5–6pm weekday: shop OPEN, but the bot does not auto-assign (Benjamin 2026-07-30) ----
   // "they are working on Saturday but we don't assign lead on Sat". So this is a THIRD state, distinct
   // from both "in the assign window" and "closed": no salesman card, and crucially NO "we'll contact
