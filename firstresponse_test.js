@@ -245,17 +245,23 @@ ok(/ADIB : 017-8869542/.test(sent[sent.length-1].text), 'flow: reply carries ass
   const n0 = noPhoneSent.length;
   fr.onMessage({ jid: '1924279574737@lid', phone: '', kind: 'text', text: 'Boleh saya tahu detail tentang CBR150' });
   await wait(120);
-  ok(noPhoneSent.length === n0 + 1, 'no-phone @lid (13 digits): customer still gets a reply');
+  // Phone gate (2026-08-03): a no-phone lead now gets TWO messages — the normal answer, then a
+  // request for a number — and is HELD rather than assigned. Was 1 message + immediate assign.
+  ok(noPhoneSent.length === n0 + 2, 'no-phone @lid (13 digits): customer still gets a reply');
+  ok(/nombor telefon tuan|phone number/i.test(noPhoneSent[noPhoneSent.length - 1].text),
+     'no-phone @lid: second message asks for the number');
   ok(noPhoneSent[noPhoneSent.length - 1].to === '1924279574737@lid',
      'no-phone @lid: reply addressed to the @lid, NOT a fabricated <lid>@s.whatsapp.net');
-  const lark13 = noPhoneLark[noPhoneLark.length - 1];
-  ok(lark13 && !lark13.phone, 'no-phone @lid: Lark row gets a BLANK phone, never the LID digits');
+  // Deliberately NO Lark row while held: writing one with staff:null still stamps SLA fields and
+  // that is exactly what charged Fitri's trade-ins to Ikhwan (2026-07-30). The row is written on
+  // release, by assign(), with either a real phone or a blank one — never the LID digits.
+  ok(noPhoneLark.length === 0, 'no-phone @lid: HELD — no Lark row, no SLA clock, until released');
 
   // 15-digit LID — the length guard used to drop these silently
   const n1 = noPhoneSent.length;
   fr.onMessage({ jid: '235450526621777@lid', phone: '', kind: 'text', text: 'slip gaji part time boleh guna untuk loan ?' });
   await wait(120);
-  ok(noPhoneSent.length === n1 + 1, '15-digit @lid: no longer silently dropped — customer gets a reply');
+  ok(noPhoneSent.length === n1 + 2, '15-digit @lid: no longer silently dropped — customer gets a reply');
   ok(noPhoneSent[noPhoneSent.length - 1].to === '235450526621777@lid', '15-digit @lid: addressed to the @lid');
 
   // a REAL phone on a @lid chat still resolves to the phone JID (the 2026-07-28 fix must not regress)

@@ -1082,6 +1082,9 @@ async function drainFRDeferred(){
   } finally { frDraining = false; }
 }
 setInterval(() => { drainFRDeferred().catch(e => log('FR drain tick err', String(e.message||e))); }, 60 * 1000);
+// Phone gate: release leads held waiting for a number once they pass the hold window. Shares
+// the existing 60s tick — no new timer. Nobody is left unassigned because of a privacy setting.
+setInterval(() => { firstresponse.gateSweep().catch(e => log('FR gate sweep err', String(e.message||e))); }, 60 * 1000);
 
 {
   const FR_EXTRA_INTERNAL = new Set(['60162393812','60108093259','60102304152','60123534271','60182907538','601143991899']);

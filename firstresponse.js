@@ -11,7 +11,10 @@ const ON = () => process.env.FIRSTRESPONSE_ON === '1';
 const DEBOUNCE_MS = Number(process.env.FR_DEBOUNCE_MS || 10 * 1000);
 const REGREET_MS = 7 * 24 * 3600 * 1000;         // one bot greeting per chat per 7 days
 const PENDING_MODEL_MS = 48 * 3600 * 1000;       // greeting flow: wait up to 48h for the model answer
-const STATE_FILE = path.join(__dirname, 'fr_state.json');
+// Env-configurable so it can live on a Render disk. Without one this file is wiped on every
+// deploy — which is why rehydrateGreeted() exists, and why a phone-gate hold would otherwise
+// be lost mid-flight (the customer would then never be assigned to anyone).
+const STATE_FILE = process.env.FR_STATE_FILE || path.join(__dirname, 'fr_state.json');
 
 let D = {};                                       // injected deps from index.js
 let state = { greeted: {}, pending: {} };         // jid -> ts ; jid -> {ts}
@@ -245,6 +248,119 @@ async function classifySmart(text, hasImage){
 // classified + assigned the lead correctly but the customer never got a reply. Resolve the actual
 // SEND target to the real phone (captured in b.phone from cleanedSenderPn/senderPn) whenever the
 // jid is a @lid — never touches normal contacts.
+// ---------- Phone gate (2026-08-03) ----------
+// WhatsApp's username / hide-my-number rollout means a growing share of TM's leads arrive with
+// NO phone at all — 14% of chats as of 2026-08-04, by far the highest of any client. Those leads
+// were still assigned, handing the salesperson a lead they cannot ring (the Lark row now honestly
+// says so, but they still cannot call).
+// So: when there is no number, answer the customer's question as normal, ask for a number, and
+// HOLD the assignment. Assign the moment it arrives, or after GATE_MS regardless — nobody is left
+// waiting on a privacy setting. Ported from the Python bots (metalage/koonken/founder-solar).
+const GATE_MS = Number(process.env.FR_GATE_MS || 60 * 60 * 1000);
+const GATE_MAX_ASKS = 2;
+
+// A WhatsApp privacy id is 13-15 digits; a dialable number here is 10-12. Keeping the ranges
+// disjoint is what stops a LID being stored as a phone, and stops a phone-length guard dropping
+// a privacy customer. Both failures happened in the same week (2026-08-02).
+function gateParsePhone(text, knownLid){
+  const t = String(text || '');
+  const cands = t.match(/\+?\d[\d\s\-().]{7,20}\d/g) || [];
+  for (const raw of cands){
+    const d = raw.replace(/\D/g, '');
+    if (!d) continue;
+    if (knownLid && (d === knownLid || knownLid.includes(d) || d.includes(knownLid))) continue;
+    let n = '';
+    if (d.startsWith('60'))      n = (d.length >= 11 && d.length <= 12) ? d : '';
+    else if (d.startsWith('0'))  { const r = d.slice(1); n = (r.length >= 9 && r.length <= 10) ? '60' + r : ''; }
+    else if (d.startsWith('1') && d.length >= 9 && d.length <= 10) n = '60' + d;
+    else if (d.length >= 10 && d.length <= 12) n = d;
+    if (n) return n;
+  }
+  return '';
+}
+
+// Being asked for a number cold reads as a scam, and Malaysians say so bluntly. Answering with the
+// real cause converts better than repeating the request — so this REPLACES the re-ask.
+const RE_GATE_WHY = /(why|what.{0,6}for|privacy|private|scam|spam|penipu|tipu|kenapa|knp|napa|mengapa|untuk\s+apa|utk\s+apa|buat\s+apa|tak\s+nak|xnak|tak\s+mahu|为什么|為什麼|为何|干嘛|不方便)/i;
+// Real customer reply seen 2026-08-04 (Natalie Wong, KoonKen): "U can find my username to contact
+// me". They ARE cooperating — just with the new WhatsApp handle instead of a number. The webhook
+// carries no username field (verified: senderPn/cleanedSenderPn empty, addressingMode=lid), so we
+// have to ask them to type it, then hand THAT to the salesperson.
+const RE_GATE_USERNAME = /\busername\b|\bhandle\b|\bnama\s+pengguna\b|@[a-z0-9_.]{3,}/i;
+
+const gateAsk = lang => lang === 'en'
+  ? `One thing — WhatsApp hasn't shared your number with us, so our sales advisor can't call you back. 🙏 Could you reply with your phone number?`
+  : `Satu je bos — WhatsApp tak share nombor tuan dengan kami, jadi sales advisor kami tak dapat call balik. 🙏 Boleh reply nombor telefon tuan?`;
+const gateWhy = lang => lang === 'en'
+  ? `Good question 🙂 WhatsApp recently added a username / hide-my-number setting — when it's on, your number isn't shared with the business you message, so our advisor can see your message but can't call you back.\n\nWe'd only use it to follow up on this enquiry. If you'd rather not share it, no problem at all — just reply here and we'll continue in this chat 👍`
+  : `Soalan bagus 🙂 WhatsApp baru tambah setting username / sorok nombor — bila on, nombor tuan tak dishare dengan bisnes yang tuan mesej, jadi advisor kami nampak mesej tuan tapi tak boleh call balik.\n\nNombor tu untuk follow up ni je. Kalau tuan tak selesa nak bagi pun takpe — reply je kat sini, kami sambung dalam chat ni 👍`;
+const gateUsername = lang => lang === 'en'
+  ? `Ah — WhatsApp doesn't show us your username either, so could you type it here? Our advisor will use it to reach you 🙏`
+  : `Ah — WhatsApp tak tunjuk username tuan kat kami juga, jadi boleh taip kat sini? Advisor kami guna untuk contact tuan ya 🙏`;
+const gateGot = lang => lang === 'en'
+  ? `Got it, thank you! 🙏 Passing this to our sales advisor now.`
+  : `Ok, terima kasih bos! 🙏 Saya pass kat sales advisor kami sekarang.`;
+
+function gateHold(jid, cat, want, lang){
+  state.awaitingPhone = state.awaitingPhone || {};
+  state.awaitingPhone[jid] = { ts: Date.now(), asks: 1, cat, want, lang };
+  persist();
+  D.log(`FR ⏳ HELD for phone — ${cat} (${jid.slice(0, 22)}) "${String(want).slice(0, 40)}"`);
+}
+
+// Release a held lead: assign for real, then tell the customer who has them.
+async function gateRelease(jid, h, phone, reason){
+  delete (state.awaitingPhone || {})[jid]; persist();
+  const card = await assign(h.cat, jid, phone || '', h.want);
+  const closed = !!(D.inOpenHours && !D.inOpenHours());
+  try { await D.waSend(sendTarget(jid, phone), tpl(h.cat, h.lang, card, '', closed)); }
+  catch(e){ D.log('FR gate release send err:', String(e.message||e).slice(0,60)); }
+  D.log(`FR ✅ gate released (${reason}) — ${h.cat} ${phone ? '+' + phone : 'NO PHONE'} (${jid.slice(0,22)})`);
+}
+
+// Handle a reply from a held chat. Returns true if the gate consumed the message.
+async function gateOnReply(jid, h, text, bphone){
+  const lid = jid.includes('@lid') ? jid.split('@')[0] : '';
+  const phone = gateParsePhone(text, lid);
+  if (phone){
+    try { await D.waSend(sendTarget(jid, phone), gateGot(h.lang)); } catch {}
+    await gateRelease(jid, h, phone, 'customer gave it');
+    return true;
+  }
+  if (h.asks < GATE_MAX_ASKS){
+    // A username offer and a "why" both deserve a real answer, not the same request again.
+    const body = RE_GATE_USERNAME.test(text) ? gateUsername(h.lang)
+               : RE_GATE_WHY.test(text)      ? gateWhy(h.lang)
+               : gateAsk(h.lang);
+    h.asks += 1; h.note = RE_GATE_USERNAME.test(text) ? 'offered username' : undefined;
+    state.awaitingPhone[jid] = h; persist();
+    try { await D.waSend(sendTarget(jid, bphone), body); } catch {}
+    D.log(`FR gate re-ask ${h.asks} (${jid.slice(0,22)}) — "${String(text).slice(0,40)}"`);
+  } else {
+    D.log(`FR gate quiet — already asked ${h.asks}× (${jid.slice(0,22)})`);
+  }
+  return true;
+}
+
+// Called on the 60s tick from index.js. Nobody is abandoned over a privacy setting.
+async function gateSweep(){
+  const held = state.awaitingPhone || {};
+  const now = Date.now();
+  for (const jid of Object.keys(held)){
+    const h = held[jid];
+    // A missing timestamp means an older/partial write — treat as expired rather than skipping,
+    // so a lead can never be stranded in a hold nobody releases.
+    if (h && h.ts && now - h.ts < GATE_MS) continue;
+    if (humanTouched.has(jid)){          // a human already owns this chat — don't double-handle
+      delete held[jid]; persist();
+      D.log(`FR gate dropped — human took over (${jid.slice(0,22)})`);
+      continue;
+    }
+    try { await gateRelease(jid, h || { cat: 'product', want: 'WhatsApp direct inquiry', lang: 'bm' }, '', 'timeout'); }
+    catch(e){ D.log('FR gate sweep err:', String(e.message||e).slice(0,60)); }
+  }
+}
+
 const sendTarget = (jid, phone) => (jid && jid.includes('@lid') && phone) ? (phone + '@s.whatsapp.net') : jid;
 const VAGUE = t => !t || t.trim().length < 4 || classify(t, false).cat === 'greeting';
 async function flush(jid){
@@ -252,6 +368,12 @@ async function flush(jid){
   if (!b) return;
   const text = b.texts.join(' \n ').trim();
   const now = Date.now();
+
+  // Phone gate: this chat is already held waiting for a number. Must run BEFORE the 7-day
+  // re-greet guard below, which would otherwise return early and swallow their answer.
+  const heldEntry = (state.awaitingPhone || {})[jid];
+  if (heldEntry){ await gateOnReply(jid, heldEntry, text, b.phone); return; }
+
   const pend = state.pending[jid];
   let { cat, imageOnly } = await classifySmart(text, b.hasImage);
   const lang = isEnglish(text) ? 'en' : 'bm';
@@ -262,8 +384,16 @@ async function flush(jid){
     const finalCat = (cat === 'sell' || cat === 'loan' || cat === 'testride') ? cat : 'product';
     const want = VAGUE(text) && !b.hasImage ? '[ad click — model belum stated, sila probe]' : (text || '[gambar/screenshot iklan]');
     const stockLine = await stockLineFor(finalCat, text, lang);
-    const card = await assign(finalCat, jid, b.phone, want);
     const closed = !!(D.inOpenHours && !D.inOpenHours());   // genuinely shut, NOT merely outside the assign window
+    if (!b.phone){
+      // No number at all — answer them, then ask, and hold the assignment. tpl() with card=null
+      // reads naturally ("our sales advisor will contact you shortly") without naming anyone.
+      gateHold(jid, finalCat, want, lang);
+      await D.waSend(sendTarget(jid, b.phone), tpl(finalCat, lang, null, stockLine, false));
+      await D.waSend(sendTarget(jid, b.phone), gateAsk(lang));
+      return;
+    }
+    const card = await assign(finalCat, jid, b.phone, want);
     await D.waSend(sendTarget(jid, b.phone), tpl(finalCat, lang, card, stockLine, closed));
     return;
   }
@@ -274,8 +404,15 @@ async function flush(jid){
   if (cat === 'greeting'){ state.pending[jid] = { ts: now }; persist(); await D.waSend(sendTarget(jid, b.phone), tpl('greeting', lang)); return; }
   persist();
   const stockLine = await stockLineFor(cat, imageOnly ? '' : text, lang);
-  const card = await assign(cat, jid, b.phone, imageOnly ? '[gambar/screenshot iklan]' : text);
+  const want = imageOnly ? '[gambar/screenshot iklan]' : text;
   const closed = !!(D.inOpenHours && !D.inOpenHours());   // genuinely shut, NOT merely outside the assign window
+  if (!b.phone){
+    gateHold(jid, cat, want, lang);
+    await D.waSend(sendTarget(jid, b.phone), tpl(cat, lang, null, stockLine, false));
+    await D.waSend(sendTarget(jid, b.phone), gateAsk(lang));
+    return;
+  }
+  const card = await assign(cat, jid, b.phone, want);
   await D.waSend(sendTarget(jid, b.phone), tpl(cat, lang, card, stockLine, closed));
 }
 
@@ -335,4 +472,9 @@ function rehydrateGreeted(entries){
 }
 
 function init(deps){ D = deps; D.log('firstresponse init — ON:', ON(), 'debounce:', DEBOUNCE_MS + 'ms'); }
-module.exports = { init, onMessage, markHuman, rehydrateGreeted, _classify: classify, _tpl: tpl, _isEnglish: isEnglish, _state: () => state, RE_BIKE };
+module.exports = { init, onMessage, markHuman, rehydrateGreeted, gateSweep,
+  gateStatus: () => Object.entries(state.awaitingPhone || {}).map(([jid, h]) => ({
+    jid, cat: h.cat, asks: h.asks, note: h.note || '',
+    waitingMin: Math.round((Date.now() - (h.ts || Date.now())) / 60000),
+    minutesLeft: Math.max(0, Math.round((GATE_MS - (Date.now() - (h.ts || Date.now()))) / 60000)) })),
+  _gateParsePhone: gateParsePhone, _classify: classify, _tpl: tpl, _isEnglish: isEnglish, _state: () => state, RE_BIKE };

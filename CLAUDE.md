@@ -295,3 +295,36 @@ Lark ("Lead management" table `tblP12qfzg5jlyZ2`, app `JmtibHNxPal4A5sUepml6LK5g
 - **Reassign** `reassignLead` → `SLA Reassigned At/From`, `SLA Reassign Count`, `SLA Status`=Reassigned. No-response while PAUSED → `SLA Status`=No-Response (no move). Escalate → `SLA Escalated At`, Status=Escalated.
 - Field-write formats (verified): datetime = epoch **millis** (number), single-select = option **string**, checkbox = **bool**, number = int. Writes via `larkUpdateSLA(recordId, fields)` dep; `slaWrite()` is a no-op when the dep isn't injected (tests).
 - Auto-reassign still **PAUSED** (`SLA_REASSIGN` unset). Explicit rep "pass" still moves the lead (pre-existing).
+
+## 📞 Phone gate — hold the assignment until we have a number (built 2026-08-04)
+
+**Plain English:** 14% of TM's chats now arrive with **no phone at all** — the highest of any
+client, and climbing (10% on 2 Aug → 14% on 4 Aug). Those leads were still assigned, handing a
+salesperson someone they cannot ring. Now the bot answers the customer's question as normal,
+asks for a number, and **holds the assignment** until it has one — or 60 minutes, whichever
+comes first. Nobody is left waiting on a privacy setting.
+
+| Situation | Before | After |
+|---|---|---|
+| Lead with a phone | Assigned | Assigned — completely unchanged |
+| No phone at all | Assigned; Lark row blank-phone; SA can't call | **Held** — answered + asked, `assign()` never reached |
+| Customer gives a number | — | Assigned with a real phone on the Lark row |
+| Customer asks why / "scam ke" | — | Names WhatsApp's username/hide-number setting, then stops asking |
+| **Customer offers their username** | — | Asks them to type it (WhatsApp does **not** expose it — verified) |
+| Silent 60 min | — | Assigned anyway, exactly as before |
+| Human replies during the hold | — | Hold dropped — never double-handled |
+
+- Gate lives in `firstresponse.js` (`gateHold` / `gateOnReply` / `gateRelease` / `gateSweep`).
+  Sweep shares the existing 60s `drainFRDeferred` tick — no new timer.
+- **`assign()` is never called while held**, so no Lark row, no SLA clock, no salesperson DM.
+  That is deliberate: `larkWriteLead` with `staff:null` still stamps SLA fields, and that is
+  exactly what charged Fitri's trade-ins to Ikhwan (2026-07-30).
+- **Ask at most twice**, then go quiet. `FR_GATE_MS` (default 1h), `GATE_MAX_ASKS=2`.
+- Tests: `node gate_test.js` (35) + the existing `firstresponse_test.js` (113).
+
+### 🟢 fr_state.json now lives on a persistent disk
+`FR_STATE_FILE=/data/fr_state.json` on a 1GB Render disk (`dsk-d9okds4s728c73fbfjig`), attached
+2026-08-04. Previously the file sat on ephemeral storage and **every deploy wiped it** — the
+reason `rehydrateGreeted()` had to be built. A phone-gate hold would have been lost the same way,
+leaving a customer permanently unassigned. Holds and the greeted map now survive deploys.
+`rehydrateGreeted()` stays as the belt-and-braces path for a genuinely fresh disk.
