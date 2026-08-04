@@ -348,3 +348,13 @@ phone number actually released the hold, so a customer who typed their handle wa
 reason `rehydrateGreeted()` had to be built. A phone-gate hold would have been lost the same way,
 leaving a customer permanently unassigned. Holds and the greeted map now survive deploys.
 `rehydrateGreeted()` stays as the belt-and-braces path for a genuinely fresh disk.
+
+### 📊 Gate observability (added 2026-08-04)
+`GET /gate-status` — same JSON shape as the three Python bots, so one tool reports on all four
+(`~/.claude/skills/gate-contact-report/`). Events are appended as JSONL to
+`gate_events.jsonl` beside `FR_STATE_FILE` (i.e. `/data/`, the persistent disk).
+
+**Why a file and not just `D.log()`:** Render rotates logs every few hours, so a resolved gated
+lead became unreviewable almost immediately — and TM produces more of them than any other client
+(14% of chats). Kinds emitted: `held` · `phone_received` · `asked_username` · `explained_why` ·
+`re_asked` · `no_reply_usable` · `assigned` · `timeout`.

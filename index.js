@@ -1487,6 +1487,22 @@ http.createServer((req, res) => {
     });
   } else if (req.url === '/health') {
     res.writeHead(200, { 'Content-Type': 'text/plain' }); res.end('ok');
+  } else if (req.url.startsWith('/gate-status')) {
+    // Same shape as the Python bots' /gate-status so one reporting tool covers all four.
+    // Read-only.
+    const holding = firstresponse.gateStatus();
+    const events = firstresponse.gateReadEvents(500);
+    const counts = {};
+    for (const e of events) counts[e.kind] = (counts[e.kind] || 0) + 1;
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({
+      timeout_minutes: Math.round(Number(process.env.FR_GATE_MS || 3600000) / 60000),
+      holding_now: holding.map(h => ({
+        chat_id: h.jid, name: '', waiting_minutes: h.waitingMin,
+        minutes_left: h.minutesLeft, asks_sent: h.asks })),
+      event_counts: counts,
+      events,
+    }, null, 1));
   } else if (req.url === '/sla') {
     res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(sla ? sla.stats() : { off: true }, null, 1));
   } else {

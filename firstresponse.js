@@ -256,6 +256,27 @@ async function classifySmart(text, hasImage){
 // So: when there is no number, answer the customer's question as normal, ask for a number, and
 // HOLD the assignment. Assign the moment it arrives, or after GATE_MS regardless — nobody is left
 // waiting on a privacy setting. Ported from the Python bots (metalage/koonken/founder-solar).
+// Durable gate event log. D.log() alone was not enough: Render rotates logs every few hours, so a
+// resolved gated lead became unreviewable almost immediately — and TM produces more of them than
+// any other client (14% of chats). Written as JSONL to the persistent disk so the outcome of every
+// held lead can be read back days later. Best-effort: monitoring must never break a lead.
+const GATE_LOG_FILE = process.env.GATE_LOG_FILE
+  || (process.env.FR_STATE_FILE ? path.join(path.dirname(process.env.FR_STATE_FILE), 'gate_events.jsonl')
+                                : path.join(__dirname, 'gate_events.jsonl'));
+
+function gateLogEvent(kind, jid, fields){
+  const rec = Object.assign({ ts: Math.floor(Date.now() / 1000), kind, chat_id: jid }, fields || {});
+  try { fs.appendFileSync(GATE_LOG_FILE, JSON.stringify(rec) + '\n'); }
+  catch(e){ D.log && D.log('FR gate log write failed:', String(e.message||e).slice(0,50)); }
+}
+
+function gateReadEvents(limit){
+  try {
+    const lines = fs.readFileSync(GATE_LOG_FILE, 'utf8').trim().split('\n').filter(Boolean);
+    return lines.slice(-(limit || 200)).map(l => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
+  } catch { return []; }
+}
+
 const GATE_MS = Number(process.env.FR_GATE_MS || 60 * 60 * 1000);
 const GATE_MAX_ASKS = 2;
 
@@ -353,6 +374,7 @@ function gateHold(jid, cat, want, lang){
   state.awaitingPhone[jid] = { ts: Date.now(), asks: 1, cat, want, lang };
   persist();
   D.log(`FR ⏳ HELD for phone — ${cat} (${jid.slice(0, 22)}) "${String(want).slice(0, 40)}"`);
+  gateLogEvent('held', jid, { cat, first_message: String(want).slice(0, 120) });
 }
 
 // Release a held lead: assign for real, then tell the customer who has them.
@@ -363,6 +385,10 @@ async function gateRelease(jid, h, phone, reason){
   try { await D.waSend(sendTarget(jid, phone), tpl(h.cat, h.lang, card, '', closed)); }
   catch(e){ D.log('FR gate release send err:', String(e.message||e).slice(0,60)); }
   D.log(`FR ✅ gate released (${reason}) — ${h.cat} ${phone ? '+' + phone : 'NO PHONE'} (${jid.slice(0,22)})`);
+  gateLogEvent(reason === 'timeout' ? 'timeout' : 'assigned', jid, {
+    cat: h.cat, phone: phone || '', reason,
+    salesperson: (card && card.name) || '',
+    held_seconds: Math.round((Date.now() - (h.ts || Date.now())) / 1000) });
 }
 
 // Handle a reply from a held chat. Returns true if the gate consumed the message.
@@ -370,6 +396,8 @@ async function gateOnReply(jid, h, text, bphone){
   const lid = jid.includes('@lid') ? jid.split('@')[0] : '';
   const phone = gateParsePhone(text, lid);
   if (phone){
+    gateLogEvent('phone_received', jid, { phone,
+      waited_seconds: Math.round((Date.now() - (h.ts || Date.now())) / 1000) });
     try { await D.waSend(sendTarget(jid, phone), gateGot(h.lang)); } catch {}
     await gateRelease(jid, h, phone, 'customer gave it');
     return true;
@@ -398,8 +426,12 @@ async function gateOnReply(jid, h, text, bphone){
     state.awaitingPhone[jid] = h; persist();
     try { await D.waSend(sendTarget(jid, bphone), body); } catch {}
     D.log(`FR gate re-ask ${h.asks} (${jid.slice(0,22)}) — "${String(text).slice(0,40)}"`);
+    gateLogEvent(RE_GATE_USERNAME.test(text) ? 'asked_username'
+               : RE_GATE_WHY.test(text) ? 'explained_why' : 're_asked', jid,
+      { ask_number: h.asks, customer_said: String(text).slice(0, 120) });
   } else {
     D.log(`FR gate quiet — already asked ${h.asks}× (${jid.slice(0,22)})`);
+    gateLogEvent('no_reply_usable', jid, { customer_said: String(text).slice(0, 120) });
   }
   return true;
 }
@@ -534,7 +566,7 @@ function rehydrateGreeted(entries){
 }
 
 function init(deps){ D = deps; D.log('firstresponse init — ON:', ON(), 'debounce:', DEBOUNCE_MS + 'ms'); }
-module.exports = { init, onMessage, markHuman, rehydrateGreeted, gateSweep,
+module.exports = { init, onMessage, markHuman, rehydrateGreeted, gateSweep, gateReadEvents,
   gateStatus: () => Object.entries(state.awaitingPhone || {}).map(([jid, h]) => ({
     jid, cat: h.cat, asks: h.asks, note: h.note || '',
     waitingMin: Math.round((Date.now() - (h.ts || Date.now())) / 60000),
