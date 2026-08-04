@@ -2,7 +2,10 @@
 
 WhatsApp lead → AI extract → Lark CRM + notify the assigned salesperson. **LIVE.**
 
-## 📋 PASTED lead lists now chunk like a spreadsheet (2026-08-04) — ⚠️ COMMITTED, NOT PUSHED
+## 📋 PASTED lead lists now chunk like a spreadsheet — 🟢 LIVE 2026-08-04 12:12 MYT (`2541a89`)
+Deploy verified: Render status `live`, boot clean (`catalog refresh: 262 products`, `availability
+baseline (20 staff)`, SLA engine ON), the 5 in-flight SLA timers and 1 phone-gate hold survived the
+restart. ⏳ Still unproven: the first REAL paste through the webhook — Harith runs it.
 Harith has 53 event leads (Lambretta/Thunder) and asked whether staff can **paste** them into the
 intake group instead of attaching a file. They can — and until this fix that lost **every one of
 them, silently.**
