@@ -5,6 +5,7 @@
 
 const http = require('http');
 let XLSX = null; try { XLSX = require('xlsx'); } catch { /* excel disabled if dep missing */ }
+const { leadLineCount, textToChunks, dedupeByPhone } = require('./textchunk');
 
 const WASENDER_BASE  = 'https://www.wasenderapi.com/api';
 const UA             = 'Mozilla/5.0';
@@ -406,6 +407,11 @@ function excelToText(buf){
 // even a token-limit truncation — the model just stopped early) — 21 leads out of 139, zero
 // error, zero warning. Chunking keeps each AI call small enough that it has no room to "summarize".
 const EXCEL_CHUNK_ROWS = 20;
+// Same protection for a PASTED list (2026-08-04). Staff paste event lead lists straight into the
+// group instead of attaching a file — that is how they work, so the paste path chunks too. At or
+// below this count the paste takes the original single-call path, so the everyday 1-5 lead drop is
+// byte-for-byte unchanged. See textchunk.js for the full incident note.
+const TEXT_CHUNK_LEADS = Number(process.env.TEXT_CHUNK_LEADS || 20);
 function excelToChunks(buf){
   if (!XLSX) return ['[xlsx parser unavailable]'];
   const wb = XLSX.read(buf, { type: 'buffer' });
@@ -1359,6 +1365,10 @@ async function handle(payload){
       const hintSrc = info.caption ? `Caption: "${info.caption}"` : `Source file name: "${info.fileName||''}"`;
       blocks.push({ type: 'text', text: `${hintSrc}. If this explicitly names a brand (Lambretta / Honda / Thunder / HQ / Suzuki / KTM / Zontes), use that as the brand for ALL leads. Do not infer a brand from words that just happen to appear in an auto-generated file name.` });
     }
+    // How many lines of a pasted message look like they carry a customer's phone. Drives the
+    // chunking decision below AND the completeness check after extraction — a heuristic used only
+    // to route and to warn a human, never to drop or invent a lead.
+    const leadLines = info.kind === 'text' ? leadLineCount(info.text) : 0;
     let leads;
     if (info.excelChunks) {
       // One AI extraction call PER CHUNK (never the whole sheet in one shot) — a single-shot
@@ -1372,6 +1382,21 @@ async function handle(payload){
         log(`excel chunk ${i + 1}/${info.excelChunks.length}: ${chunkLeads.length} leads`);
         leads.push(...chunkLeads);
       }
+    } else if (info.kind === 'text' && leadLines > TEXT_CHUNK_LEADS) {
+      // BIG PASTED LIST — one AI call PER CHUNK, exactly like the spreadsheet path above.
+      // Before this (2026-08-04) a paste was a single call capped at max_tokens 1500: Harith's real
+      // 53-lead event list needs ~2,700 tokens of JSON, so it either truncated into invalid JSON
+      // (→ parseLeads [] → and a TEXT drop with no leads returns SILENTLY, nothing in the group at
+      // all) or the model stopped early and the card confidently announced ~22 of 53 leads.
+      const chunks = textToChunks(info.text, TEXT_CHUNK_LEADS);
+      log(`text paste: ${leadLines} lead lines → ${chunks.length} chunks`);
+      leads = [];
+      for (let i = 0; i < chunks.length; i++) {
+        const chunkBlocks = [{ type: 'text', text: 'Lead message:\n' + chunks[i] }, { type: 'text', text: EXTRACT_INSTRUCTION }];
+        const chunkLeads = parseLeads(await aiExtract(chunkBlocks));
+        log(`text chunk ${i + 1}/${chunks.length}: ${chunkLeads.length} leads`);
+        leads.push(...chunkLeads);
+      }
     } else {
       blocks.push({ type: 'text', text: EXTRACT_INSTRUCTION });
       leads = parseLeads(await aiExtract(blocks));
@@ -1383,8 +1408,35 @@ async function handle(payload){
         leads = parseLeads(await aiExtract(retry));
       }
     }
+    // One customer must not become several leads. Measured on the real 53-lead paste: chunked
+    // extraction returned 57, because a line naming two bikes emits one lead per bike — and each
+    // copy would then be round-robinned to a DIFFERENT rep, so two salespeople ring the same
+    // person. Applies to every source (a multi-model row does this in a spreadsheet too).
+    // WITHIN one drop only — re-sending the same file still creates fresh rows, unchanged.
+    const beforeDedupe = leads.length;
+    leads = dedupeByPhone(leads);
+    if (leads.length !== beforeDedupe) log(`dedupe: ${beforeDedupe} → ${leads.length} (same phone more than once in one drop)`);
     remember({ src, sender: info.sender, leads });
+    // COMPLETENESS CHECK (2026-08-04) — the silent-partial class has now bitten twice (139-row Excel
+    // → 21 leads; a 53-lead paste → ~22). Both times the group was TOLD a confident number and the
+    // rest vanished with no log line and no alert. Chunking makes it far less likely; this makes it
+    // impossible for it to be SILENT. Only fires on a shortfall, so a clean drop stays quiet.
+    if (leadLines > 0 && leads.length < leadLines) {
+      const t = new Date().toLocaleString('en-MY', { timeZone: 'Asia/Kuala_Lumpur', hour12: false });
+      log(`⚠️ SHORTFALL — ${leadLines} phone lines pasted, ${leads.length} leads extracted`);
+      await waSend(info.chatId, `⚠️ Heads up — I counted *${leadLines}* lines with a phone number in that message but could only read *${leads.length}*.\nThe ${leads.length} below are saved and assigned. Please re-send the missing ones, or send the list as an Excel/CSV file.`);
+      await alertReview(`⚠️ *Pasted list read incompletely* — ${leadLines} phone lines, ${leads.length} leads extracted\n👤 From: ${info.sender || '—'}\n🕘 ${t} MYT\n👉 Check the Lead Intake group.`);
+    }
     if (!leads.length) {
+      // A PASTE that clearly held leads but yielded none must never be silent (that was the worst
+      // outcome of the un-chunked path: Harith pastes 53 leads, gets nothing back, no error).
+      // Genuine group chatter (no phone lines at all) still stays silent, exactly as designed.
+      if (info.kind === 'text' && leadLines > 0) {
+        const t = new Date().toLocaleString('en-MY', { timeZone: 'Asia/Kuala_Lumpur', hour12: false });
+        await waSend(info.chatId, `⚠️ I could see about *${leadLines}* lead(s) in that message but couldn't read any of them. Please re-send as an Excel/CSV file, or paste in smaller batches.`);
+        await alertReview(`⚠️ *Possible missed leads* — pasted list with ~${leadLines} phone lines read as ZERO leads\n👤 From: ${info.sender || '—'}\n🕘 ${t} MYT\n👉 Recheck / re-send in the Lead Intake group.`);
+        return;
+      }
       // media drop with no lead → brief note (it was intentional); plain chatter text → STAY SILENT
       if (info.kind !== 'text') {
         await waSend(info.chatId, `🧪 ${src}: read OK but no lead found.`);
