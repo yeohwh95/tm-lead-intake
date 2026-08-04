@@ -311,6 +311,7 @@ comes first. Nobody is left waiting on a privacy setting.
 | Customer gives a number | — | Assigned with a real phone on the Lark row |
 | Customer asks why / "scam ke" | — | Names WhatsApp's username/hide-number setting, then stops asking |
 | **Customer offers their username** | — | Asks them to type it (WhatsApp does **not** expose it — verified) |
+| **Customer types a username** | — | **Assigned on it** — see below (2026-08-04) |
 | Silent 60 min | — | Assigned anyway, exactly as before |
 | Human replies during the hold | — | Hold dropped — never double-handled |
 
@@ -320,7 +321,26 @@ comes first. Nobody is left waiting on a privacy setting.
   That is deliberate: `larkWriteLead` with `staff:null` still stamps SLA fields, and that is
   exactly what charged Fitri's trade-ins to Ikhwan (2026-07-30).
 - **Ask at most twice**, then go quiet. `FR_GATE_MS` (default 1h), `GATE_MAX_ASKS=2`.
-- Tests: `node gate_test.js` (35) + the existing `firstresponse_test.js` (113).
+- Tests: `node gate_test.js` (45) + the existing `firstresponse_test.js` (113).
+
+### 👤 A typed USERNAME now releases the hold (2026-08-04) — ⚠️ NOT DEPLOYED
+The gate already *recognised* a username offer and asked the customer to type it — but only a
+phone number actually released the hold, so a customer who typed their handle was still stuck.
+**Benjamin's call, 4 Aug: either identifier is enough.** Ported to all four bots the same day.
+- `gateAsk` now offers **phone or username** in one message and names the `@` — that prefix is
+  what makes a handle safely parseable out of free text.
+- `gateParseUsername(text, expectUsername)` mirrors `phone_gate.parse_username` in the Python
+  bots. Rejects emails, domains, all-digit tokens, and *"U can find my username to contact me"*
+  (no handle typed). A **bare** one-word reply counts only after we asked (`h.askedUsername`) —
+  otherwise "zontes" would be filed as somebody's handle.
+- 🚨 **The handle never becomes the phone.** `gateRelease` is called with `phone=''` and the
+  handle prefixed onto `want` as `@x (username, not dialable)`, so the Lark phone cell stays
+  blank. `larkWriteLead` would happily store a handle as a phone — that is exactly the fake-phone
+  failure of 2026-08-02 wearing a new hat.
+- 🚨 `gateGotUser` promises follow-up **in this chat**, never a call back: a handle is not
+  dialable in Malaysia until WhatsApp's rollout (~Sept 2026) and never if the customer set a
+  *username key*.
+- ⚠️ **Awaiting Benjamin's push approval — nothing is live.**
 
 ### 🟢 fr_state.json now lives on a persistent disk
 `FR_STATE_FILE=/data/fr_state.json` on a 1GB Render disk (`dsk-d9okds4s728c73fbfjig`), attached

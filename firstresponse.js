@@ -288,9 +288,51 @@ const RE_GATE_WHY = /(why|what.{0,6}for|privacy|private|scam|spam|penipu|tipu|ke
 // have to ask them to type it, then hand THAT to the salesperson.
 const RE_GATE_USERNAME = /\busername\b|\bhandle\b|\bnama\s+pengguna\b|@[a-z0-9_.]{3,}/i;
 
+// Benjamin, 2026-08-04: a username COUNTS as contact info — either identifier releases the hold.
+// Precision beats recall, because a junk handle on a Lark row is worse than a blank one: the rep
+// acts on it. So an '@' or an explicit "username is …" is required, and a BARE one-word reply is
+// only trusted after we asked them to type one (gateAskedUsername) — otherwise "zontes" would be
+// filed as somebody's handle. Mirrors phone_gate.parse_username in the Python bots.
+const RE_AT_HANDLE = /(?<![A-Za-z0-9._%+-])@([A-Za-z0-9._]{3,30})/;
+const RE_USERNAME_KV = /(?:user\s?name|handle|nama\s+pengguna|用户名|用戶名)\s*(?:is|ialah|adalah|=|:|：|是|-|—)\s*@?([A-Za-z0-9._]{3,30})/i;
+const RE_BARE_HANDLE = /^[A-Za-z0-9._]{3,30}$/;
+const RE_DOMAINISH = /\.(com|net|org|my|co|io|me|gov|edu)$/i;
+const NOT_A_USERNAME = new Set([
+  'yes','yeah','yep','no','nope','ok','okay','okey','sure','thanks','thank','tq','tqvm',
+  'hi','hello','hey','ya','yaa','lah','please','pls','sorry','username','user','handle',
+  'phone','number','contact','call','whatsapp','wasap','boleh','saya','nak','tak','takde',
+  'ada','apa','kenapa','later','nanti','wait','sekejap','none','moto','motor','harga','loan',
+]);
+
+function cleanUsername(raw){
+  const u = String(raw || '').trim().replace(/^[.,!?;:]+|[.,!?;:]+$/g, '').toLowerCase();
+  if (u.length < 3 || u.length > 30) return '';
+  if (NOT_A_USERNAME.has(u) || RE_DOMAINISH.test(u)) return '';
+  if (!/[a-z]/.test(u)) return '';                    // all digits = a phone, not a handle
+  if (!/^[a-z0-9._]+$/.test(u)) return '';
+  return u;
+}
+
+function gateParseUsername(text, expectUsername){
+  const t = String(text || '').trim();
+  if (!t) return '';
+  for (const rx of [RE_AT_HANDLE, RE_USERNAME_KV]){
+    const m = t.match(rx);
+    if (m){ const u = cleanUsername(m[1]); if (u) return u; }
+  }
+  if (expectUsername){
+    const bare = t.replace(/^[.,!?;:]+|[.,!?;:]+$/g, '');
+    if (RE_BARE_HANDLE.test(bare)) return cleanUsername(bare);
+  }
+  return '';
+}
+
+// ONE ask, either identifier accepted (Benjamin, 2026-08-04). Offering both lets the customer
+// pick what they're comfortable with instead of refusing outright. Naming the '@' is deliberate:
+// it is what makes a handle safe to parse back out of a free-text reply.
 const gateAsk = lang => lang === 'en'
-  ? `One thing — WhatsApp hasn't shared your number with us, so our sales advisor can't call you back. 🙏 Could you reply with your phone number?`
-  : `Satu je bos — WhatsApp tak share nombor tuan dengan kami, jadi sales advisor kami tak dapat call balik. 🙏 Boleh reply nombor telefon tuan?`;
+  ? `One thing — WhatsApp hasn't shared your contact details with us, so our sales advisor has no way to reach you back. 🙏 Could you reply with your phone number, or your WhatsApp username (the one starting with @)?`
+  : `Satu je bos — WhatsApp tak share contact tuan dengan kami, jadi sales advisor kami tak boleh contact balik. 🙏 Boleh reply nombor telefon tuan, atau username WhatsApp tuan (yang start dengan @)?`;
 const gateWhy = lang => lang === 'en'
   ? `Good question 🙂 WhatsApp recently added a username / hide-my-number setting — when it's on, your number isn't shared with the business you message, so our advisor can see your message but can't call you back.\n\nWe'd only use it to follow up on this enquiry. If you'd rather not share it, no problem at all — just reply here and we'll continue in this chat 👍`
   : `Soalan bagus 🙂 WhatsApp baru tambah setting username / sorok nombor — bila on, nombor tuan tak dishare dengan bisnes yang tuan mesej, jadi advisor kami nampak mesej tuan tapi tak boleh call balik.\n\nNombor tu untuk follow up ni je. Kalau tuan tak selesa nak bagi pun takpe — reply je kat sini, kami sambung dalam chat ni 👍`;
@@ -300,6 +342,11 @@ const gateUsername = lang => lang === 'en'
 const gateGot = lang => lang === 'en'
   ? `Got it, thank you! 🙏 Passing this to our sales advisor now.`
   : `Ok, terima kasih bos! 🙏 Saya pass kat sales advisor kami sekarang.`;
+// Deliberately promises a follow-up IN THIS CHAT, never a call back — a handle is not dialable in
+// Malaysia until WhatsApp's rollout lands (~Sept 2026), and not at all if they set a username key.
+const gateGotUser = lang => lang === 'en'
+  ? `Got it, thank you! 🙏 Passing your username to our sales advisor — they'll follow up with you right here in this chat.`
+  : `Ok, terima kasih bos! 🙏 Saya pass username tuan kat sales advisor — dia akan follow up terus dalam chat ni.`;
 
 function gateHold(jid, cat, want, lang){
   state.awaitingPhone = state.awaitingPhone || {};
@@ -327,12 +374,27 @@ async function gateOnReply(jid, h, text, bphone){
     await gateRelease(jid, h, phone, 'customer gave it');
     return true;
   }
+  // A typed username releases the hold too — either identifier is enough (Benjamin, 2026-08-04).
+  // It goes onto the lead as a labelled handle, NEVER into the phone field: `larkWriteLead` would
+  // happily store it, and a rep dialling a handle is the exact failure this gate exists to stop.
+  const username = gateParseUsername(text, !!h.askedUsername);
+  if (username){
+    try { await D.waSend(sendTarget(jid, bphone), gateGotUser(h.lang)); } catch {}
+    await gateRelease(jid, { ...h, want: `@${username} (username, not dialable) · ${h.want}` },
+                      '', 'customer gave username');
+    return true;
+  }
   if (h.asks < GATE_MAX_ASKS){
     // A username offer and a "why" both deserve a real answer, not the same request again.
-    const body = RE_GATE_USERNAME.test(text) ? gateUsername(h.lang)
-               : RE_GATE_WHY.test(text)      ? gateWhy(h.lang)
+    const offered = RE_GATE_USERNAME.test(text);
+    const body = offered                   ? gateUsername(h.lang)
+               : RE_GATE_WHY.test(text)    ? gateWhy(h.lang)
                : gateAsk(h.lang);
-    h.asks += 1; h.note = RE_GATE_USERNAME.test(text) ? 'offered username' : undefined;
+    h.asks += 1;
+    h.note = offered ? 'offered username' : undefined;
+    // Set only when we actually asked them to type one — this is what makes a bare one-word
+    // reply ("Nataliewpe") safe to read as a handle on the next message, and nothing else.
+    h.askedUsername = offered;
     state.awaitingPhone[jid] = h; persist();
     try { await D.waSend(sendTarget(jid, bphone), body); } catch {}
     D.log(`FR gate re-ask ${h.asks} (${jid.slice(0,22)}) — "${String(text).slice(0,40)}"`);

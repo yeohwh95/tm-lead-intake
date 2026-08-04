@@ -108,8 +108,55 @@ const LIDD = '206218996011144';
   ok('does NOT repeat the same phone request', !/Boleh reply nombor telefon tuan\?$/.test(texts().trim()));
   ok('still held', fr.gateStatus().length === 1);
 
+  // ── 5b. …then actually types it → the hold releases ────────────────────────
+  // Benjamin, 2026-08-04: either identifier is enough. This is the full live sequence — refuse
+  // the number, offer the username, get asked to type it, type it, get assigned.
+  console.log('\n5b. Customer types the username → assigned');
+  sent = [];
+  fr.onMessage({ jid: LID, phone: '', kind: 'text', text: 'Nataliewpe' });
+  await wait(80);
+  ok('bare handle accepted once we asked for one', assigned.length === 1);
+  ok('hold released', fr.gateStatus().length === 0);
+  ok('the handle reaches the lead', /nataliewpe/i.test(JSON.stringify(assigned)));
+  ok('\u{1F6A8} it is labelled as NOT dialable', /not dialable/i.test(JSON.stringify(assigned)));
+  ok('\u{1F6A8} the phone field stays empty — never a handle',
+     assigned.every(a => !a.phone || !/[a-z]/i.test(String(a.phone))));
+  ok('customer told the advisor follows up in this chat', /chat|advisor/i.test(texts()));
+
+  // An '@handle' works on the FIRST reply, with no preceding "please type it" ask.
+  console.log('\n5c. Customer leads with @handle');
+  reset();
+  fr.onMessage({ jid: LID, phone: '', kind: 'text', text: 'nak tanya harga Zontes' });
+  await wait(80); sent = [];
+  fr.onMessage({ jid: LID, phone: '', kind: 'text', text: 'im @natalie_wpe' });
+  await wait(80);
+  ok('@handle releases the hold immediately', assigned.length === 1 && fr.gateStatus().length === 0);
+  ok('handle normalised to lowercase', /natalie_wpe/.test(JSON.stringify(assigned)));
+
+  // The guard that matters most: an ordinary reply must never be filed as somebody's handle.
+  console.log('\n5d. An ordinary reply is never mistaken for a handle');
+  reset();
+  fr.onMessage({ jid: LID, phone: '', kind: 'text', text: 'nak tanya harga Zontes' });
+  await wait(80); sent = [];
+  fr.onMessage({ jid: LID, phone: '', kind: 'text', text: 'zontes' });
+  await wait(80);
+  ok('\u{1F6A8} a bare product word does NOT release the hold',
+     assigned.length === 0 && fr.gateStatus().length === 1);
+  reset();
+  fr.onMessage({ jid: LID, phone: '', kind: 'text', text: 'nak tanya harga Zontes' });
+  await wait(80); sent = [];
+  fr.onMessage({ jid: LID, phone: '', kind: 'text', text: 'email saya ben@gmail.com' });
+  await wait(80);
+  ok('\u{1F6A8} an email address is never read as a handle',
+     assigned.length === 0 && fr.gateStatus().length === 1);
+
   // ── 6. Never nag a third time ──────────────────────────────────────────────
   console.log('\n6. Message budget');
+  reset();
+  fr.onMessage({ jid: LID, phone: '', kind: 'text', text: 'nak tanya harga Zontes' });
+  await wait(80);
+  fr.onMessage({ jid: LID, phone: '', kind: 'text', text: 'U can find my username to contact me' });
+  await wait(80);
   sent = [];
   fr.onMessage({ jid: LID, phone: '', kind: 'text', text: 'still not giving lah' });
   await wait(80);
