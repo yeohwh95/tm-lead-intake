@@ -2,6 +2,53 @@
 
 WhatsApp lead → AI extract → Lark CRM + notify the assigned salesperson. **LIVE.**
 
+## 📋 PASTED lead lists now chunk like a spreadsheet (2026-08-04) — ⚠️ COMMITTED, NOT PUSHED
+Harith has 53 event leads (Lambretta/Thunder) and asked whether staff can **paste** them into the
+intake group instead of attaching a file. They can — and until this fix that lost **every one of
+them, silently.**
+
+**Measured against the live extractor with his actual list, not predicted:**
+
+| | Result |
+|---|---|
+| **Old path** (paste today) | `finish_reason=length` · JSON truncated mid-object · `parseLeads` → `[]` · **0 of 53** |
+| What Harith would have seen | **Nothing.** `index.js` only posts "no lead found" for images/files — a TEXT drop with zero leads `return`s silently |
+| **New path** (chunked) | 3 calls of 20/20/13 → **53 of 53**, 0 missing, 0 duplicates |
+
+**Root cause — the same trap as the 139-row Excel on 21 July, entered from the other side.** The
+`document` branch has chunked since that incident; the `text` branch never did. A paste was one
+`aiExtract` call at `max_tokens: 1500`, and 53 leads need ~2,700 tokens of JSON. **Staff paste —
+that is how they work — so the paste path now gets the protection the file path has.**
+
+- **`textchunk.js`** (+`textchunk_test.js`, 58 tests, his real 53-lead list as a permanent fixture)
+  splits a paste into chunks of ≤`TEXT_CHUNK_LEADS` (default 20) phone-bearing records, repeating
+  the human's header line into every chunk exactly like `excelToChunks` repeats the CSV header.
+  A lead line = a run with **≥9 digits**, so `X250` / `LS250-S` / `RM 23,888` / `2026-08-04` are
+  never mistaken for phone numbers. Handles both list shapes staff use (`Name - phone - model` per
+  line, and name-on-one-line-phone-on-the-next).
+- **At or below 20 leads the original single-call path is untouched** — the everyday 1–5 lead drop
+  behaves byte-for-byte as before.
+- 🚨 **`dedupeByPhone` — chunked extraction returned 57 leads for 53 customers.** A line naming two
+  bikes ("48. Muhammad Amzar - +601151689420 - Lambretta X250, Thunder LS250-S") makes the model
+  emit **one lead per model**, and each copy would be round-robinned to a **different rep** — two
+  salespeople ringing the same customer about the same enquiry. Now merged into `interest`.
+  Applies to every source (a multi-model row does this in a spreadsheet too). **Within ONE drop
+  only** — re-sending the same file still creates fresh rows (the known 2026-07-21 gap, unchanged).
+  **Leads with no phone are never merged into each other** — blank is not an identity, and `@lid`
+  customers legitimately have none (2026-08-02).
+- **Completeness check (the "make failures loud" lesson):** if fewer leads come back than there were
+  phone lines, the group is told **both numbers** and the review group is alerted. A paste that
+  clearly held leads but read as zero now says so instead of returning silently. Plain group chatter
+  (no phone lines) still stays silent, as designed.
+- Env: `TEXT_CHUNK_LEADS` (default 20). Tests: textchunk 58 · full suite **368/368**.
+
+**⚠️ Operational note for a text paste:** a pasted message has **no caption**, so `fileOverrides`
+never runs and `origin` came back blank for all 53. The header line IS repeated into every chunk —
+so putting the origin in the first line (e.g. `ON SITE EVENT — LAMBRETTA / THUNDER LEADS`) is what
+makes it land on every lead. Brand blank is harmless: `brandFromModel` fills it from the model text.
+✅ Verified NOT a problem: the AI preserved `+33`, `+65` and the `+850` typo **exactly** — the
+"normalize to Malaysian +60" rule did not corrupt them, so foreign numbers need no pre-cleaning.
+
 ## 🐛🐛🐛→✅ FIXED 2026-07-30 — three bugs behind one wrong client report + one ignored customer
 Harith disputed the 6PM SLA card of 07-29 ("yesterday only passed 1 lead, not 3, and ikhwan acknowledged"). He was right on every count. Benjamin also flagged a real screenshot: customer **+60129717912** asked "looking to purchase a 368g, whats your best deal?" at **10:05am 07-30** and got **no reply at all**. Three independent root causes, all confirmed from live Render logs + Lark. New file `identity.js` (+ `identity_test.js`, 24 tests) holds the identity logic, because index.js boots a server on require and was therefore untestable.
 
