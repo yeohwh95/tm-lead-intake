@@ -183,14 +183,61 @@ const LIDD = '206218996011144';
   ok('still held', fr.gateStatus().length === 1);
   ok('not assigned', assigned.length === 0);
 
+  // ── 8b. THE 2026-08-05 BUG: the bot's own reply must not deafen it ─────────
+  // `markHuman` fires on any fromMe message, and the bot's OWN sends echo back as fromMe — so the
+  // chat is flagged human-owned the instant the bot asks. The customer's number was then dropped
+  // at the top of onMessage, before buffering, and the lead timed out as "never answered".
+  // Four real TM customers replied with a number inside ONE MINUTE and every one was discarded.
+  // ⚠️ `humanTouched` is a module-level Set that reset() does NOT clear (by design — it mirrors
+  // production, where it only clears on restart). So each case below uses its OWN jid; reusing
+  // one would leave it flagged and the next hold would never be created.
+  console.log('\n8b. Bot\'s own send marks the chat — the held customer must still be heard');
+  const LID_A = '111111111111111@lid', LID_B = '222222222222222@lid';
+  reset();
+  fr.onMessage({ jid: LID_A, phone: '', kind: 'text', text: 'nak tanya harga Zontes' });
+  await wait(80);
+  fr.markHuman(LID_A);                     // exactly what the bot's own outbound echo does
+  ok('still held after the bot replied', fr.gateStatus().length === 1);
+  sent = []; assigned = [];
+  fr.onMessage({ jid: LID_A, phone: '', kind: 'text', text: '014-8369971' });
+  await wait(80);
+  ok('\u{1F6A8} the number is HEARD, not dropped', assigned.length === 1);
+  ok('\u{1F6A8} released on the customer, not a timeout', fr.gateStatus().length === 0);
+  ok('the real number reaches the lead', /60148369971/.test(JSON.stringify(assigned)));
+  // A username must survive the same path — @Keekzy77 was one of the real dropped replies.
+  reset();
+  fr.onMessage({ jid: LID_B, phone: '', kind: 'text', text: 'nak tanya harga Zontes' });
+  await wait(80);
+  fr.markHuman(LID_B);
+  sent = []; assigned = [];
+  fr.onMessage({ jid: LID_B, phone: '', kind: 'text', text: '@Keekzy77' });
+  await wait(80);
+  ok('\u{1F6A8} a username is heard too', assigned.length === 1
+     && /keekzy77/i.test(JSON.stringify(assigned)));
+
+  // Leave a fresh hold on LID for case 9, which expects one.
+  reset();
+  fr.onMessage({ jid: LID, phone: '', kind: 'text', text: 'nak tanya harga Zontes' });
+  await wait(80);
+
   // ── 9. A human taking over wins ────────────────────────────────────────────
   console.log('\n9. Human replies during the hold — bot backs off');
   fr.markHuman(LID);
   fr._state().awaitingPhone[LID].ts = Date.now() - 61000;
   assigned = [];
+  // Count BEFORE, not an absolute total — the event log is append-only and survives across test
+  // runs, so any fixed expected count passes once and then rots.
+  const takeoversBefore = fr.gateReadEvents(500).filter(e => e.kind === 'human_takeover').length;
   await fr.gateSweep();
   ok('\u{1F6A8} does NOT double-handle a chat a human owns', assigned.length === 0);
   ok('hold dropped', fr.gateStatus().length === 0);
+  // Silently dropping the hold made the lead read as stuck forever in /gate-status — 2 of TM's
+  // first 4 gated leads ended this way (2026-08-05), so the outcome must be recorded, not just
+  // logged. A real ending that leaves no trace is indistinguishable from a lost lead.
+  const takeovers = fr.gateReadEvents(500).filter(e => e.kind === 'human_takeover');
+  ok('\u{1F6A8} the takeover is RECORDED, not just logged',
+     takeovers.length === takeoversBefore + 1);
+  ok('it names the chat it ended', takeovers.at(-1) && takeovers.at(-1).chat_id === LID);
 
   console.log(`\n${'='.repeat(54)}\n  ${pass} passed, ${fail} failed\n${'='.repeat(54)}`);
   try { require('fs').unlinkSync(process.env.FR_STATE_FILE); } catch {}

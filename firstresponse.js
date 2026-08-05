@@ -448,6 +448,14 @@ async function gateSweep(){
     if (humanTouched.has(jid)){          // a human already owns this chat — don't double-handle
       delete held[jid]; persist();
       D.log(`FR gate dropped — human took over (${jid.slice(0,22)})`);
+      // This is a REAL ending, so it must be logged as one. Without the event the hold simply
+      // vanishes: /gate-status shows nothing held and no outcome, so the lead reads as stuck
+      // forever and gets flagged for a human who has, in fact, already handled it. Observed
+      // 2026-08-05 — 2 of TM's first 4 gated leads ended this way (TM staff watch that inbox),
+      // so it is normal operation, not an edge case, and it was silently breaking the count.
+      gateLogEvent('human_takeover', jid, {
+        cat: h && h.cat, reason: 'human replied during the hold',
+        held_seconds: Math.round((now - ((h && h.ts) || now)) / 1000) });
       continue;
     }
     try { await gateRelease(jid, h || { cat: 'product', want: 'WhatsApp direct inquiry', lang: 'bm' }, '', 'timeout'); }
@@ -516,7 +524,18 @@ function onMessage(info){
     if (!ON()) return;
     if (!info.jid || info.jid.endsWith('@g.us')) return;
     if (D.isStaffPhone && D.isStaffPhone(info.phone)) return;
-    if (humanTouched.has(info.jid) && !state.pending[info.jid]) return;   // a human already owns this chat
+    // A human already owns this chat — EXCEPT while we are mid-flow and waiting on the customer
+    // for something we asked for. `markHuman` fires on ANY fromMe message, and the bot's OWN sends
+    // echo back as fromMe, so this chat is flagged the instant the bot replies. Without the
+    // exemptions below, the customer's answer is discarded before it is even buffered.
+    // 🐛 2026-08-05: `state.pending` (the greeting flow) was exempt but the phone gate was not, so
+    // EVERY held customer who sent their number had it thrown away and was released at timeout as
+    // "never answered". Four TM customers gave a real number within ONE MINUTE of being asked
+    // (014-8369971 · 01160727568 · 0169559643 · 0102360706) and two also gave a username
+    // (@Keekzy77 · @hkm.hkmi) — all silently dropped. The gate reported 0/8 conversion when the
+    // truth was 4/4. Any future "waiting on the customer" state MUST be added here too.
+    const midFlow = state.pending[info.jid] || (state.awaitingPhone || {})[info.jid];
+    if (humanTouched.has(info.jid) && !midFlow) return;
     // 🐛→✅ 2026-08-02 — a @lid customer with NO phone at all.
     // WhatsApp sometimes discloses no phone whatsoever for a privacy-addressed chat: the raw webhook
     // carries only `key.remoteJid` + `key.senderLid`, both the @lid, and WaSender's /api/contacts has

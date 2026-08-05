@@ -392,6 +392,35 @@ phone number actually released the hold, so a customer who typed their handle wa
   *username key*.
 - ⚠️ **Awaiting Benjamin's push approval — nothing is live.**
 
+### 🐛→✅ FIXED 2026-08-05 — the bot silenced itself, and binned every phone number it was given
+**Plain English:** the bot has a rule "if a human is handling this chat, stay out of the way". But
+`markHuman()` fires on ANY `fromMe` message — **including the bot's own sends echoing back** — so the
+chat was flagged human-owned the *instant the bot asked for the number*. The next line of `onMessage`
+then dropped the customer's reply **before it was even buffered**. `state.pending` (the greeting flow)
+was exempt from that guard; **the phone gate was not.**
+
+**Cost:** every held customer who complied was discarded and released at timeout as "never answered".
+Ground truth from the inbox — **4 of 4 gave a real number within ONE minute** (`014-8369971` ·
+`01160727568` · `0169559643` · `0102360706`) and two also gave a username (`@Keekzy77` · `@hkm.hkmi`).
+The gate reported **0% conversion when the truth was 100%**, and that number was used to recommend
+abandoning the ask entirely. Nobody was actually lost only because TM staff read the inbox by hand and
+called them — humans covering for broken automation. The Lark rows still carry blank phones.
+
+**Fix:** the guard now exempts every state where the bot is waiting on the customer:
+```js
+const midFlow = state.pending[info.jid] || (state.awaitingPhone || {})[info.jid];
+if (humanTouched.has(info.jid) && !midFlow) return;
+```
+🚨 **Any future "waiting on the customer" state MUST be added here too.** Regression tests use the real
+dropped replies (`014-8369971`, `@Keekzy77`) — `node gate_test.js` (52).
+
+### 🐛→✅ FIXED 2026-08-05 — a human takeover left no trace
+Dropping the hold on human takeover wrote only a `D.log` line, no gate event. `/gate-status` then showed
+nothing held and no outcome, so the lead read as **stuck forever** and was flagged for a human who had
+already handled it. **2 of TM's first 4 gated leads ended this way** — normal operation for TM (staff
+watch that inbox), not an edge case, and it was quietly breaking the watch count. Now logged as
+`human_takeover`. **Every terminal path needs an event, including the good ones.**
+
 ### 🟢 fr_state.json now lives on a persistent disk
 `FR_STATE_FILE=/data/fr_state.json` on a 1GB Render disk (`dsk-d9okds4s728c73fbfjig`), attached
 2026-08-04. Previously the file sat on ephemeral storage and **every deploy wiped it** — the
