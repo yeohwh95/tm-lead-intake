@@ -436,4 +436,40 @@ leaving a customer permanently unassigned. Holds and the greeted map now survive
 **Why a file and not just `D.log()`:** Render rotates logs every few hours, so a resolved gated
 lead became unreviewable almost immediately — and TM produces more of them than any other client
 (14% of chats). Kinds emitted: `held` · `phone_received` · `asked_username` · `explained_why` ·
-`re_asked` · `no_reply_usable` · `assigned` · `timeout`.
+`re_asked` · `no_reply_usable` · `assigned` · `timeout` · `human_takeover` · `assigned_after_park`.
+
+### 🔍 2026-08-06 — one dash meant three different things, so a real failure was invisible
+Found while auditing Ariff (`@mat.arip`, Aveta Vanguard V2 loan). He gave his username at **17:09**
+on 5 Aug and the gate released correctly — but the event logged `salesperson: ""`, so `/gate-status`
+printed **`assigned to: —`**. That dash covered three situations that could not be told apart:
+
+| Reality | Printed | Is it OK? |
+|---|---|---|
+| A rep holds it | `—` when the name was missing | fine |
+| Released after 5pm → parked for the 9am drain (TM assigns **Mon–Fri 9–5**, narrower than opening hours) | `—` | normal, but the customer was promised a follow-up |
+| **NOBODY took it** — Lark row with an empty Salesman, and `slaSweep` filters `Salesman isNotEmpty`, so nothing will ever chase it | `—` | **broken, silently** |
+
+Ariff was the middle case: parked 16h → Fazwan at 09:00 → no response in 75 min → reassigned to
+Shahrin → **escalated 11:32, still unanswered 19h after he asked.** Only a hand-check in Lark found
+it; the log looked identical to a healthy lead.
+
+**Fix — three parts, all monitoring, none of them change how a lead is assigned:**
+1. **`assign()` now reports WHY there is no card.** New optional `ctx` in/out bag (NOT a return-shape
+   change — `tpl()` still receives the same card-or-null, so no customer-facing text moved).
+   `ctx.outcome` = `assigned` · `parked` · `no_rep`, written to the gate event as `assign_state`.
+   `no_rep` also logs `FR 🚨 NO SALESPERSON took the released lead`. ⚠️ `no_rep` is *rare by design*:
+   `assignLeads` falls back to the whole pool when everyone is marked unavailable, so reaching it
+   means a pool is structurally empty (e.g. a branch blanked in the roster sheet).
+2. **The morning drain closes the story.** Deferred entries now carry `jid` + `gated`, and
+   `drainFRDeferred` calls `firstresponse.gateLogParked()` → an `assigned_after_park` event naming
+   the rep and how long the customer waited. Before this, the log's last word on a parked lead was
+   "parked" and the only way to learn who got them was to open Lark. Entries queued before this
+   shipped (or re-queued by `rehydrateFromLark`) have no `jid` and are skipped, never mislogged.
+3. **`report.py` ranks by staleness** — every lead needing attention is repeated in a
+   `⚠️ NEEDS A LOOK — stalest first` block with time since last activity. A 19-hour-old stuck lead
+   no longer renders exactly like one that resolved five minutes ago.
+
+Tests: gate **60** (+8 — assigned/parked/no_rep marking, the parked entry carrying its chat, the
+drain writing the ending, and the loud log line). Full suite **383**.
+⚠️ `init()` REPLACES the dep bag, it does not merge — `gate_test.js` now has `BASE_DEPS` + `initWith()`
+because a partial re-init leaves the module without `waSend`/`log`.

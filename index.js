@@ -1059,6 +1059,18 @@ const FR_DEFER_FILE = _path.join(__dirname, 'fr_deferred.json');
 let frDeferred = []; try { frDeferred = JSON.parse(_fs.readFileSync(FR_DEFER_FILE, 'utf8')); } catch { /* fresh */ }
 function frDeferPersist(){ try { _fs.writeFileSync(FR_DEFER_FILE, JSON.stringify(frDeferred)); } catch {} }
 function deferStaffNotify(entry){ frDeferred.push({ ...entry, queuedAt: Date.now() }); frDeferPersist(); }
+// A parked lead that came out of the phone gate gets its ending written back to the gate log the
+// moment a rep actually receives it. Only gate leads — a normal overnight lead has no gate history
+// and would just be noise in there. Entries queued before this shipped (or re-queued from Lark by
+// rehydrateFromLark) carry no jid, so they are skipped rather than logged against the wrong chat.
+function gateLogParkRelease(e, assignee){
+  if (!e || !e.gated || !e.jid) return;
+  try {
+    firstresponse.gateLogParked(e.jid, {
+      cat: e.cat || '', salesperson: assignee || '', reason: 'released from overnight park',
+      parked_seconds: Math.round((Date.now() - (e.queuedAt || Date.now())) / 1000) });
+  } catch(err){ log('FR park-log err', String(err.message||err).slice(0,60)); }
+}
 let frDraining = false;
 async function drainFRDeferred(){
   if (frDraining || !frDeferred.length || !inFRDistHours()) return;
@@ -1070,6 +1082,7 @@ async function drainFRDeferred(){
       try {
         if (e.kind === 'dm'){                       // trade-in → Fitri (plain DM, no pool/SLA)
           await waSend(e.to, e.text);
+          gateLogParkRelease(e, e.assignee || 'Fitri');
         } else {                                    // pool lead: rotate NOW, then Lark + DM + SLA
           const unavail = await getUnavailable();
           const l = assignLeads([{ phone: e.phone, name: '', interest: e.want, brand: e.brand }], { origin: 'WhatsApp Direct' }, unavail)[0];
@@ -1081,6 +1094,7 @@ async function drainFRDeferred(){
           const dmMsgId = await notifyStaff([l]);
           if (sla && l.staff?.phone) sla.register(l.assignee, l.staff.phone, [{ recordId: e.recordId, summary: e.want, brand: l.brand, custName: '', custPhone: e.phone, override: false }], dmMsgId);
           log(`FR 🌅 deferred lead assigned → ${l.assignee || '(pool empty?)'} (${e.phone}) "${e.want}"`);
+          gateLogParkRelease(e, l.assignee || '');
         }
       } catch(err){ log('FR drain err', String(err.message||err).slice(0,80)); }
       frDeferred.shift(); frDeferPersist();         // one entry = one attempt — never retry-loop a bad entry

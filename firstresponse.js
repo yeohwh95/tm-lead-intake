@@ -170,9 +170,17 @@ async function stockLineFor(cat, text, lang){
 // spread fairly across the pool at 9am instead of hammering whoever was next at 2am). Leaving
 // Salesman blank overnight also keeps slaSweep() from "helpfully" DMing the rep early — the sweep
 // only enrols rows that HAVE a salesman.
-async function assign(cat, jid, phone, wantText){
+// `ctx` is an optional in/out bag, NOT part of the return contract — callers that don't care pass
+// nothing and `tpl()` keeps receiving the same card-or-null it always has. In: `ctx.gated` marks a
+// lead coming out of the phone gate. Out: `ctx.outcome` says WHY there is no card, which the caller
+// cannot otherwise tell apart. A null card has two opposite meanings — "parked until 9am" (normal)
+// and "no salesperson took it" (broken) — and the gate log recorded both as an empty name, so a
+// real failure was indistinguishable from a routine overnight park (2026-08-06).
+async function assign(cat, jid, phone, wantText, ctx){
   const want = String(wantText || '').replace(/\s+/g, ' ').trim().slice(0, 60) || 'WhatsApp direct inquiry';
   const defer = !!(D.inDistHours && !D.inDistHours() && D.deferStaffNotify);
+  const mark = (outcome, assignee) => { if (ctx){ ctx.outcome = outcome; ctx.assignee = assignee || ''; } };
+  const gated = !!(ctx && ctx.gated);
   if (cat === 'sell'){
     // Trade-in → Fitri (purchaser). Lark record + instant DM to Fitri. (No SLA pool — she's not a rep.)
     let recordId = null;
@@ -180,13 +188,17 @@ async function assign(cat, jid, phone, wantText){
     catch(e){ D.log('FR lark err (sell):', String(e.message||e).slice(0,60)); }
     const fitriMsg = `🔁 *Trade-in Lead (auto)*\n\n🎯 ${want}\n👉 https://wa.me/${phone.replace(/\D/g,'')}\n\nCustomer dah dapat reply pertama — follow up ya.`;
     if (defer){
-      D.deferStaffNotify({ kind: 'dm', to: FITRI.phone, text: fitriMsg });
+      // jid + gated ride along so the drain can close this lead's story in the gate log tomorrow
+      // morning; without the jid it has no idea which chat the parked lead belongs to.
+      D.deferStaffNotify({ kind: 'dm', to: FITRI.phone, text: fitriMsg, jid, gated, cat, assignee: 'Fitri' });
       D.log(`FR 🌙 SELL lead deferred to office hours → Fitri (${phone}) "${want}"`);
+      mark('parked', 'Fitri');
       return null;   // no card at night — tpl() shows the office-hours line instead
     }
     try { await D.waSend(FITRI.phone, fitriMsg); }
     catch(e){ D.log('FR fitri DM err:', String(e.message||e).slice(0,60)); }
     D.log(`FR ✅ SELL lead assigned → Fitri (${phone}) "${want}"`);
+    mark('assigned', 'Fitri');
     return { name: 'Fitri', digits: '60108093259', disp: '010-8093259' };
   }
   // product / loan / testride → the normal machine: round-robin pool → Lark → salesperson DM → SLA timers.
@@ -200,8 +212,9 @@ async function assign(cat, jid, phone, wantText){
   const l = enriched[0];
   try { l.recordId = await D.larkWriteLead(l); } catch(e){ D.log('FR lark err:', String(e.message||e).slice(0,60)); }
   if (defer){
-    D.deferStaffNotify({ kind: 'pool', phone, want: l.want, brand: l.brand, recordId: l.recordId || null });
+    D.deferStaffNotify({ kind: 'pool', phone, want: l.want, brand: l.brand, recordId: l.recordId || null, jid, gated, cat });
     D.log(`FR 🌙 ${cat.toUpperCase()} lead deferred to office hours (${phone}) "${want}"`);
+    mark('parked', '');
     return null;
   }
   try {
@@ -211,8 +224,14 @@ async function assign(cat, jid, phone, wantText){
   D.log(`FR ✅ ${cat.toUpperCase()} lead assigned → ${l.assignee || '(pool empty?)'} (${phone}) "${want}"`);
   if (l.assignee && l.staff?.phone){
     const digits = String(l.staff.phone).replace(/\D/g, '');
+    mark('assigned', l.assignee);
     return { name: l.assignee, digits, disp: '0' + digits.slice(2, 4) + '-' + digits.slice(4) };
   }
+  // Nobody took it. `assignLeads` falls back to the full pool when everyone is marked unavailable,
+  // so reaching here means the pool is structurally empty (e.g. a whole branch blanked in the
+  // roster sheet) or the chosen rep has no phone — the lead is in Lark owned by NOBODY, and the SLA
+  // sweep skips rows with an empty Salesman, so nothing will ever chase it. Say so, loudly.
+  mark('no_rep', '');
   return null;
 }
 
@@ -380,15 +399,30 @@ function gateHold(jid, cat, want, lang){
 // Release a held lead: assign for real, then tell the customer who has them.
 async function gateRelease(jid, h, phone, reason){
   delete (state.awaitingPhone || {})[jid]; persist();
-  const card = await assign(h.cat, jid, phone || '', h.want);
+  const ctx = { gated: true };
+  const card = await assign(h.cat, jid, phone || '', h.want, ctx);
   const closed = !!(D.inOpenHours && !D.inOpenHours());
   try { await D.waSend(sendTarget(jid, phone), tpl(h.cat, h.lang, card, '', closed)); }
   catch(e){ D.log('FR gate release send err:', String(e.message||e).slice(0,60)); }
-  D.log(`FR ✅ gate released (${reason}) — ${h.cat} ${phone ? '+' + phone : 'NO PHONE'} (${jid.slice(0,22)})`);
+  D.log(`FR ✅ gate released (${reason}) — ${h.cat} ${phone ? '+' + phone : 'NO PHONE'} (${jid.slice(0,22)})`
+    + (ctx.outcome && ctx.outcome !== 'assigned' ? ` [${ctx.outcome}]` : ''));
+  if (ctx.outcome === 'no_rep') D.log(`FR 🚨 NO SALESPERSON took the released lead (${jid.slice(0,22)}) — Lark row has no owner`);
   gateLogEvent(reason === 'timeout' ? 'timeout' : 'assigned', jid, {
     cat: h.cat, phone: phone || '', reason,
-    salesperson: (card && card.name) || '',
+    salesperson: (card && card.name) || ctx.assignee || '',
+    // 'assigned' = a rep holds it now · 'parked' = queued for the next assignment window, a rep gets
+    // it at 9am · 'no_rep' = nobody took it, needs a human. An empty salesperson used to cover all
+    // three, so a routine park and a total failure read identically in /gate-status.
+    assign_state: ctx.outcome || 'assigned',
     held_seconds: Math.round((Date.now() - (h.ts || Date.now())) / 1000) });
+}
+
+// Called by the morning drain in index.js when a lead that was parked overnight finally reaches a
+// rep. Without it the gate log's story for that customer stops at the park with no name, and the
+// only way to learn who ended up with them is to open Lark by hand (2026-08-06, Ariff/@mat.arip).
+function gateLogParked(jid, fields){
+  if (!jid) return;
+  gateLogEvent('assigned_after_park', jid, fields || {});
 }
 
 // Handle a reply from a held chat. Returns true if the gate consumed the message.
@@ -585,7 +619,7 @@ function rehydrateGreeted(entries){
 }
 
 function init(deps){ D = deps; D.log('firstresponse init — ON:', ON(), 'debounce:', DEBOUNCE_MS + 'ms'); }
-module.exports = { init, onMessage, markHuman, rehydrateGreeted, gateSweep, gateReadEvents,
+module.exports = { init, onMessage, markHuman, rehydrateGreeted, gateSweep, gateReadEvents, gateLogParked,
   gateStatus: () => Object.entries(state.awaitingPhone || {}).map(([jid, h]) => ({
     jid, cat: h.cat, asks: h.asks, note: h.note || '',
     waitingMin: Math.round((Date.now() - (h.ts || Date.now())) / 60000),

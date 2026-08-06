@@ -19,7 +19,9 @@ let sent = [], assigned = [], larkRows = [], logs = [];
 const reset = () => { sent = []; assigned = []; larkRows = []; logs = [];
   const st = fr._state(); st.awaitingPhone = {}; st.greeted = {}; st.pending = {}; };
 
-fr.init({
+// ⚠️ `init()` REPLACES the dep bag, it does not merge. A test that wants one dep changed must
+// re-init with the whole set or the module loses waSend/log and dies on the next message.
+const BASE_DEPS = {
   waSend: async (to, text) => { sent.push({ to, text }); },
   assignLeads: (leads) => leads.map(l => ({ ...l, assignee: 'Nazrin',
     staff: { name: 'Nazrin', phone: '+60123456789', openId: 'ou_x' } })),
@@ -35,7 +37,9 @@ fr.init({
   inOpenHours: () => true,
   deferStaffNotify: () => {},
   hoursLabel: () => ({ en: 'Mon–Sat, 9am–6pm', bm: 'Isnin–Sabtu, 9 pagi–6 petang' }),
-});
+};
+const initWith = (overrides) => fr.init({ ...BASE_DEPS, ...(overrides || {}) });
+initWith();
 
 let pass = 0, fail = 0;
 const ok = (label, cond) => { if (cond) { pass++; console.log('  ✅ ' + label); }
@@ -238,6 +242,55 @@ const LIDD = '206218996011144';
   ok('\u{1F6A8} the takeover is RECORDED, not just logged',
      takeovers.length === takeoversBefore + 1);
   ok('it names the chat it ended', takeovers.at(-1) && takeovers.at(-1).chat_id === LID);
+
+  // ── 10. A released lead must say WHY nobody's name is on it ────────────────
+  // 2026-08-06: the event log wrote an empty salesperson for three different situations — a rep
+  // holds it, it is parked until the 9am drain, and NOBODY took it. All three printed the same
+  // dash in /gate-status, so a lead sitting with no owner (which nothing will ever chase, because
+  // the SLA sweep skips ownerless CRM rows) looked exactly like a routine overnight park.
+  console.log('\n10. The reason there is no salesperson name is recorded');
+  const lastGate = () => fr.gateReadEvents(500).filter(e => ['assigned','timeout'].includes(e.kind)).at(-1);
+
+  const LID_C = '333333333333333@lid';
+  reset();
+  fr.onMessage({ jid: LID_C, phone: '', kind: 'text', text: 'nak tanya harga Zontes' });
+  await wait(80);
+  fr.onMessage({ jid: LID_C, phone: '', kind: 'text', text: '0169559643' });
+  await wait(80);
+  ok('a normal release is marked assigned', lastGate() && lastGate().assign_state === 'assigned');
+  ok('and still carries the rep name', lastGate().salesperson === 'Nazrin');
+
+  // Outside the assignment window the staff half is queued — the customer is told someone will
+  // follow up, but no rep has it yet. That is NOT the same as a failure and must not read as one.
+  const parked = [];
+  initWith({ inDistHours: () => false, deferStaffNotify: e => parked.push(e) });
+  const LID_D = '444444444444444@lid';
+  reset();
+  fr.onMessage({ jid: LID_D, phone: '', kind: 'text', text: 'nak tanya harga Zontes' });
+  await wait(80);
+  fr.onMessage({ jid: LID_D, phone: '', kind: 'text', text: '0102360706' });
+  await wait(80);
+  ok('\u{1F6A8} an after-hours release is marked PARKED, not failed', lastGate().assign_state === 'parked');
+  ok('the parked entry carries the chat so the drain can close it out',
+     parked.length === 1 && parked[0].jid === LID_D && parked[0].gated === true);
+
+  // The morning drain writes the ending back — without this the lead's last word in the log is
+  // "parked", and finding out who ended up with the customer means opening the CRM by hand.
+  fr.gateLogParked(LID_D, { salesperson: 'Fazwan', parked_seconds: 57600, reason: 'released from overnight park' });
+  const release = fr.gateReadEvents(500).filter(e => e.kind === 'assigned_after_park').at(-1);
+  ok('the drain closes the story with a name', release && release.salesperson === 'Fazwan');
+  ok('and says how long the customer waited', release.parked_seconds === 57600);
+
+  // The failure the dash was hiding: an empty pool means the CRM row has no owner at all.
+  initWith({ assignLeads: (leads) => leads.map(l => ({ ...l, assignee: '', staff: null })) });
+  const LID_E = '555555555555555@lid';
+  reset();
+  fr.onMessage({ jid: LID_E, phone: '', kind: 'text', text: 'nak tanya harga Zontes' });
+  await wait(80);
+  fr.onMessage({ jid: LID_E, phone: '', kind: 'text', text: '0148369971' });
+  await wait(80);
+  ok('\u{1F6A8} nobody taking the lead is recorded as no_rep', lastGate().assign_state === 'no_rep');
+  ok('and it is loud in the log', logs.some(l => /NO SALESPERSON/.test(l)));
 
   console.log(`\n${'='.repeat(54)}\n  ${pass} passed, ${fail} failed\n${'='.repeat(54)}`);
   try { require('fs').unlinkSync(process.env.FR_STATE_FILE); } catch {}
