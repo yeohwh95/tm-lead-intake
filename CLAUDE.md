@@ -2,6 +2,85 @@
 
 WhatsApp lead → AI extract → Lark CRM + notify the assigned salesperson. **LIVE.**
 
+## 🚨 THE BOT NO LONGER QUOTES A PRICE — 2026-08-10 (Benjamin approved)
+
+Benjamin sent three real screenshots. **All three replies were wrong**, and TM staff had already
+spent that morning correcting them by hand.
+
+| Customer asked | Bot said | Truth | How we know |
+|---|---|---|---|
+| "Yamaha **R1** ada ke cik" | three **R15**s, RM 4,880–14,598 | TM has never stocked an R1 | Adib typed *"R1 tak ada stock tuan"* 4 min later |
+| "forza 250 **baru** ada?" | "dari **RM 20,800**" | that is a 2022 **used** unit, 42,000 km. Real answer **OTR RM 28,800** | staff 12:41: *"maaf ya tuan, harga ni salah ya"* |
+| "mt09" | "dari **RM 22,800**" | one 2015 bike with **79,000 km**, not "the price of an MT-09" | staff 12:24: *"maaf ya tuan harga ni tersilap"* |
+
+**Root cause — one sentence: the bot was handed a used-unit inventory list and asked to behave like
+a price list.** Every Woo row is ONE physical secondhand bike (year, plate, mileage, its own loan
+table). The customers were asking about a MODEL. Three consequences, all now closed:
+
+1. **Identity** — the matcher was `alnum(name).includes(token)`, so `r1` ⊂ `r15`. → `catalog.js`.
+2. **Condition** — no working new/used field. 87 rows are titled "NEW …", 109 carry mileage, and
+   **113 carry no mileage at all**; the `motor_status` taxonomy is **completely empty (0 terms —
+   checked live)**. The team's title convention `^NEW ` is the only reliable signal → `RE_NEW_UNIT`.
+3. **Price meaning** — one number lifted out of its row. → **no price is emitted at all, ever.**
+
+⚠️ **The deeper lesson: this code was carefully hardened against a wrong "no" and never against a
+wrong "yes."** The 2026-07-24 comment says it outright — *"a wrong 'no stock' loses the sale"* — so
+a live re-check was added before any negative. But a wrong "no" costs one lead; a wrong
+*"✅ Ada, dari RM 20,800"* brings a customer to Kapar expecting a price that does not exist. **Guard
+the positive claim at least as hard as the negative one.**
+
+### What changed
+- 🚨 **`wooCheckStock` returns NO price field.** Do not re-add one, here or in `stockLineFor`.
+- **New `catalog.js`** (+ `catalog_test.js`, **27 tests**) holds the matcher as pure functions —
+  index.js boots a server on require, so it cannot host tested logic (same reason as `identity.js`
+  / `roster.js` / `hours.js`). **Read the R1/R15 rule at the top of that file before touching it.**
+  A token must land on a CLEAN EDGE: equal to a name token, or a prefix that does not cut a number
+  in half. `r1` vs `r15` → next char `5` → refused. `cbr250` vs `cbr250rr` → next char `r` → allowed.
+- **Brands never glue to a following number.** `"CB 150"` → `cb150` (one model split by a space);
+  `"KTM 250"` stays `[ktm, 250]` (brand + displacement). Backwards either way breaks real matches.
+- **Reply lines** (`stockLineFor`): used single → `✅ Ada — 2015 Yamaha MT-09 V1 (79,000 km).
+  Salesman kami akan confirm harga & plan bulanan` · used multi → the units listed with mileage,
+  no prices, still `Yang mana satu` · **wants NEW → no stock claim at all**, one qualifier
+  (`Bos nak cash atau loan?`) then assign, per Benjamin: *"no need answer so many question"*.
+- **`RE_WANTS_NEW`** ⚠️ Malay `baru` is also the adverb "just/recently" — `"baru nak tanya"`,
+  `"saya baru beli"`. As an adjective it FOLLOWS its noun (`forza 250 baru`), so the lookahead drops
+  the adverbial forms. A false positive is cheap; a false miss re-creates the RM 20,800 quote.
+- **An all-NEW match now qualifies instead of listing** (behaviour change: "aveta 250" used to list
+  3 models with prices). Naming an unmaintained NEW row IS a stock claim — that half of the catalog
+  is hand-typed, one row is priced **RM 888,888.8888** and another has no price at all.
+- **Every named unit is now live re-verified** (was: only the single-distinct case). A verify
+  FAILURE trusts the ≤10-min cache; only a confirmed `outofstock` drops the unit.
+- ⚠️ **Mileage is NOT fetched in the bulk catalog refresh.** Measured 2026-08-10: adding `meta_data`
+  takes a page from **12KB → 562KB**, and this site has been seen taking **12.6s** for a trivial GET
+  — that payload against the 15s page timeout would risk the whole refresh. Mileage rides along on
+  the per-product live check of the ≤4 units we actually name. **Do not add `meta_data` to
+  `catalogRefresh`.**
+- **`FR 📚 stock "<query>" → [tokens] → <units|no match>`** logs one auditable line per decision.
+
+### How we will know it worked
+The durable failure signal is **a staff correction message in the customer's own chat** — today's
+baseline is **3** (two "maaf, harga ni salah" + Adib's "R1 tak ada stock"). Render rotates logs in
+hours, so the `FR 📚` line is for the live watch, not for history.
+
+### Still open — NOT fixed by this change
+- 🔴 **New-bike prices have no source of truth anywhere.** The Mudah-group pipeline
+  (`tm-woo-upload`) requires **model + price + plate**, and a new bike has no plate — so it is
+  *structurally* excluded from the one pipeline that works. The 87 "NEW …" rows are hand-typed,
+  scattered across 9 months. Ask Steven: *can the team post new arrivals in the Mudah group the
+  same way, just without a plate?* Everything downstream already exists.
+- 🔴 **No reliable "sold" signal.** Staff DO announce it (7 bare `"sold"` / `"sold cash"` messages
+  in the capture window) but **none are quoted replies** — `stanzaId` is null on every one, and Adib
+  fired four in one minute, so nothing links them to a bike. Worse, `tm-woo-upload` `batch.js:192`
+  prompt rule 6 says *Ignore chatter ("thanks", "Sold by ...")* and `server.js:609` filters it out
+  of the orphan pool — **the signal arrives daily and is deliberately binned.** Cheap fix: ask staff
+  to *reply* to the listing with `sold`; the `stanzaId` → `mid` → plate → SKU chain already exists.
+- ⚪ Current availability truth = *published, not trashed, not `outofstock`* (207 instock / 15 out,
+  192 trashed). Human-maintained, lags hours-to-days. Good enough to avoid quoting a sold bike;
+  **not** good enough to promise "ready".
+
+Tests: catalog **27** · firstresponse **126** (+13, all three real customers as fixtures) ·
+full suite **423**.
+
 ## 📋 PASTED lead lists now chunk like a spreadsheet — 🟢 LIVE 2026-08-04 12:12 MYT (`2541a89`)
 Deploy verified: Render status `live`, boot clean (`catalog refresh: 262 products`, `availability
 baseline (20 staff)`, SLA engine ON), the 5 in-flight SLA timers and 1 phone-gate hold survived the

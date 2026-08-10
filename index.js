@@ -189,6 +189,10 @@ const alnumTok = s => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
 // bike isn't released — split into their own bucket so the FR bot answers with the booking
 // pitch instead of a stock/price claim.
 const RE_BOOKING = /open\s+for\s+booking|\bbooking\b|pre-?order|coming\s+soon/i;
+// A brand-new unit is identified by the team's own title convention ("NEW HONDA ADV160 …"). It is
+// the ONLY reliable signal: `mileage` is 0 on new listings but simply absent on 113 of 222 rows,
+// and the `motor_status` taxonomy is completely empty (checked live 2026-08-10 — 0 terms).
+const RE_NEW_UNIT = /^\s*new\b/i;
 const wooAuth = () => 'Basic ' + Buffer.from(`${WOO_USER}:${WOO_APP_PW}`).toString('base64');
 let CATALOG = { items: [], at: 0 };
 async function catalogRefresh(){
@@ -209,39 +213,53 @@ async function catalogRefresh(){
     log(`catalog refresh: ${items.length} products`);
   } catch (e) { log('catalog refresh err (keeping previous copy):', String(e.message || e).slice(0, 80)); }
 }
-// Model tokens = RE_BIKE brand/model words + digit-bearing tokens ("368D", "mt07"), nothing else —
-// filler ("ada", "stok", "lg") is what poisoned the old WP-search queries.
-function catalogModelTokens(text){
-  const words = String(text || '').replace(/[^\w\s-]/g, ' ').split(/\s+/).filter(Boolean);
-  return [...new Set(words.filter(w => RE_BIKE_KEYWORDS.test(w) || /\d/.test(w)).map(alnumTok).filter(t => t.length >= 2))];
-}
+// 🚨 The name matcher lives in catalog.js (pure + unit-tested) — see the R1/R15 rule at the top of
+// that file before touching it. index.js boots a server on require, so it cannot host tested logic.
+const catalog = require('./catalog');
+// Live per-product read for the handful of units we are about to NAME to a customer. Also carries
+// mileage back: the bulk catalog refresh deliberately does NOT ask for meta_data (measured 2026-08-10:
+// 12KB → 562KB per page, and this site has been seen taking 12.6s for a trivial GET — that payload
+// against the 15s page timeout would risk the whole refresh). Naming ≤4 units a few times a day is
+// cheap; re-reading every product's meta every 10 minutes is not.
 async function wooVerifyLive(id){
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), 3000);
   try {
-    const r = await fetch(`${WOO_SITE}/wp-json/wc/v3/products/${id}?_fields=stock_status`, { headers: { Authorization: wooAuth() }, signal: ctrl.signal });
+    const r = await fetch(`${WOO_SITE}/wp-json/wc/v3/products/${id}?_fields=stock_status,meta_data`, { headers: { Authorization: wooAuth() }, signal: ctrl.signal });
     if (!r.ok) return null;
-    return (await r.json()).stock_status || null;
+    const p = await r.json();
+    const m = (p.meta_data || []).find(x => x.key === 'mileage');
+    return { stock: p.stock_status || null, mileage: Number(m && m.value || 0) || 0 };
   } catch { return null; }
   finally { clearTimeout(timer); }
 }
+// 🚨 NO PRICE LEAVES THIS FUNCTION (Benjamin, 2026-08-10). The Woo price is the price of one
+// specific secondhand unit, and the bot kept presenting it as the price of a MODEL — "forza 250
+// baru" was answered "dari RM 20,800" off a 42,000km 2022 unit when the real answer was RM 28,800
+// OTR, and staff had to walk back two quotes by hand in one morning. The salesperson owns price.
+// Do not re-add a price field here or in stockLineFor.
 async function wooCheckStock(text){
   if (!WOO_SITE || !WOO_USER || !WOO_APP_PW) return null;   // not configured — caller must skip silently
-  const toks = catalogModelTokens(text);
-  if (!toks.length || !CATALOG.items.length) return null;   // no model named / cache not loaded yet (boot) → no claim either way
-  const named = CATALOG.items
-    .filter(p => { const nn = alnumTok(p.name); return toks.every(t => nn.includes(t)); })
-    .map(p => ({ id: p.id, name: String(p.name || '').split('|')[0].trim().slice(0, 60), price: Number(p.price || p.regular_price || 0), stock: p.stock_status, booking: RE_BOOKING.test(String(p.name || '')) }));
+  if (!CATALOG.items.length) return null;                   // cache not loaded yet (boot) → no claim either way
+  const { toks, hits } = catalog.matches(CATALOG.items, text, RE_BIKE_KEYWORDS);
+  if (!toks.length) return null;                            // no model named → no claim either way
+  const named = hits
+    .map(p => ({ id: p.id, name: String(p.name || '').split('|')[0].trim().slice(0, 60), stock: p.stock_status, booking: RE_BOOKING.test(String(p.name || '')), isNew: RE_NEW_UNIT.test(String(p.name || '')) }));
   const booking = named.filter(p => p.booking).map(p => ({ name: p.name }));
-  let instock = named.filter(p => !p.booking && p.stock !== 'outofstock');
-  // Single distinct model = the case where stockLineFor will assert "✅ Ada — dari RM X", so
-  // live-verify each unit first (a verify failure trusts the ≤10-min-old cache rather than block).
-  const distinct = new Set(instock.map(p => p.name.toLowerCase()));
-  if (distinct.size === 1 && instock.length <= 3){
-    const checks = await Promise.all(instock.map(async p => ({ p, live: await wooVerifyLive(p.id) })));
-    instock = checks.filter(c => c.live !== 'outofstock').map(c => c.p);
-  }
-  return { matches: instock.map(p => ({ name: p.name.slice(0, 48), price: p.price })), booking };
+  const instock = named.filter(p => !p.booking && p.stock !== 'outofstock');
+  // Dedupe by name BEFORE the live check so the same bike listed twice costs one request.
+  const seen = new Set();
+  const uniq = instock.filter(p => { const k = p.name.toLowerCase(); if (seen.has(k)) return false; seen.add(k); return true; }).slice(0, 4);
+  // Every unit we are about to name gets live-verified (was: only the single-distinct case). A
+  // verify FAILURE trusts the ≤10-min cache rather than blocking — only a confirmed `outofstock` drops.
+  const checked = await Promise.all(uniq.map(async p => ({ p, live: await wooVerifyLive(p.id) })));
+  const matches = checked.filter(c => !c.live || c.live.stock !== 'outofstock')
+    .map(c => ({ name: c.p.name.slice(0, 48), isNew: c.p.isNew, mileage: (c.live && c.live.mileage) || 0 }));
+  // One auditable line per decision — Benjamin 2026-08-10: "then we will know if this is working or
+  // not". Render rotates logs in hours, so this is for the live watch, not for history; the durable
+  // failure signal is a staff correction message in the customer's own chat.
+  log(`FR 📚 stock "${String(text).slice(0, 40)}" → [${toks.join(' ')}] → ${matches.length ? matches.map(m => m.name).join(' | ') : (booking.length ? 'BOOKING:' + booking[0].name : 'no match')}`);
+  return { matches, booking };
 }
 if (WOO_SITE && WOO_USER && WOO_APP_PW){
   catalogRefresh();

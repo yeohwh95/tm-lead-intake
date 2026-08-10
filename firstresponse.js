@@ -53,6 +53,12 @@ const RE_LOAN = /\bloan\b|ansuran|\bepp\b|kad\s+kredit|credit\s+card|pinjaman|bu
 // biggest gaps). A real customer's detailed "KTM 390 Adv R... OTR price and waiting time?"
 // purchase inquiry got zero reply because "ktm" wasn't recognized anywhere.
 const RE_BIKE = /vstrom|v-?strom|tracer|\bz\s?\d{3}|\bmt-?\s?\d{2}\b|cbr|ninja|\bzx\s?\d|gsx|t-?max|x-?max|n-?max|forza|vulcan|er-?6|rsv4|\btrk\b|tiger|duke|\br\s?2[35]\b|\br15\b|y1[56]|sv\s?650|nk\s?\d|450mt|368g|hunter|dominar|lambretta|vespa|zontes|\bnova\b|aveta|avantiz|\bego\b|lc\s?135|enduro|\bsym\b|versys|brutale|xj6|scrambler|monster|\bcb\s?\d{3}|crf|klx|pcx|vario|\bbeat\b|y15zr|8tt|thunder|moda\b|wmoto|gpx|keeway|scooter|superbike|motor\s+(second|2nd|baru|used)|\bktm\b|yamaha|suzuki|honda|kawasaki|\bbmw\b|modenas|ducati|aprilia|triumph|benelli|cfmoto|harley|agusta|enfield|\bqj\b|morini|\bafaz\b|\bktns\b/i;
+// "Is there a NEW one?" — the question Woo cannot answer (see stockLineFor).
+// ⚠️ TRAP: Malay `baru` is also the adverb "just/recently" — "baru nak tanya" (just wanted to ask),
+// "saya baru beli" (I just bought). As an ADJECTIVE it follows its noun ("forza 250 baru"), so the
+// lookahead drops the adverbial uses. A false positive here is cheap (the customer still gets
+// assigned, just via the qualify line); a false miss re-creates the RM 20,800 quote we just killed.
+const RE_WANTS_NEW = /\bbrand[\s-]*new\b|\bnew\s+(?:unit|bike|motor|stock|one)\b|\bbaru\b(?!\s+(?:nak|nk|je|sahaja|saja|beli|dapat|dpt|tanya|tny|lepas|balik|masuk|sampai))/i;
 const RE_VENDOR_AUTO = /thank you for contacting|welcome to .* (service|customer)|terima kasih kerana menghubungi|saya akan reply|confirmation code|verification code/i;
 const RE_MALAY = /\b(nak|nk|boleh|bleh|ada|berapa|brp|tuan|bang|bos|ke|tak|x\s?mau|macam|mcm|saya|sy|kami|harga|jual|beli|lagi|stok|pagi|petang|malam|salam|tnya|tanya|ape|khabar|kew|ye|dgn|utk|esok|arini)\b/i;
 
@@ -134,23 +140,33 @@ async function stockLineFor(cat, text, lang){
       ? ` Kami Zontes dealer — sesiapa book awal dengan kami akan dapat stock cepat & mystery gift 🎁 Beli Zontes, beli dengan TM Motoworld 😁`
       : ` Book awal dengan kami untuk dapat unit cepat ya 👍`);
   }
-  if (r.matches && r.matches.length){
-    // Dedupe by name (same bike can be listed used + NEW). ONE match → safe to quote its price.
-    // SEVERAL distinct matches → the customer's model is ambiguous ("Aveta 250" = Nova 250 /
-    // Vanguard 250 / VTM 250...) — list the options and ask which one, never quote a single
-    // cheapest price across different bikes (Harith 2026-07-22: ask to clarify instead).
-    const seen = new Set();
-    const uniq = r.matches.filter(m => { const k = m.name.toLowerCase(); if (seen.has(k)) return false; seen.add(k); return true; });
-    if (uniq.length === 1){
-      const price = uniq[0].price > 0 ? uniq[0].price : 0;
-      return lang === 'en'
-        ? (price ? `✅ Yes, we have stock — from RM ${price.toLocaleString()}.` : `✅ Yes, we have stock available.`)
-        : (price ? `✅ Ada, stok tersedia — dari RM ${price.toLocaleString()}.` : `✅ Ada, stok tersedia.`);
-    }
-    const lines = uniq.slice(0, 4).map(m => `• ${m.name}${m.price > 0 ? ' — RM ' + m.price.toLocaleString() : ''}`).join('\n');
+  // A customer asking for a NEW bike is asking a question this catalog cannot answer. Woo holds
+  // TM's USED inventory — one row per physical secondhand unit — plus 87 hand-typed "NEW …" rows
+  // that nobody maintains (one is priced RM 888,888.8888, one has no price, and there is no new
+  // Forza 250 row at all, which is exactly how "forza 250 baru" got quoted a 42,000km 2022 unit).
+  // So: no stock claim, no price. Take the one qualifier the salesperson always needs, and assign.
+  // (Benjamin, 2026-08-10: "get whatever you are supposed to get, help sales person to qualify
+  // then assign, no need answer so many question.")
+  const usedM = (r.matches || []).filter(m => !m.isNew);
+  if (RE_WANTS_NEW.test(String(text || '')) || (!usedM.length && (r.matches || []).some(m => m.isNew))){
     return lang === 'en'
-      ? `✅ We have a few options in stock:\n${lines}\nWhich one are you interested in?`
-      : `✅ Ada beberapa pilihan dalam stok:\n${lines}\nYang mana satu bos berminat ya?`;
+      ? `👍 For a brand-new unit our salesperson will confirm stock & the OTR price with you. Cash or loan?`
+      : `👍 Untuk unit baru, salesman kami akan confirm stok & harga OTR dengan bos ya. Bos nak cash atau loan?`;
+  }
+  if (usedM.length){
+    // Name the actual unit — year is in the title, mileage beside it. The old line said only
+    // "dari RM 22,800", which reads as the price of an MT-09 rather than of ONE 2015 bike with
+    // 79,000 km on it. Same source of truth, no price, and the salesperson gets a warm opening.
+    const km = m => m.mileage > 0 ? ` (${m.mileage.toLocaleString()} km)` : '';
+    if (usedM.length === 1) return lang === 'en'
+      ? `✅ Yes — ${usedM[0].name}${km(usedM[0])} is available. Our salesperson will confirm the price & monthly plan with you.`
+      : `✅ Ada — ${usedM[0].name}${km(usedM[0])}. Salesman kami akan confirm harga & plan bulanan dengan bos ya.`;
+    // SEVERAL distinct matches → the customer's model is ambiguous ("Aveta 250" = Nova 250 /
+    // Vanguard 250 / VTM 250...) — list them and ask which one (Harith 2026-07-22).
+    const lines = usedM.slice(0, 4).map(m => `• ${m.name}${km(m)}`).join('\n');
+    return lang === 'en'
+      ? `✅ We have a few units in stock:\n${lines}\nWhich one are you interested in? Our salesperson will give you the price & plan.`
+      : `✅ Ada beberapa unit dalam stok:\n${lines}\nYang mana satu bos berminat ya? Salesman kami akan bagi harga & plan.`;
   }
   // NO match ≠ NO stock (2026-07-24: ER6N had 2 units instock + MT-07 was flagged outofstock in
   // Woo while physically available, yet both customers were told "takde stok"). A search miss or a

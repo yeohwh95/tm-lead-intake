@@ -79,9 +79,14 @@ const DEPS = {
   getUnavailable: async () => new Set(),
   log: () => {},
   isStaffPhone: p => String(p).endsWith('123773259'),
+  // Shape matches index.js `wooCheckStock` since 2026-08-10: NO price field (deliberately removed —
+  // the salesperson owns price), plus `isNew` and `mileage`.
   wooCheckStock: async (q) => /aveta 250/i.test(q)
-    ? { matches: [{ name: 'NEW AVETA NOVA 250', price: 14388 }, { name: 'NEW AVETA VANGUARD 250', price: 16300 }, { name: 'NEW AVETA VTM 250 LX', price: 12688 }] }
-    : /vulcan/i.test(q) ? { matches: [{ name: 'Kawasaki Vulcan S', price: 12800 }] }
+    ? { matches: [{ name: 'NEW AVETA NOVA 250', isNew: true, mileage: 0 }, { name: 'NEW AVETA VANGUARD 250', isNew: true, mileage: 0 }, { name: 'NEW AVETA VTM 250 LX', isNew: true, mileage: 0 }] }
+    : /vulcan/i.test(q) ? { matches: [{ name: 'Kawasaki Vulcan S', isNew: false, mileage: 38000 }] }
+    : /mt09|mt-09/i.test(q) ? { matches: [{ name: '2015 Yamaha MT-09 V1', isNew: false, mileage: 79000 }] }
+    : /forza/i.test(q) ? { matches: [{ name: '2022 Honda Forza 250', isNew: false, mileage: 42000 }] }
+    : /xmax/i.test(q) ? { matches: [{ name: '2024 Yamaha XMAX 250', isNew: false, mileage: 20000 }, { name: '2022 Yamaha XMAX 250', isNew: false, mileage: 143000 }] }
     : /175x/i.test(q) ? { matches: [], booking: [{ name: 'OPEN FOR BOOKING NEW ZONTES 175X' }] }
     : { matches: [] },
 };
@@ -124,7 +129,10 @@ ok(/ADIB : 017-8869542/.test(sent[sent.length-1].text), 'flow: reply carries ass
   // stock check (Harith feedback 07-20): product question w/ real WooCommerce match → reply states stock
   fr.onMessage({ jid: 'cust4@s.whatsapp.net', phone: '60144444444', kind: 'text', text: 'vulcan ada stok tak' });
   await wait(120);
-  ok(/Ada, stok tersedia.*RM 12,800/.test(sent[sent.length - 1].text), 'flow: stock check reports real WooCommerce stock');
+  const vul = sent[sent.length - 1].text;
+  ok(/✅ Ada — Kawasaki Vulcan S \(38,000 km\)/.test(vul), 'flow: stock check NAMES the exact unit + mileage');
+  ok(!/RM/.test(vul), 'flow: 🚨 no price ever reaches the customer (2026-08-10 — the salesperson owns price)');
+  ok(/salesman kami akan confirm harga/i.test(vul), 'flow: price is explicitly handed to the salesperson');
 
   // stock check: NO WooCommerce match → NEUTRAL line, never "takde stok" (2026-07-24: ER6N was
   // instock + MT-07 physically available, both customers told "takde stok" — a search miss or a
@@ -155,8 +163,11 @@ ok(/ADIB : 017-8869542/.test(sent[sent.length-1].text), 'flow: reply carries ass
   fr.onMessage({ jid: 'cust6@s.whatsapp.net', phone: '60166666666', kind: 'text', text: 'aveta 250 ada stock?' });
   await wait(120);
   const multi = sent[sent.length - 1].text;
-  ok(/beberapa pilihan/.test(multi) && /NOVA 250/.test(multi) && /VANGUARD 250/.test(multi), 'flow: ambiguous model lists the in-stock options');
-  ok(/Yang mana satu/.test(multi), 'flow: ambiguous model asks the customer to clarify');
+  // Aveta's whole line-up is NEW units, and the NEW half of the catalog is hand-typed and unmaintained
+  // (one row priced RM 888,888.8888) — so naming those units would itself be an unfounded stock claim.
+  // New → qualify and assign, never quote. Changed 2026-08-10; before this it listed them with prices.
+  ok(/unit baru/.test(multi) && /cash atau loan/i.test(multi), 'flow: an all-NEW match qualifies instead of quoting');
+  ok(!/RM/.test(multi) && !/14,388/.test(multi), 'flow: 🚨 no price on new units either');
   ok(!/dari RM/.test(multi), 'flow: ambiguous model never quotes a single lowest price');
 
   // ---- A (2026-07-24): LLM intent classification, regex fallback ----
@@ -180,7 +191,38 @@ ok(/ADIB : 017-8869542/.test(sent[sent.length-1].text), 'flow: reply carries ass
   // LLM throws (down/timeout) → regex fallback, stock line untouched
   fr.onMessage({ jid: 'custA3@s.whatsapp.net', phone: '60103030303', kind: 'text', text: 'vulcan ada stok tak api-down' });
   await wait(120);
-  ok(/Ada, stok tersedia.*RM 12,800/.test(sent[sent.length - 1].text), 'A: LLM error → regex fallback (product + stock check still work)');
+  ok(/✅ Ada — Kawasaki Vulcan S/.test(sent[sent.length - 1].text), 'A: LLM error → regex fallback (product + stock check still work)');
+
+  // ---- 2026-08-10 incident fixtures: three real customers, all three answered wrongly ----
+  // ① "Yamaha R1 ada ke cik" (08-10 10:10). Was offered three R15s; Adib corrected it 4 min later.
+  fr.onMessage({ jid: 'custYr1@s.whatsapp.net', phone: '60104040401', kind: 'text', text: 'Yamaha R1 ada ke cik' });
+  await wait(120);
+  const r1 = sent[sent.length - 1].text;
+  ok(!/R15/i.test(r1), '① R1: never offers an R15 again');
+  ok(/salesman kami akan confirm/i.test(r1), '① R1: defers to the salesperson (a search miss is never a "takde")');
+  ok(!/takde|tiada stok/i.test(r1), '① R1: still never makes a confident NEGATIVE claim either');
+  // ② "forza 250 baru ada? Cash berapa?" (08-08 20:14). Was quoted RM 20,800 off a 42,000km used unit;
+  //    staff apologised 08-10 12:41 and gave the real answer, OTR RM 28,800.
+  fr.onMessage({ jid: 'custFz@s.whatsapp.net', phone: '60104040402', kind: 'text', text: 'Hai nak tanya forza 250 baru ada? Cash berapa?' });
+  await wait(120);
+  const fz = sent[sent.length - 1].text;
+  ok(/unit baru/.test(fz) && /cash atau loan/i.test(fz), '② forza baru: asks the qualifier instead of answering');
+  ok(!/RM/.test(fz) && !/20,800/.test(fz), '② forza baru: 🚨 the RM 20,800 quote can never come back');
+  ok(!/2022 Honda Forza/.test(fz), '② forza baru: does not offer a USED unit to someone asking for new');
+  // ③ "mt09" (08-08 01:53). Was quoted a bare "dari RM 22,800" — read as the price of an MT-09
+  //    rather than of one 2015 bike with 79,000 km on it. Staff apologised 08-10 12:24.
+  fr.onMessage({ jid: 'custMt@s.whatsapp.net', phone: '60104040403', kind: 'text', text: 'Hi. Nak tanya mt09' });
+  await wait(120);
+  const mt = sent[sent.length - 1].text;
+  ok(/2015 Yamaha MT-09 V1 \(79,000 km\)/.test(mt), '③ mt09: names the actual unit — year AND mileage');
+  ok(!/RM/.test(mt) && !/22,800/.test(mt), '③ mt09: 🚨 no price');
+  // multi-unit used: list them, no prices
+  fr.onMessage({ jid: 'custXm@s.whatsapp.net', phone: '60104040404', kind: 'text', text: 'xmax 250 ada lagi?' });
+  await wait(120);
+  const xm = sent[sent.length - 1].text;
+  ok(/beberapa unit/.test(xm) && /143,000 km/.test(xm), 'multi used: lists each unit with its mileage');
+  ok(/Yang mana satu/.test(xm), 'multi used: still asks the customer to clarify (Harith 2026-07-22)');
+  ok(!/RM/.test(xm), 'multi used: 🚨 no price');
   // ---- rehydrateGreeted (2026-07-24): restored chats are NOT re-greeted after a deploy ----
   const nRe = fr.rehydrateGreeted([{ jid: 'custR1@s.whatsapp.net', ts: Date.now() - 3600e3 }, { jid: 'cust1@s.whatsapp.net', ts: 1 }]);
   ok(nRe === 1, 'rehydrate: only unknown chats added (live greeted state never overwritten)');
