@@ -3,6 +3,10 @@ process.env.FIRSTRESPONSE_ON = '1';
 process.env.FR_DEBOUNCE_MS = '30';
 const fs = require('fs');
 try { fs.unlinkSync(__dirname + '/fr_state.json'); } catch {}
+// Keep the decision log out of the repo AND out of the previous run's results — every events
+// assertion below counts, so a leftover file would make them pass for the wrong reason.
+process.env.FR_EVENTS_FILE = require('path').join(require('os').tmpdir(), `fr_events_test_${process.pid}.jsonl`);
+try { fs.unlinkSync(process.env.FR_EVENTS_FILE); } catch {}
 const fr = require('./firstresponse');
 
 let pass = 0, fail = 0;
@@ -166,6 +170,15 @@ ok(/ADIB : 017-8869542/.test(sent[sent.length-1].text), 'flow: reply carries ass
   fr.onMessage({ jid: 'staff@s.whatsapp.net', phone: '60123773259', kind: 'text', text: 'z800 ada' });
   await wait(120);
   ok(!sent.some(s => s.to === 'staff@s.whatsapp.net'), 'flow: staff number ignored');
+  {
+    // …but no longer SILENTLY ignored. The VPS inbox cross-check must apply the same staff
+    // exclusion the bot does, and the only drift-free way is for the bot to record it (a 5th copy
+    // of the roster on the VPS is how TM lost leads four times).
+    const st = fr.readFrEvents().text.split('\n').filter(Boolean).map(JSON.parse)
+      .filter(e => e.jid === 'staff@s.whatsapp.net');
+    ok(st.length === 1 && st[0].outcome === 'ai_skip' && st[0].note === 'staff_or_internal',
+       'flow: a staff chat is recorded as ai_skip(staff_or_internal), never counted as a lead');
+  }
 
   // one-touch: same customer again within 7d → silence
   const n = sent.length;
@@ -457,6 +470,93 @@ ok(/ADIB : 017-8869542/.test(sent[sent.length-1].text), 'flow: reply carries ass
   ok(sent[sent.length - 1].to === '60186528335@s.whatsapp.net', 'flow: @lid customer model-answer reply also sent to real phone jid');
   ok(assigned.some(a => a.want && /z900rs/i.test(a.want)), 'flow: @lid customer lead still written to Lark');
 
+  // ---- 2.1: the durable DECISION LOG (2026-08-14) ----
+  // Lark only records the leads that SUCCEEDED. A chat the bot skipped, held or handed to a human
+  // left no row anywhere, so "how many leads today and why weren't they assigned" was unanswerable
+  // by construction. One JSONL line per decision is what makes the client's report possible.
+  const evOf = jid => fr.readFrEvents().text.split('\n').filter(Boolean).map(JSON.parse).filter(e => e.jid === jid);
+  ok(fr.readFrEvents().ok === true, 'events: the log reads back cleanly');
+  {
+    // ① one event per decision, and the assigned one carries who took it + the CRM row id
+    const e1 = evOf('cust1@s.whatsapp.net');
+    ok(e1.length === 2 && e1[0].outcome === 'awaiting_model' && e1[1].outcome === 'assigned',
+       'events: greeting logs awaiting_model, the model answer supersedes it with assigned');
+    ok(e1[1].assignee === 'Adib' && e1[1].recordId === 'rec1' && e1[1].has_phone === true,
+       'events: an assigned lead carries assignee + recordId + has_phone');
+    ok(/z900rs/.test(e1[1].want), 'events: the customer\'s own words ride along (no second read needed)');
+
+    // ② off-hours → parked, not assigned
+    const e7 = evOf('cust7@s.whatsapp.net');
+    ok(e7.length === 1 && e7[0].outcome === 'parked' && e7[0].recordId === 'recN',
+       'events: an off-hours lead logs parked, with its Lark row');
+
+    // ③ nobody took it
+    ok(evOf('cust5@s.whatsapp.net').length === 1, 'events: exactly one event per ordinary flush');
+
+    // ④ a chat that was never decided on has no event at all — the log records DECISIONS, not traffic
+    ok(evOf('custSkip1@s.whatsapp.net').length === 0, 'events: nothing is logged for a chat the bot has not decided on yet');
+  }
+  {
+    // vendor / OTP: not a lead, but the chat must still be accounted for
+    fr.onMessage({ jid: 'custSkip1@s.whatsapp.net', phone: '60107070701', kind: 'text', text: '35935 is your Facebook confirmation code' });
+    await wait(120);
+    const e = evOf('custSkip1@s.whatsapp.net');
+    ok(e.length === 1 && e[0].outcome === 'ai_skip' && e[0].note === 'classifier_skip',
+       'events: a vendor/OTP message logs ai_skip(classifier_skip)');
+
+    // junk number: dropped at the door, but no longer silently
+    fr.onMessage({ jid: '447700900999@s.whatsapp.net', phone: '447700900999', kind: 'text', text: 'hello' });
+    await wait(60);
+    const j = evOf('447700900999@s.whatsapp.net');
+    ok(j.length === 1 && j[0].outcome === 'ai_skip' && j[0].note === 'junk_number',
+       'events: a junk 447* number logs ai_skip(junk_number), no separate bucket');
+
+    // a human owns the chat — a legitimate ending that used to leave no trace at all
+    fr.markHuman('custHum1@s.whatsapp.net');
+    fr.onMessage({ jid: 'custHum1@s.whatsapp.net', phone: '60107070702', kind: 'text', text: 'nak tanya cbr250' });
+    await wait(60);
+    const h = evOf('custHum1@s.whatsapp.net');
+    ok(h.length === 1 && h[0].outcome === 'human_owned', 'events: a human-owned chat logs human_owned');
+
+    // the 7-day re-greet guard: silent by design, but the cross-check must not read it as a
+    // webhook we never received (Benjamin approved the `repeat` outcome, 2026-08-14)
+    const nBefore = sent.length;
+    fr.onMessage({ jid: 'cust5@s.whatsapp.net', phone: '60155555555', kind: 'text', text: 'ninja 250 lagi ada?' });
+    await wait(120);
+    const rp = evOf('cust5@s.whatsapp.net');
+    ok(sent.length === nBefore, 'events: a repeat chatter still gets no second greeting (behaviour unchanged)');
+    ok(rp.length === 2 && rp[1].outcome === 'repeat' && rp[1].note === 'already_greeted_7d',
+       'events: …but it is now logged as `repeat`, excluded from lead totals, used only to reconcile');
+  }
+  {
+    // 🚨 A MISSING LOG AND AN UNREADABLE LOG ARE OPPOSITE FACTS. Found 2026-08-14 by pointing the
+    // live endpoint at a bad path: it answered "0 leads" with total confidence. On Render that is
+    // one unmounted /data disk away from telling the client a quiet day when the bot was busy.
+    const realRead = fs.readFileSync, realAccess = fs.accessSync;
+    const enoent = () => { const e = new Error('ENOENT: no such file or directory'); e.code = 'ENOENT'; throw e; };
+    fs.readFileSync = enoent;
+    fs.accessSync = () => {};                       // directory IS there → a genuinely fresh disk
+    const fresh = fr.readFrEvents();
+    ok(fresh.ok === true && fresh.text === '', 'read: a missing file in a healthy directory is an EMPTY log, not a failure');
+    fs.accessSync = enoent;                         // directory is NOT there → disk unmounted / bad path
+    const broken = fr.readFrEvents();
+    ok(broken.ok === false && /directory is unreadable/.test(broken.error),
+       '🚨 read: a missing DIRECTORY is a READ FAILURE, so the card says "couldn\'t read" instead of 0');
+    fs.readFileSync = realRead; fs.accessSync = realAccess;
+    ok(fr.readFrEvents().ok === true, 'read: restored cleanly');
+  }
+  {
+    // 🚨 BEST-EFFORT: monitoring must never break a lead. A full disk costs a log line, not a customer.
+    const realAppend = fs.appendFileSync;
+    fs.appendFileSync = () => { throw new Error('ENOSPC: no space left on device'); };
+    const nBefore = sent.length, aBefore = assigned.length;
+    fr.onMessage({ jid: 'custEnospc@s.whatsapp.net', phone: '60107070703', kind: 'text', text: 'nak tanya vulcan ada?' });
+    await wait(150);
+    fs.appendFileSync = realAppend;
+    ok(sent.length === nBefore + 1, '🚨 events: a throwing appendFileSync NEVER costs the customer their reply');
+    ok(assigned.length > aBefore, '🚨 events: …and the lead is still written to Lark and assigned');
+  }
+
   // ---- 🚨 SUITE-WIDE DASH REGRESSION (2026-08-14) ----
   // Every message the bot actually SENT during this whole file, in both languages, across every
   // category, stock shape, off-hours state and @lid path. This is the assert that survives a future
@@ -475,5 +575,6 @@ ok(/ADIB : 017-8869542/.test(sent[sent.length-1].text), 'flow: reply carries ass
   }
 
   console.log(`\n${pass} passed, ${fail} failed`);
+  try { fs.unlinkSync(process.env.FR_EVENTS_FILE); } catch {}
   process.exit(fail ? 1 : 0);
 })();

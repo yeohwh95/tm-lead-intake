@@ -241,6 +241,7 @@ async function assign(cat, jid, phone, wantText, ctx){
     let recordId = null;
     try { recordId = await D.larkWriteLead({ phone, name: '', want: 'TRADE-IN: ' + want, brand: '', origin: 'WhatsApp Direct', assignee: 'Fitri', staff: FITRI }); }
     catch(e){ D.log('FR lark err (sell):', String(e.message||e).slice(0,60)); }
+    if (ctx) ctx.recordId = recordId || null;   // null here = the Lark write FAILED; the report counts those
     const fitriMsg = `🔁 *Trade-in Lead (auto)*\n\n🎯 ${want}\n👉 https://wa.me/${phone.replace(/\D/g,'')}\n\nCustomer dah dapat reply pertama, follow up ya.`;
     if (defer){
       // jid + gated ride along so the drain can close this lead's story in the gate log tomorrow
@@ -266,6 +267,7 @@ async function assign(cat, jid, phone, wantText, ctx){
   const enriched = D.assignLeads([{ phone, name: '', interest: prefix + want, brand: '' }], { origin: 'WhatsApp Direct', noAssign: defer }, unavail);
   const l = enriched[0];
   try { l.recordId = await D.larkWriteLead(l); } catch(e){ D.log('FR lark err:', String(e.message||e).slice(0,60)); }
+  if (ctx) ctx.recordId = l.recordId || null;   // null here = the Lark write FAILED; the report counts those
   if (defer){
     D.deferStaffNotify({ kind: 'pool', phone, want: l.want, brand: l.brand, recordId: l.recordId || null, jid, gated, cat });
     D.log(`FR 🌙 ${cat.toUpperCase()} lead deferred to office hours (${phone}) "${want}"`);
@@ -349,6 +351,44 @@ function gateReadEvents(limit){
     const lines = fs.readFileSync(GATE_LOG_FILE, 'utf8').trim().split('\n').filter(Boolean);
     return lines.slice(-(limit || 200)).map(l => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
   } catch { return []; }
+}
+
+// ---------- Decision log (2026-08-14) ----------
+// The client's question is "how many leads today, how many assigned, and WHY not the rest".
+// Nothing could answer it: Render rotates logs in hours, and Lark only records the leads that
+// SUCCEEDED — a chat the bot decided to skip, hold, or hand to a human leaves no row at all, so
+// "why not" was unanswerable by construction. One durable JSONL line per DECISION fixes that.
+// Same derivation as the gate log, so it lands on /data in prod with no extra env var.
+const FR_EVENTS_FILE = process.env.FR_EVENTS_FILE
+  || (process.env.FR_STATE_FILE ? path.join(path.dirname(process.env.FR_STATE_FILE), 'fr_events.jsonl')
+                                : path.join(__dirname, 'fr_events.jsonl'));
+
+// 🚨 BEST-EFFORT, ALWAYS. Monitoring must never break a lead — a full disk or a bad permission
+// costs a log line, never a customer. Mirrors gateLogEvent byte-for-byte on purpose.
+function frLogEvent(outcome, jid, fields){
+  const rec = Object.assign({ ts: Math.floor(Date.now() / 1000), jid, outcome }, fields || {});
+  try { fs.appendFileSync(FR_EVENTS_FILE, JSON.stringify(rec) + '\n'); }
+  catch(e){ D.log && D.log('FR event log write failed:', String(e.message||e).slice(0,50)); }
+}
+
+function readFrEvents(limit){
+  try {
+    const lines = fs.readFileSync(FR_EVENTS_FILE, 'utf8').trim().split('\n').filter(Boolean);
+    return { ok: true, text: (limit ? lines.slice(-limit) : lines).join('\n') };
+  } catch(e){
+    // 🚨 ENOENT means two OPPOSITE things and they must not be conflated (caught 2026-08-14 by
+    // running the endpoint against a bad path — it answered "0 leads" with total confidence):
+    //   • the FILE is missing but its directory is fine → a fresh disk, no lead decided yet.
+    //     Legitimately empty. Report 0.
+    //   • the DIRECTORY is missing/unreadable → the Render disk is not mounted, or FR_EVENTS_FILE
+    //     has a typo. Reporting "0 leads today" then is the exact lie this module exists to stop.
+    if (e && e.code === 'ENOENT'){
+      const dir = path.dirname(FR_EVENTS_FILE);
+      try { fs.accessSync(dir); return { ok: true, text: '' }; }
+      catch { return { ok: false, error: `decision-log directory is unreadable (${dir})`, text: '' }; }
+    }
+    return { ok: false, error: String(e.message || e).slice(0, 120), text: '' };
+  }
 }
 
 const GATE_MS = Number(process.env.FR_GATE_MS || 60 * 60 * 1000);
@@ -449,6 +489,10 @@ function gateHold(jid, cat, want, lang){
   persist();
   D.log(`FR ⏳ HELD for phone — ${cat} (${jid.slice(0, 22)}) "${String(want).slice(0, 40)}"`);
   gateLogEvent('held', jid, { cat, first_message: String(want).slice(0, 120) });
+  // Held is a real, reportable state: the customer asked, we answered, and nobody can act on it
+  // yet. Superseded by the release's assigned/parked/no_rep (the summary keeps the LATEST event
+  // per jid), so a lead that resolves is never double-counted.
+  frLogEvent('gate_held', jid, { has_phone: false, cat, phone: '', want: String(want).slice(0, 120), recordId: null });
 }
 
 // Release a held lead: assign for real, then tell the customer who has them.
@@ -462,6 +506,12 @@ async function gateRelease(jid, h, phone, reason){
   D.log(`FR ✅ gate released (${reason}) — ${h.cat} ${phone ? '+' + phone : 'NO PHONE'} (${jid.slice(0,22)})`
     + (ctx.outcome && ctx.outcome !== 'assigned' ? ` [${ctx.outcome}]` : ''));
   if (ctx.outcome === 'no_rep') D.log(`FR 🚨 NO SALESPERSON took the released lead (${jid.slice(0,22)}) — Lark row has no owner`);
+  // The lead's real outcome. Logged HERE and not inside assign(), so a gate release produces
+  // exactly one decision event rather than one from each layer.
+  frLogEvent(ctx.outcome || 'assigned', jid, {
+    has_phone: !!phone, cat: h.cat, assignee: ctx.assignee || (card && card.name) || '',
+    phone: phone || '', want: String(h.want || '').slice(0, 120), recordId: ctx.recordId || null,
+    note: 'gate_' + reason });
   gateLogEvent(reason === 'timeout' ? 'timeout' : 'assigned', jid, {
     cat: h.cat, phone: phone || '', reason,
     salesperson: (card && card.name) || ctx.assignee || '',
@@ -545,6 +595,8 @@ async function gateSweep(){
       gateLogEvent('human_takeover', jid, {
         cat: h && h.cat, reason: 'human replied during the hold',
         held_seconds: Math.round((now - ((h && h.ts) || now)) / 1000) });
+      frLogEvent('human_owned', jid, { has_phone: false, cat: (h && h.cat) || '', phone: '',
+        want: String((h && h.want) || '').slice(0, 120), recordId: null, note: 'gate_human_takeover' });
       continue;
     }
     try { await gateRelease(jid, h || { cat: 'product', want: 'WhatsApp direct inquiry', lang: 'bm' }, '', 'timeout'); }
@@ -584,15 +636,42 @@ async function flush(jid){
       await D.waSend(sendTarget(jid, b.phone), gateAsk(lang));
       return;
     }
-    const card = await assign(finalCat, jid, b.phone, want);
+    const ctx = {};
+    const card = await assign(finalCat, jid, b.phone, want, ctx);
+    frLogEvent(ctx.outcome || 'assigned', jid, { has_phone: !!b.phone, cat: finalCat,
+      assignee: ctx.assignee || '', phone: b.phone || '', want: String(want).slice(0, 120),
+      recordId: ctx.recordId || null });
     await D.waSend(sendTarget(jid, b.phone), tpl(finalCat, lang, card, stockLine, closed));
     return;
   }
-  if (cat === 'skip') { D.log('FR skip (unclassified/vendor):', jid.slice(0, 20)); return; }
-  if (state.greeted[jid] && now - state.greeted[jid] < REGREET_MS) return;   // one touch per 7d
+  if (cat === 'skip'){
+    D.log('FR skip (unclassified/vendor):', jid.slice(0, 20));
+    // Not a sales lead — vendor auto-reply / OTP / unrelated long text. Reported on its own line
+    // ("not sales leads"), never folded into the lead total, but logged so the inbox cross-check
+    // can account for the chat instead of flagging it as a webhook we never received.
+    frLogEvent('ai_skip', jid, { has_phone: !!b.phone, cat: 'skip', phone: b.phone || '',
+      want: String(text).slice(0, 120), recordId: null, note: 'classifier_skip' });
+    return;
+  }
+  if (state.greeted[jid] && now - state.greeted[jid] < REGREET_MS){
+    // Already greeted within 7 days and this is not an answer we were waiting for, so the bot stays
+    // quiet by design. Logged as `repeat` (Benjamin, 2026-08-14): excluded from every lead count,
+    // and used ONLY so the inbox cross-check does not read a returning chatter as a missed webhook.
+    frLogEvent('repeat', jid, { has_phone: !!b.phone, cat, phone: b.phone || '',
+      want: String(text).slice(0, 120), recordId: null, note: 'already_greeted_7d' });
+    return;   // one touch per 7d
+  }
   state.greeted[jid] = now;
 
-  if (cat === 'greeting'){ state.pending[jid] = { ts: now }; persist(); await D.waSend(sendTarget(jid, b.phone), tpl('greeting', lang)); return; }
+  if (cat === 'greeting'){
+    state.pending[jid] = { ts: now }; persist();
+    // We asked which bike; until they answer, nobody can be assigned. Superseded by the answer's
+    // own event, so this only ever shows up for customers who never replied.
+    frLogEvent('awaiting_model', jid, { has_phone: !!b.phone, cat: 'greeting', phone: b.phone || '',
+      want: String(text).slice(0, 120), recordId: null });
+    await D.waSend(sendTarget(jid, b.phone), tpl('greeting', lang));
+    return;
+  }
   persist();
   const stockLine = await stockLineFor(cat, imageOnly ? '' : text, lang);
   const want = imageOnly ? '[gambar/screenshot iklan]' : text;
@@ -603,7 +682,11 @@ async function flush(jid){
     await D.waSend(sendTarget(jid, b.phone), gateAsk(lang));
     return;
   }
-  const card = await assign(cat, jid, b.phone, want);
+  const ctx = {};
+  const card = await assign(cat, jid, b.phone, want, ctx);
+  frLogEvent(ctx.outcome || 'assigned', jid, { has_phone: !!b.phone, cat,
+    assignee: ctx.assignee || '', phone: b.phone || '', want: String(want).slice(0, 120),
+    recordId: ctx.recordId || null });
   await D.waSend(sendTarget(jid, b.phone), tpl(cat, lang, card, stockLine, closed));
 }
 
@@ -612,7 +695,16 @@ function onMessage(info){
   try {
     if (!ON()) return;
     if (!info.jid || info.jid.endsWith('@g.us')) return;
-    if (D.isStaffPhone && D.isStaffPhone(info.phone)) return;
+    if (D.isStaffPhone && D.isStaffPhone(info.phone)){
+      // Logged, not silent — and deliberately so. The box-66 inbox cross-check has to apply the
+      // SAME staff exclusion the bot applies, and the only drift-free way to do that is for the
+      // bot to say which chats were staff. The alternative is a 5th copy of the roster on the VPS,
+      // and roster drift has already cost TM leads four separate times. Non-lead bucket, so it
+      // never touches the totals.
+      frLogEvent('ai_skip', info.jid, { has_phone: !!info.phone, cat: '', phone: String(info.phone || ''),
+        want: '', recordId: null, note: 'staff_or_internal' });
+      return;
+    }
     // A human already owns this chat — EXCEPT while we are mid-flow and waiting on the customer
     // for something we asked for. `markHuman` fires on ANY fromMe message, and the bot's OWN sends
     // echo back as fromMe, so this chat is flagged the instant the bot replies. Without the
@@ -624,7 +716,14 @@ function onMessage(info){
     // (@Keekzy77 · @hkm.hkmi) — all silently dropped. The gate reported 0/8 conversion when the
     // truth was 4/4. Any future "waiting on the customer" state MUST be added here too.
     const midFlow = state.pending[info.jid] || (state.awaitingPhone || {})[info.jid];
-    if (humanTouched.has(info.jid) && !midFlow) return;
+    if (humanTouched.has(info.jid) && !midFlow){
+      // A human owns this chat. That is a legitimate ending (TM staff watch this inbox), but it
+      // used to leave no trace at all, so the day's story had a hole exactly where the bot chose
+      // to do nothing. Logged every time; the summary keeps one per jid.
+      frLogEvent('human_owned', info.jid, { has_phone: !!info.phone, cat: '', phone: String(info.phone || ''),
+        want: String(info.text || info.caption || '').slice(0, 120), recordId: null });
+      return;
+    }
     // 🐛→✅ 2026-08-02 — a @lid customer with NO phone at all.
     // WhatsApp sometimes discloses no phone whatsoever for a privacy-addressed chat: the raw webhook
     // carries only `key.remoteJid` + `key.senderLid`, both the @lid, and WaSender's /api/contacts has
@@ -645,8 +744,15 @@ function onMessage(info){
              || (isLid ? '' : String(info.jid).split('@')[0].replace(/\D/g, ''));
     // The junk-number guards below only make sense for a REAL phone. An @lid chat with no phone is a
     // genuine customer and must never be filtered out by rules written for phone numbers.
-    if (num) { if (num.startsWith('447') || num.length > 13) return; }
-    else if (!isLid) return;                       // no phone and not a @lid → nothing to work with
+    if (num) { if (num.startsWith('447') || num.length > 13){
+      frLogEvent('ai_skip', info.jid, { has_phone: true, cat: '', phone: num, want: '', recordId: null, note: 'junk_number' });
+      return;
+    } }
+    else if (!isLid){                              // no phone and not a @lid → nothing to work with
+      // Should not happen. If it ever does we want to SEE it rather than lose the chat silently.
+      frLogEvent('ai_skip', info.jid, { has_phone: false, cat: '', phone: '', want: '', recordId: null, note: 'no_identity' });
+      return;
+    }
     const b = buffers[info.jid] = buffers[info.jid] || { texts: [], hasImage: false, phone: num, timer: null };
     if (info.kind === 'image') b.hasImage = true;
     const t = info.text || info.caption || '';
@@ -674,9 +780,10 @@ function rehydrateGreeted(entries){
 }
 
 function init(deps){ D = deps; D.log('firstresponse init — ON:', ON(), 'debounce:', DEBOUNCE_MS + 'ms'); }
-module.exports = { init, onMessage, markHuman, rehydrateGreeted, gateSweep, gateReadEvents, gateLogParked,
+module.exports = { init, onMessage, markHuman, rehydrateGreeted, gateSweep, gateReadEvents, gateLogParked, readFrEvents,
   gateStatus: () => Object.entries(state.awaitingPhone || {}).map(([jid, h]) => ({
     jid, cat: h.cat, asks: h.asks, note: h.note || '',
     waitingMin: Math.round((Date.now() - (h.ts || Date.now())) / 60000),
     minutesLeft: Math.max(0, Math.round((GATE_MS - (Date.now() - (h.ts || Date.now()))) / 60000)) })),
-  _gateParsePhone: gateParsePhone, _classify: classify, _tpl: tpl, _isEnglish: isEnglish, _state: () => state, RE_BIKE };
+  _gateParsePhone: gateParsePhone, _classify: classify, _tpl: tpl, _isEnglish: isEnglish, _state: () => state,
+  _frLogEvent: frLogEvent, _eventsFile: () => FR_EVENTS_FILE, RE_BIKE };

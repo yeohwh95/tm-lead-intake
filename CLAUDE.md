@@ -2,6 +2,98 @@
 
 WhatsApp lead → AI extract → Lark CRM + notify the assigned salesperson. **LIVE.**
 
+## 📋 "HOW MANY LEADS TODAY, HOW MANY ASSIGNED, WHY NOT THE REST" — 2026-08-14 (batch 2)
+⚠️ **CODE COMMITTED, NOT DEPLOYED.** The Render half is not live. The VPS half IS live and is
+deliberately idle until the endpoint ships (see the PENDING note below).
+
+Harith's ask is three numbers. **None of them could be answered**, and the reason is structural:
+**Lark only records the leads that SUCCEEDED.** A chat the bot skipped, held at the phone gate, or
+handed to a human writes no row at all — so "why wasn't it assigned" had no source. Render rotates
+logs within hours, so the only other trace was gone by morning.
+
+### The decision log (`fr_events.jsonl`)
+One JSONL line per DECISION, beside the gate log on `/data` (derived from `FR_STATE_FILE`, so no new
+env var in prod). Best-effort exactly like `gateLogEvent` — **a logging failure must never break a
+lead**, and there is a test that throws `ENOSPC` at it and asserts the customer still gets their
+reply and the lead still reaches Lark.
+
+| Outcome | When | Counts as a lead? |
+|---|---|---|
+| `assigned` · `parked` · `no_rep` | from `assign()`'s ctx, logged at the ONE call site per path | ✅ |
+| `gate_held` | phone gate holding — **Lark has no row for these at all**, so nothing else can see them | ✅ |
+| `awaiting_model` | greeted, waiting for "which bike" | ✅ |
+| `ai_skip` | vendor/OTP (`classifier_skip`), `junk_number`, `no_identity`, `staff_or_internal` | ❌ |
+| `human_owned` | a human replied first, or took over a hold | ❌ |
+| `repeat` | already greeted within 7d, bot silent by design | ❌ |
+
+- 🚨 **Logged at the CALL SITE, never inside `assign()`** — a gate release goes through `assign()`
+  too, so logging in both places would double-count every held lead.
+- **`repeat` exists only for reconciliation** (Benjamin approved). Without it the inbox cross-check
+  reads every returning chatter as a webhook the bot never received.
+- **`staff_or_internal` is logged on purpose.** The VPS cross-check has to apply the same staff
+  exclusion the bot applies, and the only drift-free way is for the bot to say so. The alternative
+  was a **5th copy of the roster** on box 66 — and roster drift has already cost TM leads four times.
+
+### `leadsummary.js` (+ `leadsummary_test.js`, 46 tests) — the three rules
+1. **Buckets are mutually exclusive and must sum, or the card says so.** `total` is counted
+   independently (one per lead chat) and compared to the sum of the buckets the card knows how to
+   print. An outcome nobody taught the file about lands in `other`, **breaks the sum**, and prints
+   `⚠️ buckets don't sum to the total (X vs Y)`. Tested with a deliberately bogus outcome.
+2. **Two independent sources, both numbers printed when they disagree.** Lark rows created that day
+   vs the log's `assigned + parked`. Lark unreadable says so; a 100-row page cap says so.
+3. 🚨 **A failed read says "couldn't read", never 0.** `summarize()` short-circuits before any
+   counting, so there is no code path where an unreadable log produces a number.
+- **Lead-day attribution**: a lead belongs to the MYT date of its FIRST event (96h lookback) and is
+  counted by its LATEST event. That is what stops a Friday lead being counted again on Monday —
+  Monday shows it as `🔁 earlier lead resolved today` instead.
+- 🚨 **PERMANENT FIXTURE: the 14 lost leads**, like the R1/forza ones. 8 on Fri 31 Jul + 6 on Sat
+  01 Aug, all `parked`, and Monday must claim none of them.
+
+### 🐛 Found by running it, not by reading it: ENOENT means two opposite things
+Pointing the live endpoint at a bad path made it answer **`total: 0`** with complete confidence.
+`readFrEvents` treated every `ENOENT` as "fresh disk, no leads yet". But **a missing FILE in a
+healthy directory** and **a missing DIRECTORY** are opposite facts: the second means `/data` is not
+mounted or `FR_EVENTS_FILE` has a typo, and reporting "0 leads today" then is the exact lie this
+whole module exists to prevent. Now it `accessSync`es the parent directory and returns a read error.
+**One unmounted disk away from telling the client a quiet day.**
+
+### Delivery
+- `digestTick` now has **three** windows: **12:00** SLA card **+ the summary appended to it** (one
+  message, not two) · **16:00 summary alone** (new) · **18:00 SLA end-of-day, byte-identical to
+  today**. Both summaries are **day-to-date** regardless of the SLA window above them.
+- ⚠️ **`digestTick` moved OUT of the `if (SLA_ON)` block.** It used to be registered inside it, so
+  toggling the SLA engine off would have silently killed the CLIENT's report too — the same
+  "9 unregistered reports" failure class. `buildDigest` gates the SLA half per-kind instead.
+- **Sunday is skipped** (TM operates Mon–Sat; Benjamin, 2026-08-14). The 18:00 SLA card is unchanged.
+- `GET /lead-summary?date=YYYY-MM-DD` — read-only. ⚠️ **A read failure returns HTTP 200 with
+  `read_error` and NO count fields**, never a 500: a 500 would leave the sentinel unable to tell
+  "bot down" from "log unreadable". `sent` exposes the digest markers so the probe can prove the
+  cards went out (durable now they live on `/data` — batch 1).
+
+### Box 66 — 🟢 LIVE, no new cron
+Backups taken: `audit_fr.py.bak-pre-summary-20260814` · `sentinel.py.bak-pre-tmsummary-20260814`.
+- **`audit_fr.py`** (existing 09:57 cron) gained a day-scoped cross-check: distinct non-group inbound
+  chats in the box-66 capture for yesterday vs `/lead-summary?date=yesterday`. Prints BOTH numbers
+  when they differ. ⚠️ It counts **`@lid` chats too** — the pre-existing 24h audit above it filters
+  on `@s.whatsapp.net` only and therefore **silently ignores 14% of TM's leads**. Not fixed here,
+  flagged.
+- **`sentinel.py`**: `tm-lead-summary-xcheck` + `tm-fr-audit` registered in `JOBS`, and
+  `probe_tm_summary()` probes the report BY OUTCOME (it runs inside Render and cannot beat here) —
+  after 12:30/16:30 MYT today's sent-marker must exist; a `read_error` is `BLIND`, not healthy.
+- 🚨 **I watched both refuse, for real.** Before the endpoint existed they went `FAILED` /
+  `UNKNOWN` and fired a real alert to the PA group. That is the guard working — but a 6-hourly alarm
+  for something nobody can fix until a deploy window opens is noise that trains people to ignore the
+  group. So "the bot answered but this route isn't on the deployed build" (non-JSON body) is now
+  **`PENDING`** and stays quiet; a genuine unreachable host is still `UNKNOWN` and still alerts.
+  **It flips to live by itself the moment the endpoint ships — nobody has to remember.**
+
+**Env:** `FR_EVENTS_FILE` only, and it is optional (defaults beside `FR_STATE_FILE` → `/data`).
+The 16:00 window is code, not config — a second env-driven clock is how the hours drifted in July.
+**Rollback:** the report is additive. Reverting removes the endpoint + the 16:00 window; the 12:00
+card returns to SLA-only and `fr_events.jsonl` keeps appending harmlessly. VPS: restore the two `.bak`s.
+
+Tests: leadsummary **46** (new) · firstresponse **172** · gate **70** · full suite **544**.
+
 ## 🚨 THE 14 LOST LEADS, AND WHY THE QUEUE COULD NOT SURVIVE A DEPLOY — 2026-08-14 (batch 1)
 ⚠️ **CODE COMMITTED, NOT DEPLOYED.** Nothing below is live until someone pushes and sets the env vars.
 

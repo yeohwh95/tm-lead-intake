@@ -12,6 +12,8 @@ process.env.FIRSTRESPONSE_ON = '1';
 process.env.FR_DEBOUNCE_MS = '5';        // flush almost immediately
 process.env.FR_GATE_MS = '60000';        // 60s hold so the timeout path is testable
 process.env.FR_STATE_FILE = require('path').join(require('os').tmpdir(), `fr_gate_test_${process.pid}.json`);
+process.env.FR_EVENTS_FILE = require('path').join(require('os').tmpdir(), `fr_gate_events_${process.pid}.jsonl`);
+try { require('fs').unlinkSync(process.env.FR_EVENTS_FILE); } catch {}
 
 const fr = require('./firstresponse.js');
 
@@ -295,6 +297,50 @@ const LIDD = '206218996011144';
   ok('\u{1F6A8} nobody taking the lead is recorded as no_rep', lastGate().assign_state === 'no_rep');
   ok('and it is loud in the log', logs.some(l => /NO SALESPERSON/.test(l)));
 
+  // -- 11. the decision log covers the gate too --------------------------------
+  // A held lead is the single most likely thing to be MISSING from a "why wasn't it assigned"
+  // report: no Lark row exists while it is held, so Lark alone can never see it.
+  console.log('\n11. The decision log records the gate\'s own outcomes');
+  const frEv = jid => fr.readFrEvents().text.split('\n').filter(Boolean).map(JSON.parse).filter(e => e.jid === jid);
+  const LID_F = '666666666666666@lid';
+  initWith();
+  reset();
+  fr.onMessage({ jid: LID_F, phone: '', kind: 'text', text: 'nak tanya harga Zontes 368G' });
+  await wait(80);
+  const held = frEv(LID_F);
+  ok('a held lead logs gate_held (Lark has no row for it at all yet)',
+     held.length === 1 && held[0].outcome === 'gate_held' && held[0].has_phone === false);
+  fr.onMessage({ jid: LID_F, phone: '', kind: 'text', text: '0148369971' });
+  await wait(80);
+  const rel = frEv(LID_F);
+  ok('\u{1F6A8} the release supersedes it with assigned, so the lead counts ONCE',
+     rel.length === 2 && rel[1].outcome === 'assigned' && rel[1].assignee === 'Nazrin');
+  ok('and the release carries the number the customer finally gave', rel[1].phone === '60148369971' && rel[1].has_phone === true);
+  ok('plus the Lark row it created, so the cross-check is mechanical', rel[1].recordId === 'rec1');
+
+  // A hold a human takes over is a real ending and must be recorded as one.
+  const LID_G = '777777777777777@lid';
+  reset();
+  fr.onMessage({ jid: LID_G, phone: '', kind: 'text', text: 'nak tanya harga Zontes' });
+  await wait(80);
+  fr.markHuman(LID_G);
+  fr._state().awaitingPhone[LID_G].ts = Date.now() - 61000;
+  await fr.gateSweep();
+  const ht = frEv(LID_G);
+  ok('a human takeover during a hold logs human_owned, not a phantom lead',
+     ht.length === 2 && ht[1].outcome === 'human_owned' && ht[1].note === 'gate_human_takeover');
+
+  // A timed-out hold still resolves to a real outcome -- nobody is left in `gate_held` forever.
+  const LID_H = '888888888888888@lid';
+  reset();
+  fr.onMessage({ jid: LID_H, phone: '', kind: 'text', text: 'nak tanya harga Zontes' });
+  await wait(80);
+  fr._state().awaitingPhone[LID_H].ts = Date.now() - 61000;
+  await fr.gateSweep();
+  const to = frEv(LID_H);
+  ok('a timed-out hold resolves to assigned with no phone (never stuck in gate_held)',
+     to.length === 2 && to[1].outcome === 'assigned' && to[1].has_phone === false);
+
   // ⚠️ SUITE-WIDE DASH REGRESSION (2026-08-14). This file drives gateAsk / gateWhy /
   // gateUsername / gateGot / gateGotUser through REAL flows in both the ask and release paths —
   // exactly the copy the hand-written sweep inventory had missed two lines of.
@@ -309,5 +355,6 @@ const LIDD = '206218996011144';
 
   console.log(`\n${'='.repeat(54)}\n  ${pass} passed, ${fail} failed\n${'='.repeat(54)}`);
   try { require('fs').unlinkSync(process.env.FR_STATE_FILE); } catch {}
+  try { require('fs').unlinkSync(process.env.FR_EVENTS_FILE); } catch {}
   process.exit(fail ? 1 : 0);
 })();

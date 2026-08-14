@@ -99,7 +99,61 @@ async function slaWindowStats(sinceMs, untilMs){
   }
   return out;
 }
-async function buildDigest(label, sinceMs){
+// ---- ASSIGNMENT SUMMARY (2026-08-14) — "how many leads today, how many assigned, why not the rest" ----
+// The counting lives in leadsummary.js (pure + unit-tested); this file only fetches.
+const leadsummary = require('./leadsummary');
+// CROSS-CHECK SOURCE #2 (rule: two independent sources, and when they disagree print BOTH).
+// The decision log says what the BOT decided; Lark says what actually reached the CRM. A gap either
+// way is real information: a failed Lark write, or rows created by a path the bot never saw.
+async function larkSummaryCross(dayStartMs, dayEndMs){
+  try {
+    const items = await larkSearch({
+      filter: { conjunction: 'and', conditions: [{ field_name: 'Origin', operator: 'is', value: ['WhatsApp Direct'] }] },
+      sort: [{ field_name: 'date created', desc: true }],
+    });
+    let rows = 0;
+    for (const it of items){
+      const created = slaRecCreated(it.fields || {});
+      if (created >= dayStartMs && created < dayEndMs) rows++;
+    }
+    // NO SILENT CAPS — the same rule slaWindowStats follows. A truncated read must never look
+    // like full coverage.
+    return { rows, capped: items.length >= 100, error: null };
+  } catch (e){ return { rows: 0, capped: false, error: String(e.message || e).slice(0, 80) }; }
+}
+// Read + summarise one MYT day. Returns { summary, cross }. A read failure propagates as
+// `read_error` all the way to the card, which then prints "couldn't read" and NO counts.
+async function buildLeadSummary(dateStr, withCross){
+  const r = firstresponse.readFrEvents();
+  const parsed = r.ok ? leadsummary.parseEvents(r.text) : { events: [], parse_errors: 0 };
+  const summary = leadsummary.summarize(parsed.events, dateStr, Date.now(),
+    { parse_errors: parsed.parse_errors, read_error: r.ok ? null : r.error });
+  const dayStart = Date.parse(dateStr + 'T00:00:00Z') - MYT_OFF;
+  const cross = withCross && LIVE_LARK ? { lark: await larkSummaryCross(dayStart, dayStart + 24 * 3600e3) } : {};
+  return { summary, cross };
+}
+
+async function buildDigest(label, sinceMs, kind){
+  kind = kind || 'sla';
+  // The summary half is ALWAYS day-to-date (midnight MYT → now), whatever SLA window sits above it.
+  const summarySection = async () => {
+    try {
+      const { summary, cross } = await buildLeadSummary(mytNow().date, true);
+      return leadsummary.summaryText(summary, cross);
+    } catch (e){
+      log('digest summary err', String(e.message || e).slice(0, 80));
+      return `📋 *Leads today*\n⚠️ couldn't build the lead summary: ${String(e.message || e).slice(0, 80)}`;
+    }
+  };
+  // Summary-only card: no SLA half at all, so it survives SLA_ON being toggled off.
+  if (kind === 'summary') return await summarySection();
+  // SLA half is meaningless without the SLA engine — say nothing rather than print an empty card.
+  if (!SLA_ON) return kind === 'sla+summary' ? await summarySection() : null;
+  const sla_part = await buildSlaDigest(label, sinceMs);
+  return kind === 'sla+summary' ? sla_part + '\n\n' + '─'.repeat(18) + '\n\n' + await summarySection() : sla_part;
+}
+
+async function buildSlaDigest(label, sinceMs){
   const evs = digest.events.filter(e => e.t >= sinceMs);
   const flags = evs.filter(e => e.type === 'flag');
   const moves = evs.filter(e => e.type === 'reassign');
@@ -141,16 +195,27 @@ async function buildDigest(label, sinceMs){
   if (BOOT_AT > sinceMs) L.push('', `ℹ️ Bot restarted at ${hhmmMYT(BOOT_AT)} — the lists above may be incomplete. The totals are read from Lark and unaffected.`);
   return L.join('\n');
 }
-// checks every 5 min; fires once when it crosses 12:00 and 18:00 MYT (health poller keeps the bot awake)
+// checks every 5 min; fires once when it crosses 12:00, 16:00 and 18:00 MYT (health poller keeps the bot awake)
 async function digestTick(){
   const p = mytNow();
-  const windows = [[12, 'Midday update (9AM–12PM)', 0], [18, 'End-of-day update (12PM–6PM)', 12]];
-  for (const [hr, label, startHr] of windows){
+  // TM operates Mon–Sat. A Sunday summary is noise, so the summary halves are skipped then
+  // (Benjamin, 2026-08-14). The 18:00 SLA-only card keeps today's behaviour exactly.
+  const isSunday = new Date(Date.now() + MYT_OFF).getUTCDay() === 0;
+  const windows = [
+    [12, 'Midday update (9AM–12PM)',    0,  isSunday ? 'sla' : 'sla+summary'],  // ONE card, not two
+    [16, 'Lead summary (day so far)',   0,  isSunday ? null  : 'summary'],      // NEW: the client's report
+    [18, 'End-of-day update (12PM–6PM)', 12, 'sla'],                            // UNCHANGED
+  ];
+  for (const [hr, label, startHr, kind] of windows){
+    if (!kind) continue;
     const key = `${p.date}:${hr}`;
     if (p.h === hr && p.m < 15 && !digest.sent[key]){
       const since = Date.parse(p.date + 'T00:00:00Z') - MYT_OFF + startHr * 3600 * 1000;
       digest.sent[key] = true;   // claim the slot BEFORE the awaited build/send so a slow Lark read can't double-fire
-      try { await alertReview(await buildDigest(label, since)); }
+      try {
+        const card = await buildDigest(label, since, kind);
+        if (card) await alertReview(card);
+      }
       catch (e){ log('digest send err', String(e.message || e)); }
       const cut = Date.now() - 26 * 3600 * 1000;
       digest.events = digest.events.filter(e => e.t >= cut);
@@ -1152,14 +1217,18 @@ setInterval(() => { firstresponse.gateSweep().catch(e => log('FR gate sweep err'
   log('🕘 Operating hours (told to customers): ' + hoursLabel().en + ' / ' + hoursLabel().bm);
   log('🕘 Lead auto-assignment window: ' + fmtHours(FR_DIST_DAYS, FR_DIST_START, FR_DIST_END).en + ' — deliberately narrower than operating hours');
   setTimeout(() => rehydrateFromLark().catch(e => log('rehydrate err:', String(e.message||e).slice(0,80))), 20000);
+  // GROUP UPDATES: ONE batched card at 12:00 (SLA + lead summary), the lead summary alone at 16:00,
+  // and the SLA end-of-day at 18:00. ⚠️ Registered OUTSIDE the SLA_ON gate on purpose (2026-08-14):
+  // it used to live inside it, so toggling the SLA engine off would have silently killed the
+  // CLIENT's report too. That is exactly the "9 unregistered reports" failure class. buildDigest
+  // gates the SLA half per-kind instead, so an SLA-off bot still sends the lead summary.
+  setInterval(() => { digestTick().catch(e => log('digest tick err', String(e.message || e))); }, 5 * 60 * 1000);
   if (SLA_ON){   // these belong to the SLA engine — keep them gated exactly as before the FR wiring
     // SLA SWEEP — enrol every new Lark lead (any source) into SLA. OFF unless SLA_SWEEP=1 + SLA_SWEEP_FROM set.
     if (process.env.SLA_SWEEP === '1'){
       setInterval(() => { slaSweep().catch(e => log('sla sweep err', String(e.message||e))); }, 3 * 60 * 1000);
       log('🧹 SLA sweep ON — every ' + '3min, from ' + (SLA_SWEEP_FROM || 'DISABLED (no cutoff)') + ', cap ' + SLA_SWEEP_CAP);
     }
-    // GROUP UPDATES: no more 1-by-1 spam — ONE batched summary at 12PM + 6PM MYT (routine flags/reassigns buffered via digestPush)
-    setInterval(() => { digestTick().catch(e => log('digest tick err', String(e.message || e))); }, 5 * 60 * 1000);
     // roster shadow: compare the Lark sheet against the built-in roster (reports only — see rosterShadowTick)
     setTimeout(() => rosterShadowTick(), 25000);
     setInterval(() => rosterShadowTick(), 5 * 60 * 1000);
@@ -1591,6 +1660,26 @@ http.createServer((req, res) => {
       event_counts: counts,
       events,
     }, null, 1));
+  } else if (req.url.startsWith('/lead-summary')) {
+    // Read-only. (a) today's leads (b) how many assigned (c) how many not and WHY.
+    // ⚠️ A read failure returns HTTP **200** with `read_error` and NO count fields — never a 500,
+    // and never zeros. A 500 would make the sentinel probe unable to tell "bot is down" from "log
+    // is unreadable", and a zero would be a lie. `sent` exposes the digest markers so the probe can
+    // prove the 12:00/16:00 cards actually went out (durable now they live on /data).
+    const q = new URL(req.url, 'http://x').searchParams;
+    const date = /^\d{4}-\d{2}-\d{2}$/.test(q.get('date') || '') ? q.get('date') : mytNow().date;
+    buildLeadSummary(date, q.get('cross') === '1').then(({ summary, cross }) => {
+      const body = summary.read_error
+        ? { date, read_error: summary.read_error, sent: digest.sent }
+        : { date, total: summary.total, notLeads: summary.notLeads, buckets: summary.buckets,
+            sumOk: summary.sumOk, unassigned: summary.unassigned, carried: summary.carried,
+            carriedResolved: summary.carriedResolved, larkMissing: summary.larkMissing,
+            parse_errors: summary.parse_errors, cross, sent: digest.sent };
+      res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(body, null, 1));
+    }).catch(e => {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ date, read_error: String(e.message || e).slice(0, 200), sent: digest.sent }, null, 1));
+    });
   } else if (req.url === '/sla') {
     res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(sla ? sla.stats() : { off: true }, null, 1));
   } else {
