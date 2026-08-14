@@ -23,7 +23,12 @@ async function alertReview(text){
 }
 // ---- SLA group digest: buffer routine notices → ONE summary at 12PM + 6PM MYT (no more 1-by-1 spam) ----
 const _fs = require('fs'), _path = require('path');
-const DIGEST_STORE = _path.join(__dirname, 'sla_digest.json');
+// 🚨 PERSISTENT DISK (2026-08-14). This file holds `digest.sent` — the "already sent the 12PM
+// card" markers. On the ephemeral disk a deploy between 12:00 and 12:15 wipes them and the card
+// double-fires; and the jobhealth probe reads these markers to prove the report went out, so they
+// must survive restarts. Env-overridable with a __dirname fallback so local runs/tests are
+// unaffected (same pattern as FR_STATE_FILE). Render: SLA_DIGEST_FILE=/data/sla_digest.json
+const DIGEST_STORE = process.env.SLA_DIGEST_FILE || _path.join(__dirname, 'sla_digest.json');
 let digest = { events: [], sent: {} };
 try { digest = JSON.parse(_fs.readFileSync(DIGEST_STORE, 'utf8')); } catch { /* fresh */ }
 function digestPersist(){ try { _fs.writeFileSync(DIGEST_STORE, JSON.stringify(digest)); } catch {} }
@@ -39,7 +44,10 @@ const MYT_OFF = 8 * 3600 * 1000;
 const BULK_THRESHOLD  = Number(process.env.BULK_THRESHOLD || 15);      // more than this in one drop = bulk mode
 const BULK_BATCH_SIZE = Number(process.env.BULK_BATCH_SIZE || 15);     // leads notified per drain
 const BULK_DRAIN_MS   = Number(process.env.BULK_DRAIN_MS || 6 * 3600 * 1000); // drain every 6h (in-hours only)
-const BULK_QUEUE_FILE = _path.join(__dirname, 'bulk_queue.json');
+// 🚨 PERSISTENT DISK (2026-08-14) — same defect as fr_deferred.json, documented 2026-07-21:
+// "mid-drain redeploy loses the queued batches". The rehydrator's part-4 rebuild is a mitigation,
+// not a fix. Render: BULK_QUEUE_FILE=/data/bulk_queue.json
+const BULK_QUEUE_FILE = process.env.BULK_QUEUE_FILE || _path.join(__dirname, 'bulk_queue.json');
 // queue entries: { chatId, screenshotUrl, total, sent, batches: [[lead,...], ...] }
 let bulkQueue = []; try { bulkQueue = JSON.parse(_fs.readFileSync(BULK_QUEUE_FILE, 'utf8')); } catch { /* fresh */ }
 function bulkPersist(){ try { _fs.writeFileSync(BULK_QUEUE_FILE, JSON.stringify(bulkQueue)); } catch {} }
@@ -902,7 +910,7 @@ async function slaSweep(){
     const brand = slaFieldText(f['Brand']);
     const cust  = slaFieldText(f['Phone number']);
     const digits = cust.replace(/\D/g, '');
-    const dm = [`🔔 *New Lead — ${brand || 'TM Motoworld'}*`, ``, `🎯 Wants: ${model}`, digits ? `👉 https://wa.me/${digits}` : ``, ``, `✅ Reply YES once you have contacted this lead`].filter(Boolean).join('\n');
+    const dm = [`🔔 *New Lead: ${brand || 'TM Motoworld'}*`, ``, `🎯 Wants: ${model}`, digits ? `👉 https://wa.me/${digits}` : ``, ``, `✅ Reply YES once you have contacted this lead`].filter(Boolean).join('\n');
     const dmMsgId = await waSend(rep.phone, dm);
     sla.register(rep.name, rep.phone, [{ recordId: it.record_id, summary: model, brand, custName: '', custPhone: cust, override: true }], dmMsgId);  // sweep = Salesman already set in Lark (deliberate/manual) → protect from auto-move
     try { await larkUpdateSLA(it.record_id, { 'SLA Assigned At': now, 'SLA Original Salesman': rep.name, 'SLA Status': 'Pending', 'SLA Reassign Count': 0 }); }
@@ -918,6 +926,13 @@ async function slaSweep(){
 // chats the bot already touched (2026-07-24 12:24 artifact), and stops losing queued off-hours
 // leads. Kill switch: REHYDRATE=0. Runs once, ~20s after boot.
 const REHYDRATE_ON = process.env.REHYDRATE !== '0';
+// 96h: a Friday-17:00 lead needs 64h to reach Monday 09:00, so 36h could never rescue a weekend —
+// proven 2026-08-02/03, 14 leads permanently lost (the cutoff reached back only to Sat 11:41 and
+// excluded exactly those 14; last orphan 11:34, first recovered 12:08). 72h covers a normal
+// weekend but NOT Fri 17:00 → a public-holiday Tuesday 09:00, which is 88h. Benjamin chose 96h
+// (2026-08-14): re-queueing an already-assigned lead is harmless (step 3 requires Salesman empty
+// AND `SLA Assigned At` empty, and dedupes by recordId), losing one is not. Rollback: set 36.
+const REHYDRATE_DEFER_H = Number(process.env.REHYDRATE_DEFER_H || 96);
 async function rehydrateFromLark(){
   if (!REHYDRATE_ON || !LIVE_LARK) return;
   const now = Date.now();
@@ -983,7 +998,7 @@ async function rehydrateFromLark(){
       const f = it.fields || {};
       const created = slaRecCreated(f);
       const want = slaFieldText(f['Customer want']);
-      if (!created || now - created > 36 * 3600e3) continue;
+      if (!created || now - created > REHYDRATE_DEFER_H * 3600e3) continue;
       if (/^TRADE-IN:/i.test(want) || f['SLA Assigned At'] || have.has(it.record_id)) continue;
       const digits = slaFieldText(f['Phone number']).replace(/\D/g, '');
       if (!digits) continue;
@@ -1073,7 +1088,10 @@ function inFROpenHours(){ const d = new Date(Date.now() + MYT_OFF); return FR_HO
 // what we say and when we're open cannot disagree (they did, for 8 days). See hours.js.
 const { hoursLabel: fmtHours } = require('./hours');
 function hoursLabel(){ return fmtHours(FR_HOURS_DAYS, FR_HOURS_START, FR_HOURS_END); }
-const FR_DEFER_FILE = _path.join(__dirname, 'fr_deferred.json');
+// 🚨 PERSISTENT DISK (2026-08-14). This queue sat on Render's EPHEMERAL disk: the Sun 02 Aug 23:41
+// deploy wiped it and, combined with the 36h rehydrate cutoff below, permanently lost 14 leads
+// (Fri 31 Jul 18:14 → Sat 01 Aug 11:34). Render: FR_DEFER_FILE=/data/fr_deferred.json
+const FR_DEFER_FILE = process.env.FR_DEFER_FILE || _path.join(__dirname, 'fr_deferred.json');
 let frDeferred = []; try { frDeferred = JSON.parse(_fs.readFileSync(FR_DEFER_FILE, 'utf8')); } catch { /* fresh */ }
 function frDeferPersist(){ try { _fs.writeFileSync(FR_DEFER_FILE, JSON.stringify(frDeferred)); } catch {} }
 function deferStaffNotify(entry){ frDeferred.push({ ...entry, queuedAt: Date.now() }); frDeferPersist(); }
@@ -1151,27 +1169,13 @@ setInterval(() => { firstresponse.gateSweep().catch(e => log('FR gate sweep err'
 
 // ---- Notify the assigned salesperson via TM Motor Marketing WaSender ----
 // Consolidated: ONE message per salesperson (even if they got several leads in one drop).
-function notifyText(leads){
-  if (leads.length === 1) {
-    const l = leads[0]; const d = (l.phone || '').replace(/\D/g, '');
-    // No phone = a @lid privacy chat where WhatsApp disclosed no number (2026-08-02). The rep can
-    // still serve them — but only by replying in the 93210 inbox — so say that instead of leaving
-    // them with a lead they have no way to action.
-    return [`🔔 *New Lead — ${l.brand || 'TM Motoworld'}*`, ``, `👤 ${l.name || '—'}`, `🎯 Wants: ${l.want}`, `📍 From: ${l.origin}`,
-      d ? `👉 https://wa.me/${d}` : `⚠️ Customer's number is hidden by WhatsApp — reply to them directly in the *TM Marketing (93210)* inbox`].filter(Boolean).join('\n');
-  }
-  const head = `🔔 *${leads.length} New Leads*`;
-  const blocks = leads.map((l, i) => {
-    const d = (l.phone || '').replace(/\D/g, '');
-    return [`*${i + 1}.* 👤 ${l.name || '—'}`, `🎯 ${l.want} · ${l.brand || ''} · ${l.origin}`, d ? `👉 https://wa.me/${d}` : ''].filter(Boolean).join('\n');
-  });
-  return head + '\n\n' + blocks.join('\n\n');
-}
+// The card text itself lives in notify.js (unit-tested — index.js boots a server on require).
+const notify = require('./notify');
 async function notifyStaff(leads, screenshotUrl){
   const phone = (leads[0].staff?.phone || '').replace(/\D/g, '');
   if (!phone) return null;
   // For a single image lead, send the actual screenshot + details so the salesperson sees the full convo.
-  const txt = notifyText(leads) + (SLA_ON ? '\n\n✅ Reply anything once you have contacted this lead (or *PASS* to hand it over).' : '');
+  const txt = notify.notifyText(leads) + (SLA_ON ? '\n\n✅ Reply anything once you have contacted this lead (or *PASS* to hand it over).' : '');
   const mid = (screenshotUrl && leads.length === 1) ? await waSend(phone, txt, screenshotUrl) : await waSend(phone, txt);
   return mid;   // msgId for the SLA (delete on reassign)
 }

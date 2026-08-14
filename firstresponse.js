@@ -60,6 +60,13 @@ const RE_BIKE = /vstrom|v-?strom|tracer|\bz\s?\d{3}|\bmt-?\s?\d{2}\b|cbr|ninja|\
 // assigned, just via the qualify line); a false miss re-creates the RM 20,800 quote we just killed.
 const RE_WANTS_NEW = /\bbrand[\s-]*new\b|\bnew\s+(?:unit|bike|motor|stock|one)\b|\bbaru\b(?!\s+(?:nak|nk|je|sahaja|saja|beli|dapat|dpt|tanya|tny|lepas|balik|masuk|sampai))/i;
 const RE_VENDOR_AUTO = /thank you for contacting|welcome to .* (service|customer)|terima kasih kerana menghubungi|saya akan reply|confirmation code|verification code/i;
+// A price / monthly-instalment question asked INSIDE a product enquiry. Deliberately NOT a category:
+// it only flavours the closing sentence of the stock line, because the salesperson owns price
+// (2026-08-10 — the bot quoted one used unit's price as if it were a model's, three times in a
+// morning). `brp\b` guards against a bare `brp` swallowed by a longer word; `ansuran|bulanan`
+// overlap RE_LOAN, which is harmless — RE_PRICE is only consulted once the category already
+// resolved to `product`, so a loan-classified message never gets both treatments.
+const RE_PRICE = /harga|berapa|brp\b|price|how much|ansuran|bulanan/i;
 const RE_MALAY = /\b(nak|nk|boleh|bleh|ada|berapa|brp|tuan|bang|bos|ke|tak|x\s?mau|macam|mcm|saya|sy|kami|harga|jual|beli|lagi|stok|pagi|petang|malam|salam|tnya|tanya|ape|khabar|kew|ye|dgn|utk|esok|arini)\b/i;
 
 function classify(text, hasImage){
@@ -84,6 +91,12 @@ function saMYT(){ const h = new Date(Date.now() + 8 * 3600e3).getUTCHours(); ret
 const LOAN_SHOP = 'Aeon Credit, Chailease, JCL, Parkson, BSNC';
 const LOAN_EPP  = 'Maybank, Public Bank, UOB, RHB, OCBC, Affin, AmBank, HLB, Alliance Bank, HSBC, Standard Chartered, BSN & AEON Credit Card';
 
+// "I'm only customer service" — Benjamin approved 2026-08-14 (DRAFT-2). Used INSTEAD OF, never in
+// addition to, the existing "salesman will confirm the price" tail: two salesman-will-confirm
+// sentences in one message is the double-say this replaces. See stockLineFor().
+const CS_PRICE_BM = `Untuk harga & plan bulanan saya customer service je, tak berani bagi angka salah 🙏 Salesman kami akan confirm dengan tuan ya.`;
+const CS_PRICE_EN = `For the price & monthly plan I'm customer service only, I don't want to give you a wrong number 🙏 Our salesperson will confirm with you ya.`;
+
 // `closed` = outside TM's OPERATING hours (genuinely shut). NOT the same as "outside the
 // distribution window" — see the three-state comment in index.js. On a Saturday, or 5–6pm on a
 // weekday, the shop is OPEN and a human watches the inbox; the bot just doesn't auto-assign. Telling
@@ -98,16 +111,27 @@ function tpl(cat, lang, card, stockLine, closed){
   const H = (D.hoursLabel && D.hoursLabel()) || { en: 'Mon–Sat, 9am–6pm', bm: 'Isnin–Sabtu, 9 pagi–6 petang' };
   const c = card ? `\n\n${card.name.toUpperCase()} : ${card.disp}\nhttps://wa.me/${card.digits}`
     : closed ? (lang === 'en'
-        ? `\n\n⏰ Our office hours are ${H.en} — our sales advisor will contact you once we're back in office 🙏`
+        ? `\n\n⏰ Our office hours are ${H.en}. Our sales advisor will contact you once we're back in office 🙏`
         : `\n\n⏰ Waktu operasi kami: ${H.bm}. Sales advisor kami akan menghubungi anda bila pejabat dibuka semula ya 🙏`)
     : '';
   const s = stockLine ? `\n\n${stockLine}` : '';
   if (cat === 'sell') return (lang === 'en'
     ? `Hi! Sure, we do buy & trade-in 👍 Which bike (model, year)? Photos help too. Our purchaser will contact you shortly ya`
     : `${g} 😊 Boleh tuan. Nak jual/trade-in motor apa ya? Boleh share model, tahun & gambar motor. Purchaser kami akan contact awak ya`) + c;
+  // LOAN — Benjamin approved 2026-08-14 (DRAFT-1). Two deliberate changes from the 07-20 wording:
+  // (a) the bot now says outright that it is customer service, so a customer never reads a
+  // financier list as an approval decision; (b) the "👇" pointer is only appended when a
+  // salesperson card actually follows — parked / held / no-rep leads get no card, and an arrow
+  // pointing at nothing reads as a broken message.
   if (cat === 'loan') return (lang === 'en'
-    ? `Hi! Yes — we offer shop loan (${LOAN_SHOP}) & 0% credit-card EPP (${LOAN_EPP} — CIMB EPP not available) 👍 Our salesperson will contact you shortly with the loan details ya`
-    : `${g} 😊 Boleh tuan — kami ada loan kedai (${LOAN_SHOP}) & EPP kad kredit 0% (${LOAN_EPP} — EPP CIMB tiada). Salesman kami akan contact awak sebentar lagi untuk detail loan ya`) + c;
+    ? `Hi! Yes we can 👍 We offer shop loan (${LOAN_SHOP}) & 0% credit card EPP (${LOAN_EPP}. CIMB EPP not available).\n\n`
+      + `I'm customer service only ya, so for loan details & approval our salesperson knows best. `
+      + `I've passed your info to them and they'll contact you shortly.`
+      + (card ? ` Or you can reach them directly 👇` : ``)
+    : `${g} 😊 Boleh tuan. Kami ada loan kedai (${LOAN_SHOP}) & EPP kad kredit 0% (${LOAN_EPP}. EPP CIMB tiada).\n\n`
+      + `Saya customer service je ya, jadi untuk detail loan & kelulusan salesman kami lagi arif. `
+      + `Info tuan dah saya pass kat dia, dia akan contact tuan sebentar lagi.`
+      + (card ? ` Kalau nak terus pun boleh 👇` : ``)) + c;
   if (cat === 'testride') return (lang === 'en'
     ? `Thank you for your interest in a test ride with us! 😊 Our sales advisor will contact you as soon as possible to help check the model, date, time availability and the test ride process.`
     : `Terima kasih kerana berminat untuk membuat test ride bersama kami! 😊 Sales advisor kami akan menghubungi anda secepat mungkin untuk membantu semakan model, tarikh, masa yang available dan proses untuk test ride.`) + c;
@@ -126,6 +150,9 @@ async function stockLineFor(cat, text, lang){
   let r = null;
   try { r = await D.wooCheckStock(text); } catch(e){ D.log && D.log('FR stock err:', String(e.message||e).slice(0,60)); }
   if (!r) return '';   // not configured / lookup failed → skip silently, never block the reply
+  // Did they actually ask a price? Only then does the CS-price line REPLACE the stock line's
+  // "salesman will confirm" tail. Never both — that would be two salesman-will-confirm sentences.
+  const priceAsked = RE_PRICE.test(String(text || ''));
   // Booking/pre-release listing matched (2026-07-24, Zontes 175X: bot claimed "we have stock —
   // from RM 8,888.889" off the placeholder price of "OPEN FOR BOOKING NEW ZONTES 175X") →
   // booking pitch, never a stock/price claim. Zontes gets Steven's dealer + mystery-gift lines.
@@ -133,11 +160,11 @@ async function stockLineFor(cat, text, lang){
     const raw = r.booking[0].name;
     const model = raw.replace(/open\s+for\s+booking|pre-?order|coming\s+soon/gi, '').replace(/^\W+|\W+$/g, '').replace(/^new\s+/i, '').trim() || raw;
     const zontes = /zontes/i.test(raw);
-    if (lang === 'en') return `🏍️ The ${model} isn't released yet — we're OPEN FOR BOOKING now!` + (zontes
-      ? ` We're a Zontes dealer — book early with us to get your unit faster + a mystery gift 🎁 Beli Zontes, beli dengan TM Motoworld 😁`
+    if (lang === 'en') return `🏍️ The ${model} isn't released yet, but we're OPEN FOR BOOKING now!` + (zontes
+      ? ` We're a Zontes dealer, so book early with us to get your unit faster + a mystery gift 🎁 Beli Zontes, beli dengan TM Motoworld 😁`
       : ` Book early with us to get your unit faster ya 👍`);
-    return `🏍️ ${model} belum release lagi — sekarang OPEN FOR BOOKING!` + (zontes
-      ? ` Kami Zontes dealer — sesiapa book awal dengan kami akan dapat stock cepat & mystery gift 🎁 Beli Zontes, beli dengan TM Motoworld 😁`
+    return `🏍️ ${model} belum release lagi, sekarang OPEN FOR BOOKING!` + (zontes
+      ? ` Kami Zontes dealer, sesiapa book awal dengan kami akan dapat stock cepat & mystery gift 🎁 Beli Zontes, beli dengan TM Motoworld 😁`
       : ` Book awal dengan kami untuk dapat unit cepat ya 👍`);
   }
   // A customer asking for a NEW bike is asking a question this catalog cannot answer. Woo holds
@@ -149,6 +176,11 @@ async function stockLineFor(cat, text, lang){
   // then assign, no need answer so many question.")
   const usedM = (r.matches || []).filter(m => !m.isNew);
   if (RE_WANTS_NEW.test(String(text || '')) || (!usedM.length && (r.matches || []).some(m => m.isNew))){
+    // The qualifier stays either way (Benjamin 2026-08-10: "help sales person to qualify then
+    // assign") — only the reason for not naming a number changes when they asked one outright.
+    if (priceAsked) return lang === 'en'
+      ? `👍 For a brand-new unit, stock & the OTR price I'm customer service only, I don't want to give you a wrong number 🙏 Our salesperson will confirm with you ya. Cash or loan?`
+      : `👍 Untuk unit baru, stok & harga OTR saya customer service je, tak berani bagi angka salah 🙏 Salesman kami akan confirm dengan tuan ya. Bos nak cash atau loan?`;
     return lang === 'en'
       ? `👍 For a brand-new unit our salesperson will confirm stock & the OTR price with you. Cash or loan?`
       : `👍 Untuk unit baru, salesman kami akan confirm stok & harga OTR dengan bos ya. Bos nak cash atau loan?`;
@@ -159,20 +191,27 @@ async function stockLineFor(cat, text, lang){
     // 79,000 km on it. Same source of truth, no price, and the salesperson gets a warm opening.
     const km = m => m.mileage > 0 ? ` (${m.mileage.toLocaleString()} km)` : '';
     if (usedM.length === 1) return lang === 'en'
-      ? `✅ Yes — ${usedM[0].name}${km(usedM[0])} is available. Our salesperson will confirm the price & monthly plan with you.`
-      : `✅ Ada — ${usedM[0].name}${km(usedM[0])}. Salesman kami akan confirm harga & plan bulanan dengan bos ya.`;
+      ? `✅ Yes, ${usedM[0].name}${km(usedM[0])} is available. `
+        + (priceAsked ? CS_PRICE_EN : `Our salesperson will confirm the price & monthly plan with you.`)
+      : `✅ Ada ya bos, ${usedM[0].name}${km(usedM[0])}. `
+        + (priceAsked ? CS_PRICE_BM : `Salesman kami akan confirm harga & plan bulanan dengan bos ya.`);
     // SEVERAL distinct matches → the customer's model is ambiguous ("Aveta 250" = Nova 250 /
     // Vanguard 250 / VTM 250...) — list them and ask which one (Harith 2026-07-22).
     const lines = usedM.slice(0, 4).map(m => `• ${m.name}${km(m)}`).join('\n');
     return lang === 'en'
-      ? `✅ We have a few units in stock:\n${lines}\nWhich one are you interested in? Our salesperson will give you the price & plan.`
-      : `✅ Ada beberapa unit dalam stok:\n${lines}\nYang mana satu bos berminat ya? Salesman kami akan bagi harga & plan.`;
+      ? `✅ We have a few units in stock:\n${lines}\nWhich one are you interested in? `
+        + (priceAsked ? CS_PRICE_EN : `Our salesperson will give you the price & plan.`)
+      : `✅ Ada beberapa unit dalam stok:\n${lines}\nYang mana satu bos berminat ya? `
+        + (priceAsked ? CS_PRICE_BM : `Salesman kami akan bagi harga & plan.`);
   }
   // NO match ≠ NO stock (2026-07-24: ER6N had 2 units instock + MT-07 was flagged outofstock in
   // Woo while physically available, yet both customers were told "takde stok"). A search miss or a
   // stale Woo flag must never become a confident negative claim — a wrong "no stock" loses the
   // sale. Positive claims only when a live instock match exists; everything else defers to the
   // salesman, neutrally.
+  // When they asked a price, the CS line stands ALONE — it already carries the
+  // salesman-will-confirm promise, and the neutral stock sentence would be a second one.
+  if (priceAsked) return lang === 'en' ? CS_PRICE_EN : CS_PRICE_BM;
   return lang === 'en'
     ? `👍 Our salesperson will confirm the latest stock for that model with you shortly.`
     : `👍 Untuk stok model tu, salesman kami akan confirm dengan awak sekejap lagi ya.`;
@@ -202,7 +241,7 @@ async function assign(cat, jid, phone, wantText, ctx){
     let recordId = null;
     try { recordId = await D.larkWriteLead({ phone, name: '', want: 'TRADE-IN: ' + want, brand: '', origin: 'WhatsApp Direct', assignee: 'Fitri', staff: FITRI }); }
     catch(e){ D.log('FR lark err (sell):', String(e.message||e).slice(0,60)); }
-    const fitriMsg = `🔁 *Trade-in Lead (auto)*\n\n🎯 ${want}\n👉 https://wa.me/${phone.replace(/\D/g,'')}\n\nCustomer dah dapat reply pertama — follow up ya.`;
+    const fitriMsg = `🔁 *Trade-in Lead (auto)*\n\n🎯 ${want}\n👉 https://wa.me/${phone.replace(/\D/g,'')}\n\nCustomer dah dapat reply pertama, follow up ya.`;
     if (defer){
       // jid + gated ride along so the drain can close this lead's story in the gate log tomorrow
       // morning; without the jid it has no idea which chat the parked lead belongs to.
@@ -387,22 +426,22 @@ function gateParseUsername(text, expectUsername){
 // pick what they're comfortable with instead of refusing outright. Naming the '@' is deliberate:
 // it is what makes a handle safe to parse back out of a free-text reply.
 const gateAsk = lang => lang === 'en'
-  ? `One thing — WhatsApp hasn't shared your contact details with us, so our sales advisor has no way to reach you back. 🙏 Could you reply with your phone number, or your WhatsApp username (the one starting with @)?`
-  : `Satu je bos — WhatsApp tak share contact tuan dengan kami, jadi sales advisor kami tak boleh contact balik. 🙏 Boleh reply nombor telefon tuan, atau username WhatsApp tuan (yang start dengan @)?`;
+  ? `One thing ya, WhatsApp hasn't shared your contact details with us, so our sales advisor has no way to reach you back. 🙏 Could you reply with your phone number, or your WhatsApp username (the one starting with @)?`
+  : `Satu je bos, WhatsApp tak share contact tuan dengan kami, jadi sales advisor kami tak boleh contact balik. 🙏 Boleh reply nombor telefon tuan, atau username WhatsApp tuan (yang start dengan @)?`;
 const gateWhy = lang => lang === 'en'
-  ? `Good question 🙂 WhatsApp recently added a username / hide-my-number setting — when it's on, your number isn't shared with the business you message, so our advisor can see your message but can't call you back.\n\nWe'd only use it to follow up on this enquiry. If you'd rather not share it, no problem at all — just reply here and we'll continue in this chat 👍`
-  : `Soalan bagus 🙂 WhatsApp baru tambah setting username / sorok nombor — bila on, nombor tuan tak dishare dengan bisnes yang tuan mesej, jadi advisor kami nampak mesej tuan tapi tak boleh call balik.\n\nNombor tu untuk follow up ni je. Kalau tuan tak selesa nak bagi pun takpe — reply je kat sini, kami sambung dalam chat ni 👍`;
+  ? `Good question 🙂 WhatsApp recently added a username / hide-my-number setting. When it's on, your number isn't shared with the business you message, so our advisor can see your message but can't call you back.\n\nWe'd only use it to follow up on this enquiry. If you'd rather not share it, no problem at all, just reply here and we'll continue in this chat 👍`
+  : `Soalan bagus 🙂 WhatsApp baru tambah setting username / sorok nombor. Bila on, nombor tuan tak dishare dengan bisnes yang tuan mesej, jadi advisor kami nampak mesej tuan tapi tak boleh call balik.\n\nNombor tu untuk follow up ni je. Kalau tuan tak selesa nak bagi pun takpe, reply je kat sini, kami sambung dalam chat ni 👍`;
 const gateUsername = lang => lang === 'en'
-  ? `Ah — WhatsApp doesn't show us your username either, so could you type it here? Our advisor will use it to reach you 🙏`
-  : `Ah — WhatsApp tak tunjuk username tuan kat kami juga, jadi boleh taip kat sini? Advisor kami guna untuk contact tuan ya 🙏`;
+  ? `Ah, WhatsApp doesn't show us your username either, so could you type it here? Our advisor will use it to reach you 🙏`
+  : `Ah, WhatsApp tak tunjuk username tuan kat kami juga, jadi boleh taip kat sini? Advisor kami guna untuk contact tuan ya 🙏`;
 const gateGot = lang => lang === 'en'
   ? `Got it, thank you! 🙏 Passing this to our sales advisor now.`
   : `Ok, terima kasih bos! 🙏 Saya pass kat sales advisor kami sekarang.`;
 // Deliberately promises a follow-up IN THIS CHAT, never a call back — a handle is not dialable in
 // Malaysia until WhatsApp's rollout lands (~Sept 2026), and not at all if they set a username key.
 const gateGotUser = lang => lang === 'en'
-  ? `Got it, thank you! 🙏 Passing your username to our sales advisor — they'll follow up with you right here in this chat.`
-  : `Ok, terima kasih bos! 🙏 Saya pass username tuan kat sales advisor — dia akan follow up terus dalam chat ni.`;
+  ? `Got it, thank you! 🙏 Passing your username to our sales advisor, they'll follow up with you right here in this chat.`
+  : `Ok, terima kasih bos! 🙏 Saya pass username tuan kat sales advisor, dia akan follow up terus dalam chat ni.`;
 
 function gateHold(jid, cat, want, lang){
   state.awaitingPhone = state.awaitingPhone || {};

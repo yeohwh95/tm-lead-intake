@@ -8,6 +8,14 @@ const fr = require('./firstresponse');
 let pass = 0, fail = 0;
 const ok = (cond, name) => { cond ? pass++ : (fail++, console.log('❌', name)); cond && console.log('✅', name); };
 
+// 🚨 THE DASH RULE (Benjamin approved 2026-08-14). No em dash `—` and no standalone ` - ` in
+// anything the bot SENDS. Kept: hyphens inside words / model names / phones (`012-932 3259`,
+// `MT-09`, `V-Strom`, `trade-in`), the en dash `–` in hour ranges from hours.js (`9 pagi–6 petang`
+// is a RANGE, not punctuation), and `•` bullets. This helper is the durable guarantee — the
+// hand-written inventory of dashed lines was wrong twice (the brief said 17, a grep found 16, and
+// two more turned up in gateGotUser while sweeping).
+const NO_DASH = t => !/—/.test(t) && !/ - /.test(t);
+
 // ---- classifier (real messages from the 93210 inbox, 2026-07-11..17) ----
 const C = (t, img) => fr._classify(t, !!img).cat;
 ok(C('Vstrom 800 re') === 'product', 'product: Vstrom 800 re');
@@ -65,7 +73,46 @@ ok(/Chailease|JCL|Parkson|BSNC/.test(fr._tpl('loan', 'bm')), 'tpl loan BM lists 
 ok(/EPP CIMB tiada/i.test(fr._tpl('loan', 'bm')) && /CIMB EPP not available/i.test(fr._tpl('loan', 'en')), 'tpl loan states CIMB EPP unavailable (Harith feedback 07-20)');
 ok(/Alliance Bank|Standard Chartered/.test(fr._tpl('loan', 'bm')), 'tpl loan BM lists real EPP bank list');
 ok(/berminat motor apa/.test(fr._tpl('greeting', 'bm')), 'tpl greeting asks model');
-ok(fr._tpl('product', 'bm', null, '✅ Ada, stok tersedia — dari RM 12,800.').includes('✅ Ada, stok tersedia'), 'tpl product carries stock line when provided');
+ok(fr._tpl('product', 'bm', null, '✅ Ada ya bos, stok tersedia.').includes('✅ Ada ya bos, stok tersedia'), 'tpl product carries stock line when provided');
+
+// ---- 1c: the loan reply now says outright that the bot is customer service (DRAFT-1, 2026-08-14) ----
+const CARD = { name: 'Adib', digits: '60178869542', disp: '017-8869542' };
+const loanBmCard = fr._tpl('loan', 'bm', CARD);
+const loanBmBare = fr._tpl('loan', 'bm', null);
+const loanEnCard = fr._tpl('loan', 'en', CARD);
+ok(/Kami ada loan kedai \(Aeon Credit, Chailease, JCL, Parkson, BSNC\)/.test(loanBmCard)
+   && /EPP kad kredit 0%/.test(loanBmCard) && /EPP CIMB tiada\)/.test(loanBmCard),
+   'loan BM merged: financier lists intact, CIMB EPP called out inside the parens (no dash)');
+ok(/Saya customer service je ya/.test(loanBmCard) && /salesman kami lagi arif/.test(loanBmCard),
+   'loan BM: the "I am only customer service" line is present');
+ok(/Info tuan dah saya pass kat dia/.test(loanBmCard), 'loan BM: promises the handoff already happened');
+ok(/Kalau nak terus pun boleh 👇/.test(loanBmCard), 'loan BM: 👇 appears when a card follows');
+ok(!/👇/.test(loanBmBare), '🚨 loan BM: NO 👇 when there is no card to point at');
+ok(/sales advisor|salesman kami|contact tuan/i.test(loanBmBare), 'loan BM cardless: still promises contact');
+ok(/I'm customer service only ya/.test(loanEnCard) && /CIMB EPP not available\)/.test(loanEnCard),
+   'loan EN mirror: same structure, same CS line');
+ok(/Or you can reach them directly 👇/.test(loanEnCard) && !/👇/.test(fr._tpl('loan', 'en', null)),
+   'loan EN: 👇 only when a card follows');
+ok(NO_DASH(loanBmCard) && NO_DASH(loanBmBare) && NO_DASH(loanEnCard) && NO_DASH(fr._tpl('loan', 'en', null)),
+   '🚨 loan: no dash in any of the four renders');
+
+// ---- 1d: the tpl matrix can never emit a dash again ----
+// cats × languages × card/no-card × closed/open. The card fixture uses a real DISPLAY phone
+// (010-2323259) so this also proves in-word/phone hyphens survive the sweep.
+{
+  let renders = 0, dashy = [];
+  const cardFix = { name: 'Azrul', digits: '60102323259', disp: '010-2323259' };
+  for (const cat of ['product', 'loan', 'sell', 'testride', 'greeting', 'other'])
+    for (const lang of ['bm', 'en'])
+      for (const card of [cardFix, null])
+        for (const closed of [true, false]) {
+          const t = fr._tpl(cat, lang, card, '', closed);
+          renders++;
+          if (!NO_DASH(t)) dashy.push(`${cat}/${lang}/${card ? 'card' : 'nocard'}/${closed ? 'closed' : 'open'}`);
+        }
+  ok(dashy.length === 0, `🚨 dash: none of the ${renders} tpl renders emits a dash` + (dashy.length ? ' — ' + dashy.join(', ') : ''));
+  ok(/010-2323259/.test(fr._tpl('product', 'bm', cardFix, '', false)), 'dash: the display phone keeps its hyphens (010-2323259)');
+}
 
 // ---- flow: greeting → model answer assigns; sell assigns to Fitri; staff ignored ----
 const sent = [], assigned = [], dms = [];
@@ -130,7 +177,7 @@ ok(/ADIB : 017-8869542/.test(sent[sent.length-1].text), 'flow: reply carries ass
   fr.onMessage({ jid: 'cust4@s.whatsapp.net', phone: '60144444444', kind: 'text', text: 'vulcan ada stok tak' });
   await wait(120);
   const vul = sent[sent.length - 1].text;
-  ok(/✅ Ada — Kawasaki Vulcan S \(38,000 km\)/.test(vul), 'flow: stock check NAMES the exact unit + mileage');
+  ok(/✅ Ada ya bos, Kawasaki Vulcan S \(38,000 km\)/.test(vul), 'flow: stock check NAMES the exact unit + mileage');
   ok(!/RM/.test(vul), 'flow: 🚨 no price ever reaches the customer (2026-08-10 — the salesperson owns price)');
   ok(/salesman kami akan confirm harga/i.test(vul), 'flow: price is explicitly handed to the salesperson');
 
@@ -170,6 +217,46 @@ ok(/ADIB : 017-8869542/.test(sent[sent.length-1].text), 'flow: reply carries ass
   ok(!/RM/.test(multi) && !/14,388/.test(multi), 'flow: 🚨 no price on new units either');
   ok(!/dari RM/.test(multi), 'flow: ambiguous model never quotes a single lowest price');
 
+  // ---- 1c / DRAFT-2 (2026-08-14): a PRICE question inside a product enquiry ----
+  // The bot says it is customer service INSTEAD OF the old "salesman will confirm the price" tail,
+  // never in addition to it. Two salesman-will-confirm sentences in one message is the double-say
+  // this replaces, so every case below counts occurrences rather than just testing presence.
+  const countOf = (hay, needle) => hay.split(needle).length - 1;
+
+  fr.onMessage({ jid: 'custPr1@s.whatsapp.net', phone: '60105050501', kind: 'text', text: 'vulcan berapa harga' });
+  await wait(120);
+  const pr1 = sent[sent.length - 1].text;
+  ok(/Kawasaki Vulcan S \(38,000 km\)/.test(pr1), 'price ask: the unit is still named');
+  ok(countOf(pr1, 'customer service je') === 1, 'price ask → the CS price line, exactly ONCE');
+  ok(countOf(pr1, 'akan confirm harga') === 0, '🚨 price ask: the old "akan confirm harga & plan bulanan" tail is GONE (no double-say)');
+  ok(!/RM/.test(pr1), '🚨 price ask: still no price, ever');
+
+  fr.onMessage({ jid: 'custPr2@s.whatsapp.net', phone: '60105050502', kind: 'text', text: 'vulcan ada lagi ke' });
+  await wait(120);
+  const pr2 = sent[sent.length - 1].text;
+  ok(/Salesman kami akan confirm harga & plan bulanan/.test(pr2), 'no price ask → the original tail is untouched');
+  ok(!/customer service je/.test(pr2), 'no price ask → no CS line bolted on');
+
+  fr.onMessage({ jid: 'custPr3@s.whatsapp.net', phone: '60105050503', kind: 'text', text: 'ninja 400 harga berapa ya' });
+  await wait(120);
+  const pr3 = sent[sent.length - 1].text;
+  ok(/customer service je/.test(pr3) && !/Untuk stok model tu/.test(pr3),
+     'price ask on a NO-MATCH model → the CS line stands alone (it already promises the salesman)');
+  ok(countOf(pr3, 'akan confirm') === 1, '🚨 no-match + price: exactly one salesman-will-confirm sentence');
+
+  fr.onMessage({ jid: 'custPr4@s.whatsapp.net', phone: '60105050504', kind: 'text', text: 'xmax 250 harga berapa' });
+  await wait(120);
+  const pr4 = sent[sent.length - 1].text;
+  ok(/Yang mana satu bos berminat ya\?/.test(pr4), 'multi-match + price: the clarify question still comes first');
+  ok(/customer service je/.test(pr4) && !/akan bagi harga/.test(pr4), 'multi-match + price: CS line replaces the old "akan bagi harga & plan" tail');
+  ok(!/RM/.test(pr4), '🚨 multi-match + price: no price');
+
+  fr.onMessage({ jid: 'custPr5@s.whatsapp.net', phone: '60105050505', kind: 'text', text: 'how much is the vulcan' });
+  await wait(120);
+  const pr5 = sent[sent.length - 1].text;
+  ok(/I'm customer service only/.test(pr5) && !/confirm the price & monthly plan/.test(pr5),
+     'price ask EN mirror: same substitution, no double-say');
+
   // ---- A (2026-07-24): LLM intent classification, regex fallback ----
   fr.init({ ...DEPS, aiClassify: async t => {
     if (/api-down/i.test(t)) throw new Error('timeout');
@@ -191,7 +278,7 @@ ok(/ADIB : 017-8869542/.test(sent[sent.length-1].text), 'flow: reply carries ass
   // LLM throws (down/timeout) → regex fallback, stock line untouched
   fr.onMessage({ jid: 'custA3@s.whatsapp.net', phone: '60103030303', kind: 'text', text: 'vulcan ada stok tak api-down' });
   await wait(120);
-  ok(/✅ Ada — Kawasaki Vulcan S/.test(sent[sent.length - 1].text), 'A: LLM error → regex fallback (product + stock check still work)');
+  ok(/✅ Ada ya bos, Kawasaki Vulcan S/.test(sent[sent.length - 1].text), 'A: LLM error → regex fallback (product + stock check still work)');
 
   // ---- 2026-08-10 incident fixtures: three real customers, all three answered wrongly ----
   // ① "Yamaha R1 ada ke cik" (08-10 10:10). Was offered three R15s; Adib corrected it 4 min later.
@@ -369,6 +456,23 @@ ok(/ADIB : 017-8869542/.test(sent[sent.length-1].text), 'flow: reply carries ass
   await wait(120);
   ok(sent[sent.length - 1].to === '60186528335@s.whatsapp.net', 'flow: @lid customer model-answer reply also sent to real phone jid');
   ok(assigned.some(a => a.want && /z900rs/i.test(a.want)), 'flow: @lid customer lead still written to Lark');
+
+  // ---- 🚨 SUITE-WIDE DASH REGRESSION (2026-08-14) ----
+  // Every message the bot actually SENT during this whole file, in both languages, across every
+  // category, stock shape, off-hours state and @lid path. This is the assert that survives a future
+  // edit reintroducing a dash — no hand-maintained inventory of lines can. Em dash only at this
+  // level: an interpolated WooCommerce product name could legitimately contain " - ", so the
+  // spaced-hyphen rule is asserted on the fixed-fixture tpl renders above and in notify_test.js.
+  {
+    const dashed = sent.filter(s => /—/.test(s.text));
+    ok(dashed.length === 0, `🚨 dash: no em dash in ANY of the ${sent.length} bot sends`
+      + (dashed.length ? ` — first offender: "${dashed[0].text.slice(0, 90)}"` : ''));
+    // …and the kept hyphens really were kept, so the sweep did not just delete characters.
+    ok(sent.some(s => /MT-09/.test(s.text)), 'dash: in-word model hyphens survived (MT-09)');
+    ok(sent.some(s => /017-8869542|010-8093259/.test(s.text)), 'dash: display phone hyphens survived');
+    ok(sent.some(s => /trade-in/i.test(s.text)), 'dash: "trade-in" survived');
+    ok(sent.some(s => /9 pagi–6 petang/.test(s.text)), 'dash: the en-dash HOUR RANGE from hours.js is untouched (a range, not punctuation)');
+  }
 
   console.log(`\n${pass} passed, ${fail} failed`);
   process.exit(fail ? 1 : 0);

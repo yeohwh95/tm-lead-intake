@@ -16,13 +16,16 @@ process.env.FR_STATE_FILE = require('path').join(require('os').tmpdir(), `fr_gat
 const fr = require('./firstresponse.js');
 
 let sent = [], assigned = [], larkRows = [], logs = [];
+// Cumulative, NEVER reset — `sent` is cleared between sections, but the dash regression at the
+// bottom has to see every message the gate ever produced (ask, why, username, got, release).
+const allSent = [];
 const reset = () => { sent = []; assigned = []; larkRows = []; logs = [];
   const st = fr._state(); st.awaitingPhone = {}; st.greeted = {}; st.pending = {}; };
 
 // ⚠️ `init()` REPLACES the dep bag, it does not merge. A test that wants one dep changed must
 // re-init with the whole set or the module loses waSend/log and dies on the next message.
 const BASE_DEPS = {
-  waSend: async (to, text) => { sent.push({ to, text }); },
+  waSend: async (to, text) => { sent.push({ to, text }); allSent.push({ to, text }); },
   assignLeads: (leads) => leads.map(l => ({ ...l, assignee: 'Nazrin',
     staff: { name: 'Nazrin', phone: '+60123456789', openId: 'ou_x' } })),
   larkWriteLead: async (l) => { larkRows.push(l); assigned.push(l); return 'rec1'; },
@@ -291,6 +294,18 @@ const LIDD = '206218996011144';
   await wait(80);
   ok('\u{1F6A8} nobody taking the lead is recorded as no_rep', lastGate().assign_state === 'no_rep');
   ok('and it is loud in the log', logs.some(l => /NO SALESPERSON/.test(l)));
+
+  // ⚠️ SUITE-WIDE DASH REGRESSION (2026-08-14). This file drives gateAsk / gateWhy /
+  // gateUsername / gateGot / gateGotUser through REAL flows in both the ask and release paths —
+  // exactly the copy the hand-written sweep inventory had missed two lines of.
+  {
+    const dashed = allSent.filter(s => /—/.test(s.text));
+    ok(`🚨 no em dash in ANY of the ${allSent.length} gate sends`
+       + (dashed.length ? ` — first: "${dashed[0].text.slice(0, 80)}"` : ''), dashed.length === 0);
+    ok('the phone/username ask really was exercised', allSent.some(s => /Satu je bos|One thing ya/.test(s.text)));
+    ok('the why-explainer really was exercised', allSent.some(s => /sorok nombor|hide-my-number/.test(s.text)));
+    ok('the username hand-off really was exercised', allSent.some(s => /pass username tuan|Passing your username/.test(s.text)));
+  }
 
   console.log(`\n${'='.repeat(54)}\n  ${pass} passed, ${fail} failed\n${'='.repeat(54)}`);
   try { require('fs').unlinkSync(process.env.FR_STATE_FILE); } catch {}

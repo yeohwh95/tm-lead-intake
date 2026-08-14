@@ -129,7 +129,14 @@ async function reassignLead(repKey, r, l, reason) {
   const next = await deps.pickNextRep(l.brand, repKey, exclude);
   if (!next) { l.status = 'escalated'; await slaWrite(l.recordId, { 'SLA Status': 'Escalated', 'SLA Escalated At': now() }); if (deps.digestPush) deps.digestPush({ type: 'escalate', who: l.custName || l.custPhone, brand: l.brand || 'TM', why: reason === 'passed' ? 'everyone passed' : 'no available rep' }); return; }
   const verb = reason === 'passed' ? 'Passed' : 'Reassigned';
-  const newMsgId = await safe(deps.waSend(next.phone, `🔔 *${verb} Lead — ${l.brand || 'TM Motoworld'}*\n👤 ${l.custName || '—'}\n🎯 ${l.summary}\n${l.custPhone ? '👉 https://wa.me/' + l.custPhone.replace(/\D/g, '') : ''}\n\n✅ Reply anything once you've contacted them (or *PASS* to hand it over).`));
+  // Dash rule (2026-08-14): same card family as notify.js, so it must read the same way — a colon
+  // header, and NO `👤 —` placeholder line when there is no customer name.
+  const dm = [`🔔 *${verb} Lead: ${l.brand || 'TM Motoworld'}*`,
+    l.custName ? `👤 ${l.custName}` : ``,
+    `🎯 ${l.summary}`,
+    l.custPhone ? '👉 https://wa.me/' + l.custPhone.replace(/\D/g, '') : ``,
+    ``, `✅ Reply anything once you've contacted them (or *PASS* to hand it over).`].filter(Boolean).join('\n');
+  const newMsgId = await safe(deps.waSend(next.phone, dm));
   await safe(deps.larkUpdateSalesman(l.recordId, next.openId));
   await slaWrite(l.recordId, { 'SLA Status': 'Reassigned', 'SLA Reassigned At': now(), 'SLA Reassigned From': repKey, 'SLA Reassign Count': l.reassignCount + 1 });
   // batched into the 12PM/6PM group summary (no more 1-by-1 spam) — both reps still got their personal DMs
@@ -160,7 +167,11 @@ async function tick() {
     const stillPending = Object.values(r.leads).filter(l => l.status === 'pending');
     const ripe = stillPending.filter(l => (t - l.assignedAt) >= NUDGE_MS && inHours(l.assignedAt + NUDGE_MS));
     if (ripe.length && !r.summaryMsgId) {
-      const list = stillPending.map((l, i) => `${i + 1}. ${l.custName || l.custPhone || '—'} · ${l.brand || ''} · ${l.summary}`).join('\n');
+      // Dash rule (2026-08-14): drop the `—` placeholder rather than print it. A lead with neither
+      // a name nor a number renders as "3. Honda · zontes 368G", which is honest; "3. — · Honda"
+      // reads as a rendering failure.
+      const list = stillPending.map((l, i) => `${i + 1}. ` +
+        [l.custName || l.custPhone, l.brand, l.summary].filter(Boolean).join(' · ')).join('\n');
       const mid = await safe(deps.waSend(r.phone, `⏰ *Not acknowledged yet (${stillPending.length})*\n${list}\n\n✅ Reply anything to confirm you've got them (or *PASS* to hand over). Otherwise reassigned in 15 min.`));
       r.summaryMsgId = mid; r.remindedAt = t;
       for (const l of stillPending) await slaWrite(l.recordId, { 'SLA Nudged At': t });

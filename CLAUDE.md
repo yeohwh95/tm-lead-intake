@@ -2,6 +2,96 @@
 
 WhatsApp lead → AI extract → Lark CRM + notify the assigned salesperson. **LIVE.**
 
+## 🚨 THE 14 LOST LEADS, AND WHY THE QUEUE COULD NOT SURVIVE A DEPLOY — 2026-08-14 (batch 1)
+⚠️ **CODE COMMITTED, NOT DEPLOYED.** Nothing below is live until someone pushes and sets the env vars.
+
+**Fri 31 Jul 18:14 → Sat 01 Aug 11:34, 14 real customers were parked for the Monday drain and never
+reached anyone.** Two independent defects had to line up, and both are now closed:
+
+| | What went wrong | Fix |
+|---|---|---|
+| ① | `fr_deferred.json` sat on Render's **ephemeral** disk. The Sun 02 Aug 23:41 deploy wiped the parked-lead queue outright. | `FR_DEFER_FILE` env → `/data/fr_deferred.json` (the 1GB disk `fr_state.json` already uses) |
+| ② | The boot rehydrator's backstop only reached back **36h**. A Friday-17:00 lead needs **64h** to reach Monday 09:00 — 36h can *never* rescue a weekend. | `REHYDRATE_DEFER_H`, default **96** |
+
+The boundary matches to seven minutes: the 36h cutoff reached back to Sat 11:41, the last orphan was
+11:34, the first recovered lead 12:08. **The backstop was not "mostly working" — it was structurally
+incapable of covering the one gap it existed for.**
+
+- **96h, not 72h** (Benjamin, 2026-08-14). 72h covers a normal weekend (64h) but **not** Fri 17:00 →
+  a public-holiday Tuesday 09:00, which is 88h. Re-queueing an already-assigned lead is harmless —
+  step 3 requires `Salesman` empty **AND** `SLA Assigned At` empty and dedupes by recordId — while
+  losing one is not. Take the slack. Rollback is `REHYDRATE_DEFER_H=36`, env only.
+- **Two siblings moved in the same change**, same defect, one line each:
+  `BULK_QUEUE_FILE` (documented 2026-07-21: "mid-drain redeploy loses the queued batches" — the
+  rehydrator's part-4 rebuild is a mitigation, not a fix) and `SLA_DIGEST_FILE`. The digest store
+  matters more than it looks: it holds `digest.sent`, the "already sent the 12PM card" markers, so a
+  deploy at 12:00–12:15 makes the card **double-fire**.
+- Bonus, **env-only, no code change**: `sla.js:6` already honours `SLA_STORE` — point it at `/data`
+  and in-flight SLA timers survive deploys too.
+- ⚠️ **First boot with the new envs starts each file EMPTY on `/data`** (the old copies died with the
+  ephemeral disk anyway). Rehydrate backfills the deferred queue; bulk part-4 backfills the bulk
+  queue. The digest `sent` markers start empty, so **deploy outside 12:00–12:14 and 18:00–18:14 MYT**
+  or the card can re-send once.
+- 🚨 **The real test is not a unit test.** These constants live in `index.js`, which boots a server on
+  require and therefore cannot host tested logic. After deploying: confirm `/data/fr_deferred.json`
+  exists after the next `FR 🌙 … deferred` line, then **trigger a manual redeploy at night on
+  purpose** and confirm the 9:00 drain still releases it (`🌅 FR deferred drain: releasing N`). That
+  redeploy-and-drain is the exact scenario that lost the 14 leads. Do it once, deliberately.
+
+### 🗣️ "Saya customer service je" — the bot stops sounding like it can approve a loan
+Same commit. Two approved copy changes (Benjamin, 2026-08-14), both aimed at the same failure class
+as the 08-10 price incident: **the bot making a claim only a salesperson can stand behind.**
+- **Loan** (`tpl()`): still names every real financier (Harith 2026-07-20 — and CIMB EPP is still
+  explicitly called out as unavailable), but now says outright *"Saya customer service je ya, jadi
+  untuk detail loan & kelulusan salesman kami lagi arif"*, then confirms the handoff already
+  happened. ⚠️ The `👇` pointer is appended **only when a card actually follows** — parked, held and
+  no-rep leads get no card, and an arrow pointing at nothing reads as a broken message.
+- **Price inside a product enquiry** (`RE_PRICE` → `stockLineFor`): when the customer asks a price,
+  *"Untuk harga & plan bulanan saya customer service je, tak berani bagi angka salah 🙏"*
+  **REPLACES** the old "salesman will confirm the price" tail — it never appends. Two
+  salesman-will-confirm sentences in one message is the double-say the tests count occurrences to
+  prevent. Applies to used-single, used-multi (after the "Yang mana satu" clarify), wants-NEW (the
+  cash-or-loan qualifier is kept) and the no-match neutral line (where the CS line stands **alone**).
+  Booking replies are untouched — no price is ever discussed there.
+- ⚠️ `RE_PRICE` is deliberately **not a category**. It only flavours a closing sentence, and is only
+  consulted once the category already resolved to `product`, so a loan message never gets both.
+
+### ➖ The dash sweep, and why a hand-written inventory was never going to hold
+Every bot-authored message dropped the em dash `—` and any standalone ` - `. **Kept**: hyphens inside
+words / model names / phones (`012-932 3259`, `MT-09`, `V-Strom`, `trade-in`), the **en dash `–` in
+hour ranges** from `hours.js` (`9 pagi–6 petang` is a range, not punctuation), and `•` bullets.
+🚨 **`RE_USERNAME_KV` still contains a `—` and must keep it** — that one PARSES customer input
+(`username — foo`); removing it breaks the phone gate.
+- Sentences were **rewritten**, not truncated: `✅ Ada — Kawasaki Vulcan S` → `✅ Ada ya bos, Kawasaki
+  Vulcan S`; `One thing —` → `One thing ya,`; `Satu je bos —` → `Satu je bos,`.
+- ⚠️ **The counts were wrong three times.** The brief said 17 customer-facing lines; a grep found 15
+  + 1 staff-facing; sweeping turned up **two more** (`gateGotUser`, both languages) that no inventory
+  had listed. **The regression assert is the guarantee, not the list** — `firstresponse_test.js` and
+  `gate_test.js` now assert that *no message sent anywhere in the suite* contains an em dash, and
+  separately that `MT-09`, `017-8869542`, `trade-in` and `9 pagi–6 petang` all still survive (so a
+  future "fix" cannot pass by deleting characters).
+- **`notifyText()` extracted to `notify.js`** (+ `notify_test.js`, 19 tests) — the architectural rule:
+  it was about to carry tested behaviour, and `index.js` boots a server on require. Three changes:
+  header `New Lead — Honda` → `New Lead: Honda`; the `⚠️ …hidden by WhatsApp —` line takes a full
+  stop; and **the `👤 —` line is now OMITTED when there is no name** rather than printing a
+  placeholder that reads as a failed field. `·` separators stay (a middot is not a dash).
+- Same treatment for the same card family: `slaSweep`'s DM header, and `sla.js`'s reassign DM
+  (header + the `👤 —` placeholder) and T+60 nudge list. **NOT swept** (Benjamin's call, internal
+  group-facing, deserves its own approval): `buildDigest`, `renderCard`, bulk/group messages,
+  `alertReview` strings.
+- 🟠 **Known gap, deliberately left**: a multi-lead card entry with **no phone** still shows no
+  contact route at all (the single-lead card gained that line in 2026-08-02; the multi one never
+  did). One line to fix, but outside this batch's approved scope. Flagged, not fixed.
+
+**Render env to set at deploy** (env changes need a MANUAL redeploy — Rule 102):
+`FR_DEFER_FILE=/data/fr_deferred.json` · `BULK_QUEUE_FILE=/data/bulk_queue.json` ·
+`SLA_DIGEST_FILE=/data/sla_digest.json` · `SLA_STORE=/data/sla_store.json`.
+Optional: `REHYDRATE_DEFER_H` (defaults to 96 in code).
+**Rollback:** unset the four envs + redeploy → the code falls back to `__dirname`, old behaviour.
+Copy/notify changes revert with one commit; no env, no data migration.
+
+Tests: firstresponse **154** (+28) · gate **64** (+4) · notify **19** (new) · full suite **474** (was 423).
+
 ## 🚨 THE BOT NO LONGER QUOTES A PRICE — 2026-08-10 (Benjamin approved)
 
 Benjamin sent three real screenshots. **All three replies were wrong**, and TM staff had already
