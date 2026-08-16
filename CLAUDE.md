@@ -2,6 +2,79 @@
 
 WhatsApp lead → AI extract → Lark CRM + notify the assigned salesperson. **LIVE.**
 
+## 🌙 "DON'T SAY WE ARE CLOSED" — off-hours qualification — 2026-08-16 (batch 3)
+⚠️ **CODE COMMITTED, NOT DEPLOYED.**
+
+Client: *"Outside operating hours, don't say we are closed now. Say something like I will get the
+sales person to contact you in the next working day ya."* Plus: qualify the customer first, so the
+salesperson opens **"Z900 RS, loan"** on Monday instead of **"Hi"**.
+
+### What a Friday 17:16 customer now sees
+```
+👤  Hi bos, z900 ada stok tak?
+🤖  ✅ Ada ya bos, 2019 Kawasaki Z900 RS (31,000 km). Salesman kami akan confirm harga & plan bulanan dengan bos ya.
+
+    Boleh saya tahu sikit, tuan minat model yang mana ya? Nak cash atau loan? 😊 Saya pass semua detail kat salesman supaya dia terus boleh bantu tuan.
+👤  Z900 RS, nak loan
+🤖  Sales advisor kami akan contact tuan Isnin pagi ya 🙏 Terima kasih tuan.
+```
+**The `⏰ Waktu operasi kami: …` sentence is REMOVED ENTIRELY.** `tpl()`'s 5th parameter changed
+meaning with it: it was `closed` (a boolean), it is now `nextLabel` (`{bm,en}` or null).
+
+### 🚨 The day is COMPUTED, never written
+`hours.nextWindowLabel(nowMs, days, startH, endH)` derives it from the **DISTRIBUTION** window
+(`FR_DIST_*`), not the operating hours — those are two different facts and merging them is the
+2026-07-30 incident. Hardcoding "Isnin" would be that same incident again.
+- Open right now → **null**, and the reply promises no day at all (a rep is getting it).
+- Later today → `pagi ini sebentar lagi` · tomorrow → `esok pagi` · otherwise the weekday name.
+- ⚠️ **After 21:00 it names the day instead of saying "esok".** At 23:00 on a Sunday "esok pagi" is
+  technically right and practically confusing: the customer reads it minutes from midnight, and a
+  lead they expect "tomorrow" is a lead they think was missed.
+- 🚨 **The unresolved Saturday question stays env-only, end to end.** The same Friday 17:16 renders
+  `Isnin pagi` under `FR_DIST_DAYS=1,2,3,4,5` and `esok pagi` under `1,2,3,4,5,6`. Both are tested
+  in `hours_test.js` **and** driven end-to-end through the real flow in `qualify_test.js`.
+
+### The qualify machine
+`state.pending` → `state.qualify[jid] = { ts, asks, cat, want, lang, recordId, phase }`, on `/data`.
+Legacy `pending` entries **migrate on load** (`phase:'model'`) so nobody mid-greeting is stranded at
+deploy. `PENDING_MODEL_MS` **48h → 72h** (a Friday ask answered Monday is 62h later).
+- 🚨 **The Lark row is written and the staff half queued on the FIRST message, unchanged.**
+  Qualification is layered on top and can never delay or replace it. **A customer who answers
+  nothing is still queued and still assigned at the next drain** — the non-negotiable test.
+- Answers PATCH `Customer want` **and the queued entry** (`larkPatchWant`). Patching Lark alone
+  would leave Monday's rep DM carrying the stale pre-qualification snapshot.
+- 🚨 **Ordering: qualify FIRST, phone gate LAST.** A no-phone customer is qualified before the
+  number is asked for. ⚠️ This was **wrong in my first pass** and only surfaced because the test
+  asserted the ordering: the no-phone branch still asked for the number first. No Lark row is
+  written for them until the gate resolves (a row with neither number nor salesman is unactionable
+  — the 2026-07-30 `staff:null` shape).
+- 🚨 **ONE Lark row per customer.** The qualify flow parks a row on message 1, so `gateRelease` on
+  such a lead PATCHES the phone onto it (`larkPatchPhone`) instead of calling `assign()` again.
+  A second call meant **two salespeople ringing one customer about one enquiry.**
+- **Touch cap ≤3**, enforced structurally: a qualify-born hold gets `maxAsks = 1` at the gate, so
+  the evening total is answer+qualifyAsk → re-ask *or* closing → gate ask.
+- `sell` excluded (its template already asks model/year/photos and routes to Fitri).
+- The drain calls `clearQualify(jid)`: a rep owns the chat, the bot stops quizzing.
+
+### 🚨 THE LANDMINE, AND THE TEST THAT GUARDS IT
+`markHuman()` fires on ANY `fromMe` message — **including the bot's own sends echoing back** — so
+the chat is flagged human-owned the instant the bot asks its qualifying question. On 2026-08-05 that
+binned **4 of 4** real phone numbers and made the gate report **0% conversion when the truth was
+100%**, a false number that was nearly used to scrap the feature. `state.qualify` is now in the
+`midFlow` exemption, as the code comment there demands of every future waiting-on-the-customer state.
+**I verified the test refuses:** deleting `state.qualify` from `midFlow` fails 3 assertions in
+`qualify_test.js` (`THE ANSWER IS HEARD, not dropped`). A test that only passes today is not a guard.
+
+**Kill switch `FR_QUALIFY=0`** — pre-qualification behaviour, but the closure sentence stays removed
+and the computed closing day stays. The client banned that sentence; a kill switch must not resurrect it.
+
+⚠️ **Open copy question for the client, NOT reworded by me:** when the customer already named a
+model ("z900 ada stok tak?"), the approved ask still says *"tuan minat model yang mana ya?"*. It is
+defensible (TM stocks several Z900 variants, and asking about stock is not the same as committing to
+a model) but it reads slightly redundant. Approved copy was used verbatim.
+
+Tests: hours **41** (+25) · qualify **58** (new) · firstresponse **174** · full suite **717** (was 633).
+
 ## 👀 "NEEDS A LOOK" — the report's real job, and gap-proof windows — 2026-08-16 (batch 2b)
 ⚠️ **CODE COMMITTED, NOT DEPLOYED.** VPS half is live and idle until the endpoint ships.
 

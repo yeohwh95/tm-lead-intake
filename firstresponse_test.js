@@ -350,9 +350,12 @@ ok(/ADIB : 017-8869542/.test(sent[sent.length-1].text), 'flow: reply carries ass
     wooCheckStock: async () => ({ matches: [] }),
     inDistHours: () => false,
     inOpenHours: () => false,          // 2am — the shop is genuinely SHUT
-    // Wired to the REAL generator off the REAL OPERATING window, so the quoted hours can never drift
-    // from when TM is actually open again (the 2026-07-30 "Isnin–Jumaat 9–5" incident).
     hoursLabel: () => require('./hours').hoursLabel([1,2,3,4,5,6], 9, 18),
+    // Wired to the REAL generator off the REAL DISTRIBUTION window, so the promised day can never
+    // drift from when a rep actually picks the lead up (the 2026-07-30 hardcoding incident).
+    nextWindowLabel: () => require('./hours').nextWindowLabel(
+      Date.parse('2026-08-16T15:00:00Z'), [1,2,3,4,5], 9, 17),   // Sun 23:00 MYT
+    larkPatchWant: async () => {}, larkPatchPhone: async () => {},
     deferStaffNotify: e => deferred.push(e),
   });
   const nDm = dms.length, nSent2 = sent.length;
@@ -360,9 +363,11 @@ ok(/ADIB : 017-8869542/.test(sent[sent.length-1].text), 'flow: reply carries ass
   await wait(120);
   const nightReply = sent[sent.length - 1];
   ok(sent.length === nSent2 + 1 && nightReply.to === 'cust7@s.whatsapp.net', 'flow: off-hours customer still gets an instant reply');
-  ok(/Waktu operasi kami/.test(nightReply.text), 'flow: off-hours reply says SA will contact during office hours');
-  ok(/Isnin–Sabtu, 9 pagi–6 petang/.test(nightReply.text), 'flow: off-hours reply quotes the REAL window (Mon–Sat 9–6), generated not hardcoded');
-  ok(!/Isnin–Jumaat|9 pagi–5 petang/.test(nightReply.text), 'flow: the old wrong hours (Mon–Fri 9–5) are gone');
+  // 🚨 THE CLIENT BANNED THE CLOSURE SENTENCE (2026-08-16): "don't say we are closed now. Say
+  // something like I will get the sales person to contact you in the next working day ya."
+  ok(!/Waktu operasi kami|pejabat dibuka semula|office hours are/.test(nightReply.text),
+     '🚨 flow: off-hours reply NEVER says we are closed');
+  ok(!/Isnin–Jumaat|9 pagi–5 petang|Isnin–Sabtu/.test(nightReply.text), 'flow: no operating-hours range is quoted at all any more');
   ok(!/ADIB : /.test(nightReply.text), 'flow: off-hours reply has NO salesman card');
   ok(assigned.some(a => a.want && /cbr250/i.test(a.want) && !a.assignee), 'flow: off-hours lead written to Lark UNASSIGNED');
   ok(dms.length === nDm, 'flow: off-hours — no salesman DM sent');
@@ -371,7 +376,16 @@ ok(/ADIB : 017-8869542/.test(sent[sent.length-1].text), 'flow: reply carries ass
   // off-hours trade-in → Fitri DM deferred the same way
   fr.onMessage({ jid: 'cust8@s.whatsapp.net', phone: '60188888888', kind: 'text', text: 'nak jual motor y16' });
   await wait(120);
-  ok(/Waktu operasi kami/.test(sent[sent.length - 1].text) && !/FITRI : /.test(sent[sent.length - 1].text), 'flow: off-hours sell reply — office-hours line, no Fitri card');
+  {
+    const sellNight = sent[sent.length - 1].text;
+    ok(!/Waktu operasi kami/.test(sellNight) && !/FITRI : /.test(sellNight),
+       'flow: off-hours sell reply has no closed-hours line and no Fitri card');
+    // `sell` is deliberately OUT of qualification (its template already asks model/year/photos and
+    // routes to Fitri) — so it gets the closing line instead of a qualifying question.
+    ok(/Sales advisor kami akan contact tuan Isnin pagi ya/.test(sellNight),
+       '🚨 flow: sell still commits to the computed next working day');
+    ok(!/minat model yang mana/.test(sellNight), 'flow: sell is NOT put through qualification');
+  }
   ok(deferred.some(e => e.kind === 'dm' && /Trade-in Lead/.test(e.text)), 'flow: off-hours Fitri DM queued for the drain');
 
   // ---- @lid customer with NO phone at all (2026-08-02 incident, 5 real customers) ----
@@ -433,6 +447,9 @@ ok(/ADIB : 017-8869542/.test(sent[sent.length-1].text), 'flow: reply carries ass
     inDistHours: () => false,          // Saturday → bot does not hand the lead out
     inOpenHours: () => true,           // …but the shop IS open
     hoursLabel: () => require('./hours').hoursLabel([1,2,3,4,5,6], 9, 18),
+    nextWindowLabel: () => require('./hours').nextWindowLabel(
+      Date.parse('2026-08-15T03:00:00Z'), [1,2,3,4,5], 9, 17),   // Sat 11:00 MYT, dist Mon–Fri
+    larkPatchWant: async () => {}, larkPatchPhone: async () => {},
     deferStaffNotify: e => satDeferred.push(e),
     larkWriteLead: async l => { assigned.push(l); return 'recSAT'; },
   });
@@ -443,7 +460,8 @@ ok(/ADIB : 017-8869542/.test(sent[sent.length-1].text), 'flow: reply carries ass
   ok(sent.length === nSentSat + 1, 'saturday: customer still gets an instant reply');
   ok(!/Waktu operasi kami|bila pejabat dibuka semula/.test(satReply.text), 'saturday: NO "we are closed / when we reopen" line — the shop is open');
   ok(!/ADIB : |https:\/\/wa\.me\/60178869542/.test(satReply.text), 'saturday: NO salesman card — nobody is auto-assigned');
-  ok(/menghubungi anda/.test(satReply.text), 'saturday: still promises an advisor will be in touch');
+  ok(/Isnin pagi|minat model yang mana/.test(satReply.text),
+     'saturday: still promises follow-up, now naming the real next working day');
   ok(satDeferred.some(e => e.kind === 'pool'), 'saturday: staff-facing half queued for the Monday 9am drain (backstop)');
 
   // Trade-in on a Saturday → Fitri's DM defers, and her Lark Salesman cell IS now filled in
@@ -581,7 +599,10 @@ ok(/ADIB : 017-8869542/.test(sent[sent.length-1].text), 'flow: reply carries ass
     ok(sent.some(s => /MT-09/.test(s.text)), 'dash: in-word model hyphens survived (MT-09)');
     ok(sent.some(s => /017-8869542|010-8093259/.test(s.text)), 'dash: display phone hyphens survived');
     ok(sent.some(s => /trade-in/i.test(s.text)), 'dash: "trade-in" survived');
-    ok(sent.some(s => /9 pagi–6 petang/.test(s.text)), 'dash: the en-dash HOUR RANGE from hours.js is untouched (a range, not punctuation)');
+    // ⚠️ Moved off `sent` (2026-08-16): the closed-hours sentence was the only message that carried
+    // an hour range, and it is gone. The RULE still stands, so assert it at the source instead.
+    ok(/9 pagi–6 petang/.test(require('./hours').hoursLabel([1,2,3,4,5,6], 9, 18).bm),
+       'dash: the en-dash HOUR RANGE in hours.js is untouched (a range, not punctuation)');
   }
 
   console.log(`\n${pass} passed, ${fail} failed`);

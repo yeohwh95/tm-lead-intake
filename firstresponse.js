@@ -10,15 +10,37 @@ const path = require('path');
 const ON = () => process.env.FIRSTRESPONSE_ON === '1';
 const DEBOUNCE_MS = Number(process.env.FR_DEBOUNCE_MS || 10 * 1000);
 const REGREET_MS = 7 * 24 * 3600 * 1000;         // one bot greeting per chat per 7 days
-const PENDING_MODEL_MS = 48 * 3600 * 1000;       // greeting flow: wait up to 48h for the model answer
+// 72h, raised from 48h (2026-08-16): the same weekend arithmetic as REHYDRATE_DEFER_H. A customer
+// asked "berminat motor apa?" on a Friday evening who answers Monday morning is 62h later, and at
+// 48h their answer would have been treated as a brand-new conversation.
+const PENDING_MODEL_MS = 72 * 3600 * 1000;
+// Kill switch. OFF restores the pre-qualification flow EXCEPT the closed-hours sentence, which the
+// client banned outright — the fallback is the plain handoff line plus the computed closing day.
+const QUALIFY_ON = () => process.env.FR_QUALIFY !== '0';
+const QUALIFY_MAX_ASKS = 2;
 // Env-configurable so it can live on a Render disk. Without one this file is wiped on every
 // deploy — which is why rehydrateGreeted() exists, and why a phone-gate hold would otherwise
 // be lost mid-flight (the customer would then never be assigned to anyone).
 const STATE_FILE = process.env.FR_STATE_FILE || path.join(__dirname, 'fr_state.json');
 
 let D = {};                                       // injected deps from index.js
-let state = { greeted: {}, pending: {} };         // jid -> ts ; jid -> {ts}
+// jid -> ts · jid -> { ts, asks, cat, want, lang, recordId, phase }
+let state = { greeted: {}, qualify: {} };
 try { state = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8')); } catch {}
+// MIGRATION (2026-08-16): `state.pending` (the old greeting flow, jid -> {ts}) becomes
+// `state.qualify` with phase 'model'. There is one live file on the persistent disk and a customer
+// mid-greeting at deploy time must not be stranded — their next message has to still be recognised
+// as the answer we asked for, not treated as a fresh conversation.
+state.greeted = state.greeted || {};
+state.qualify = state.qualify || {};
+if (state.pending && typeof state.pending === 'object'){
+  for (const jid of Object.keys(state.pending)){
+    if (state.qualify[jid]) continue;
+    const p = state.pending[jid] || {};
+    state.qualify[jid] = { ts: p.ts || Date.now(), asks: 1, phase: 'model', cat: '', want: '', lang: 'bm', recordId: null };
+  }
+  delete state.pending;
+}
 const persist = () => { try { fs.writeFileSync(STATE_FILE, JSON.stringify(state)); } catch {} };
 
 const humanTouched = new Set();                   // jids where a HUMAN (fromMe) has spoken since boot
@@ -97,22 +119,34 @@ const LOAN_EPP  = 'Maybank, Public Bank, UOB, RHB, OCBC, Affin, AmBank, HLB, All
 const CS_PRICE_BM = `Untuk harga & plan bulanan saya customer service je, tak berani bagi angka salah 🙏 Salesman kami akan confirm dengan tuan ya.`;
 const CS_PRICE_EN = `For the price & monthly plan I'm customer service only, I don't want to give you a wrong number 🙏 Our salesperson will confirm with you ya.`;
 
-// `closed` = outside TM's OPERATING hours (genuinely shut). NOT the same as "outside the
-// distribution window" — see the three-state comment in index.js. On a Saturday, or 5–6pm on a
-// weekday, the shop is OPEN and a human watches the inbox; the bot just doesn't auto-assign. Telling
-// those customers "we'll contact you when we reopen" was wrong, so that line is now reserved for
-// genuinely-closed hours and they simply get no salesman card (Benjamin's call, 2026-07-30).
-function tpl(cat, lang, card, stockLine, closed){
+// ---------- off-hours qualification copy (Benjamin approved 2026-08-16) ----------
+// ONE message that asks the two things a salesperson always needs before they can help: which
+// model, and cash or loan. Replaces the old bare "berminat motor apa?" outside the window, so the
+// rep opens a qualified lead on Monday instead of "Hi".
+const qualifyAsk = lang => lang === 'en'
+  ? `Can I get a bit more detail, which model are you interested in? Cash or loan? 😊 I'll pass all the details to our salesman so he can help you straight away.`
+  : `Boleh saya tahu sikit, tuan minat model yang mana ya? Nak cash atau loan? 😊 Saya pass semua detail kat salesman supaya dia terus boleh bantu tuan.`;
+// 🚨 THE DAY IS COMPUTED (D.nextWindowLabel), NEVER HARDCODED. Writing "Isnin" into this string is
+// exactly the 2026-07-30 hours-drift incident: a customer-facing fact that also exists as config
+// will drift from it. `label` comes from the real FR_DIST_* window.
+const closingLine = (lang, label) => lang === 'en'
+  ? `Our sales advisor will contact you ${label.en} ya 🙏 Thank you!`
+  : `Sales advisor kami akan contact tuan ${label.bm} ya 🙏 Terima kasih tuan.`;
+
+// 🚨 THE CLOSED-HOURS SENTENCE IS GONE (client, 2026-08-16): "Outside operating hours, don't say we
+// are closed now. Say something like I will get the sales person to contact you in the next working
+// day ya." The 5th parameter changed MEANING with it — it was `closed` (a boolean), it is now
+// `nextLabel` ({bm,en} or null). When there is no salesperson card but we DO know when the next
+// assignment window opens, the reply commits to that day by name instead of announcing a closure.
+function tpl(cat, lang, card, stockLine, nextLabel){
   const g = saMYT();
-  // ⚠️ The hours SENTENCE is generated from the OPERATING-hours config (`D.hoursLabel`, fed by
-  // FR_HOURS_DAYS/START/END in index.js) — never hardcoded again. It was, and it drifted: the message
-  // said "Isnin–Jumaat, 9 pagi–5 petang" while TM actually operates Mon–Sat 9–6, so the bot quoted
-  // hours TM doesn't keep for 8 days (Harith flagged it 2026-07-30 with a real screenshot).
-  const H = (D.hoursLabel && D.hoursLabel()) || { en: 'Mon–Sat, 9am–6pm', bm: 'Isnin–Sabtu, 9 pagi–6 petang' };
+  // ⚠️ The OPERATING-hours sentence used to be built here from `D.hoursLabel`. It is gone with the
+  // closed-hours branch, so that dep is now unused by this module (index.js still injects it and
+  // still logs both windows at boot — hours.js itself stays, it now also owns nextWindowLabel).
+  // The 2026-07-30 lesson survives the deletion and is why the DAY below is computed, not written:
+  // never hardcode a customer-facing fact that also exists as config.
   const c = card ? `\n\n${card.name.toUpperCase()} : ${card.disp}\nhttps://wa.me/${card.digits}`
-    : closed ? (lang === 'en'
-        ? `\n\n⏰ Our office hours are ${H.en}. Our sales advisor will contact you once we're back in office 🙏`
-        : `\n\n⏰ Waktu operasi kami: ${H.bm}. Sales advisor kami akan menghubungi anda bila pejabat dibuka semula ya 🙏`)
+    : nextLabel ? `\n\n${closingLine(lang, nextLabel)}`
     : '';
   const s = stockLine ? `\n\n${stockLine}` : '';
   if (cat === 'sell') return (lang === 'en'
@@ -483,9 +517,13 @@ const gateGotUser = lang => lang === 'en'
   ? `Got it, thank you! 🙏 Passing your username to our sales advisor, they'll follow up with you right here in this chat.`
   : `Ok, terima kasih bos! 🙏 Saya pass username tuan kat sales advisor, dia akan follow up terus dalam chat ni.`;
 
-function gateHold(jid, cat, want, lang){
+// `opts.recordId` = this lead ALREADY has a Lark row (it was parked by the off-hours qualify flow).
+// `opts.fromQualify` clamps the re-ask budget so the evening total stays within the 3-message cap.
+function gateHold(jid, cat, want, lang, opts){
+  const o = opts || {};
   state.awaitingPhone = state.awaitingPhone || {};
-  state.awaitingPhone[jid] = { ts: Date.now(), asks: 1, cat, want, lang };
+  state.awaitingPhone[jid] = { ts: Date.now(), asks: 1, cat, want, lang,
+    recordId: o.recordId || null, fromQualify: !!o.fromQualify };
   persist();
   D.log(`FR ⏳ HELD for phone — ${cat} (${jid.slice(0, 22)}) "${String(want).slice(0, 40)}"`);
   gateLogEvent('held', jid, { cat, first_message: String(want).slice(0, 120) });
@@ -499,9 +537,22 @@ function gateHold(jid, cat, want, lang){
 async function gateRelease(jid, h, phone, reason){
   delete (state.awaitingPhone || {})[jid]; persist();
   const ctx = { gated: true };
-  const card = await assign(h.cat, jid, phone || '', h.want, ctx);
-  const closed = !!(D.inOpenHours && !D.inOpenHours());
-  try { await D.waSend(sendTarget(jid, phone), tpl(h.cat, h.lang, card, '', closed)); }
+  // 🚨 TWO SALESPEOPLE, ONE ENQUIRY — the defect this branch exists to prevent. The off-hours
+  // qualify flow ALREADY wrote a Lark row and queued the staff half on the customer's first
+  // message. Calling assign() again here would create a SECOND row for the same person, put it in
+  // the round-robin a second time, and have two reps ring them about the same bike. So when the
+  // hold carries a recordId, patch the number onto the row that exists and assign NOTHING.
+  let card = null;
+  if (h.recordId){
+    try { if (D.larkPatchPhone && phone) await D.larkPatchPhone(h.recordId, phone); }
+    catch(e){ D.log('FR lark patch-phone err:', String(e.message||e).slice(0,60)); }
+    ctx.outcome = 'parked'; ctx.assignee = ''; ctx.recordId = h.recordId;
+    D.log(`FR 🔗 gate released onto the EXISTING parked row (${jid.slice(0,22)}) rec=${h.recordId}${phone ? ' +' + phone : ''}`);
+  } else {
+    card = await assign(h.cat, jid, phone || '', h.want, ctx);
+  }
+  const nextLabel = (D.inDistHours && !D.inDistHours() && D.nextWindowLabel) ? (D.nextWindowLabel() || null) : null;
+  try { await D.waSend(sendTarget(jid, phone), tpl(h.cat, h.lang, card, '', nextLabel)); }
   catch(e){ D.log('FR gate release send err:', String(e.message||e).slice(0,60)); }
   D.log(`FR ✅ gate released (${reason}) — ${h.cat} ${phone ? '+' + phone : 'NO PHONE'} (${jid.slice(0,22)})`
     + (ctx.outcome && ctx.outcome !== 'assigned' ? ` [${ctx.outcome}]` : ''));
@@ -551,7 +602,10 @@ async function gateOnReply(jid, h, text, bphone){
                       '', 'customer gave username');
     return true;
   }
-  if (h.asks < GATE_MAX_ASKS){
+  // ⚠️ TOUCH CAP. A qualify-born hold has already used ① the answer+qualifyAsk and ② the gate ask,
+  // so it gets NO re-ask — otherwise an evening customer could receive four ask-type messages.
+  const maxAsks = h.fromQualify ? 1 : GATE_MAX_ASKS;
+  if (h.asks < maxAsks){
     // A username offer and a "why" both deserve a real answer, not the same request again.
     const offered = RE_GATE_USERNAME.test(text);
     const body = offered                   ? gateUsername(h.lang)
@@ -585,7 +639,7 @@ async function gateSweep(){
     // so a lead can never be stranded in a hold nobody releases.
     if (h && h.ts && now - h.ts < GATE_MS) continue;
     if (humanTouched.has(jid)){          // a human already owns this chat — don't double-handle
-      delete held[jid]; persist();
+      delete held[jid]; delete state.qualify[jid]; persist();
       D.log(`FR gate dropped — human took over (${jid.slice(0,22)})`);
       // This is a REAL ending, so it must be logged as one. Without the event the hold simply
       // vanishes: /gate-status shows nothing held and no outcome, so the lead reads as stuck
@@ -617,22 +671,56 @@ async function flush(jid){
   const heldEntry = (state.awaitingPhone || {})[jid];
   if (heldEntry){ await gateOnReply(jid, heldEntry, text, b.phone); return; }
 
-  const pend = state.pending[jid];
+  const q = state.qualify[jid];
   let { cat, imageOnly } = await classifySmart(text, b.hasImage);
   const lang = isEnglish(text) ? 'en' : 'bm';
+  // Outside the DISTRIBUTION window nobody is assigned right now, so the reply must commit to a
+  // day instead of announcing a closure. null while the window is open (a rep gets it immediately).
+  const nextLabel = (D.inDistHours && !D.inDistHours() && D.nextWindowLabel) ? (D.nextWindowLabel() || null) : null;
 
-  if (pend && now - pend.ts < PENDING_MODEL_MS){
-    // they answered our "berminat motor apa?" — category confirmed → assign FIRST, reply with the card.
-    delete state.pending[jid]; persist();
+  if (q && now - q.ts < PENDING_MODEL_MS){
+    // ── They answered something we asked for ──────────────────────────────────────────────────
+    // phase 'detail' = the off-hours qualification (model + cash/loan), lead ALREADY parked.
+    // phase 'model'  = the in-window greeting flow, nothing written yet.
+    const vague = VAGUE(text) && !b.hasImage;
+
+    if (q.phase === 'detail'){
+      // 🚨 The lead is already in Lark and already queued for the drain. NOTHING here may create a
+      // second row or a second queue entry — the answer only ENRICHES what exists.
+      if (vague && (q.asks || 1) < QUALIFY_MAX_ASKS){
+        q.asks = (q.asks || 1) + 1; q.ts = now; state.qualify[jid] = q; persist();
+        await D.waSend(sendTarget(jid, b.phone), qualifyAsk(q.lang || lang));
+        return;
+      }
+      if (vague){ delete state.qualify[jid]; persist(); return; }   // asked twice, go quiet. Queue untouched.
+      const qualified = `${q.want || ''} | qualified: ${text}`.slice(0, 200);
+      try { if (D.larkPatchWant && q.recordId) await D.larkPatchWant(q.recordId, qualified); }
+      catch(e){ D.log('FR lark patch-want err:', String(e.message||e).slice(0,60)); }
+      frLogEvent('qualified', jid, { has_phone: !!b.phone, cat: q.cat || cat, phone: b.phone || '',
+        want: qualified.slice(0, 120), recordId: q.recordId || null, note: 'off_hours_qualify' });
+      delete state.qualify[jid]; persist();
+      if (b.phone){
+        await D.waSend(sendTarget(jid, b.phone), nextLabel ? closingLine(lang, nextLabel)
+          : tpl(q.cat || cat, lang, null, '', null));
+        return;
+      }
+      // ⚠️ ORDERING: the phone gate is LAST, and only AFTER a real answer. Never model + phone +
+      // username stacked into one evening. This is ask #3, the cap.
+      gateHold(jid, q.cat || cat, qualified, lang, { recordId: q.recordId || null, fromQualify: true });
+      await D.waSend(sendTarget(jid, b.phone), gateAsk(lang));
+      return;
+    }
+
+    // ── phase 'model': the original greeting flow, unchanged in-window ────────────────────────
+    delete state.qualify[jid]; persist();
     const finalCat = (cat === 'sell' || cat === 'loan' || cat === 'testride') ? cat : 'product';
-    const want = VAGUE(text) && !b.hasImage ? '[ad click, model belum stated, sila probe]' : (text || '[gambar/screenshot iklan]');
+    const want = vague ? '[ad click, model belum stated, sila probe]' : (text || '[gambar/screenshot iklan]');
     const stockLine = await stockLineFor(finalCat, text, lang);
-    const closed = !!(D.inOpenHours && !D.inOpenHours());   // genuinely shut, NOT merely outside the assign window
     if (!b.phone){
       // No number at all — answer them, then ask, and hold the assignment. tpl() with card=null
       // reads naturally ("our sales advisor will contact you shortly") without naming anyone.
       gateHold(jid, finalCat, want, lang);
-      await D.waSend(sendTarget(jid, b.phone), tpl(finalCat, lang, null, stockLine, false));
+      await D.waSend(sendTarget(jid, b.phone), tpl(finalCat, lang, null, stockLine, null));
       await D.waSend(sendTarget(jid, b.phone), gateAsk(lang));
       return;
     }
@@ -641,7 +729,7 @@ async function flush(jid){
     frLogEvent(ctx.outcome || 'assigned', jid, { has_phone: !!b.phone, cat: finalCat,
       assignee: ctx.assignee || '', phone: b.phone || '', want: String(want).slice(0, 120),
       recordId: ctx.recordId || null });
-    await D.waSend(sendTarget(jid, b.phone), tpl(finalCat, lang, card, stockLine, closed));
+    await D.waSend(sendTarget(jid, b.phone), tpl(finalCat, lang, card, stockLine, nextLabel));
     return;
   }
   if (cat === 'skip'){
@@ -669,21 +757,56 @@ async function flush(jid){
   state.greeted[jid] = now;
 
   if (cat === 'greeting'){
-    state.pending[jid] = { ts: now }; persist();
+    // Off-window a bare "Hi" gets the FULL qualifying ask (model AND cash/loan) instead of just
+    // "berminat motor apa?", because there is no rep coming until the next window and this is the
+    // one chance to hand them a useful lead. In-window the original wording is unchanged.
+    const offWindow = !!(nextLabel && QUALIFY_ON());
+    state.qualify[jid] = { ts: now, asks: 1, phase: 'model', cat: '', want: String(text).slice(0, 120), lang, recordId: null };
+    persist();
     // We asked which bike; until they answer, nobody can be assigned. Superseded by the answer's
     // own event, so this only ever shows up for customers who never replied.
     frLogEvent('awaiting_model', jid, { has_phone: !!b.phone, cat: 'greeting', phone: b.phone || '',
       want: String(text).slice(0, 120), recordId: null });
-    await D.waSend(sendTarget(jid, b.phone), tpl('greeting', lang));
+    await D.waSend(sendTarget(jid, b.phone), offWindow ? qualifyAsk(lang) : tpl('greeting', lang));
     return;
   }
   persist();
   const stockLine = await stockLineFor(cat, imageOnly ? '' : text, lang);
   const want = imageOnly ? '[gambar/screenshot iklan]' : text;
-  const closed = !!(D.inOpenHours && !D.inOpenHours());   // genuinely shut, NOT merely outside the assign window
+
+  // ── OFF-WINDOW QUALIFICATION (2026-08-16) ─────────────────────────────────────────────────────
+  // 🚨 The lead is written to Lark and PARKED on this FIRST message, exactly as before — the
+  // qualification is layered on top and can never delay or replace it. A customer who answers
+  // nothing at all is still queued and still assigned at the next drain. Never lose a lead.
+  // `sell` is excluded: its template already asks model/year/photos and routes to Fitri.
+  if (nextLabel && QUALIFY_ON() && cat !== 'sell'){
+    let recordId = null;
+    if (b.phone){
+      const ctx = {};
+      await assign(cat, jid, b.phone, want, ctx);         // writes Lark + queues the staff half
+      recordId = ctx.recordId || null;
+      frLogEvent(ctx.outcome || 'parked', jid, { has_phone: true, cat, assignee: ctx.assignee || '',
+        phone: b.phone, want: String(want).slice(0, 120), recordId });
+    } else {
+      // ⚠️ NO PHONE, so NO Lark row yet — the phone gate's standing rule. A row with neither a
+      // number nor a salesman is a lead nobody can act on, and `larkWriteLead` with `staff:null`
+      // is the shape that charged Fitri's trade-ins to Ikhwan (2026-07-30). We still qualify
+      // FIRST though: the gate ask comes only after they answer, never stacked with it.
+      frLogEvent('gate_held', jid, { has_phone: false, cat, phone: '',
+        want: String(want).slice(0, 120), recordId: null, note: 'qualify_before_gate' });
+    }
+    state.qualify[jid] = { ts: now, asks: 1, phase: 'detail', cat, want: String(want).slice(0, 160),
+      lang, recordId };
+    persist();
+    // ONE message: the stock answer (if any) plus the qualifying ask. No closing line yet, no
+    // salesman card, and NO phone ask — that comes last, and only after they answer.
+    await D.waSend(sendTarget(jid, b.phone), (stockLine ? stockLine + '\n\n' : '') + qualifyAsk(lang));
+    return;
+  }
+
   if (!b.phone){
     gateHold(jid, cat, want, lang);
-    await D.waSend(sendTarget(jid, b.phone), tpl(cat, lang, null, stockLine, false));
+    await D.waSend(sendTarget(jid, b.phone), tpl(cat, lang, null, stockLine, null));
     await D.waSend(sendTarget(jid, b.phone), gateAsk(lang));
     return;
   }
@@ -692,7 +815,7 @@ async function flush(jid){
   frLogEvent(ctx.outcome || 'assigned', jid, { has_phone: !!b.phone, cat,
     assignee: ctx.assignee || '', phone: b.phone || '', want: String(want).slice(0, 120),
     recordId: ctx.recordId || null });
-  await D.waSend(sendTarget(jid, b.phone), tpl(cat, lang, card, stockLine, closed));
+  await D.waSend(sendTarget(jid, b.phone), tpl(cat, lang, card, stockLine, nextLabel));
 }
 
 function onMessage(info){
@@ -720,7 +843,11 @@ function onMessage(info){
     // (014-8369971 · 01160727568 · 0169559643 · 0102360706) and two also gave a username
     // (@Keekzy77 · @hkm.hkmi) — all silently dropped. The gate reported 0/8 conversion when the
     // truth was 4/4. Any future "waiting on the customer" state MUST be added here too.
-    const midFlow = state.pending[info.jid] || (state.awaitingPhone || {})[info.jid];
+    // 🚨 EVERY "waiting on the customer" state belongs here. `state.qualify` is one (2026-08-16):
+    // without it, the bot's own qualifyAsk echoes back as fromMe, flags the chat human-owned, and
+    // the customer's model/cash-or-loan answer is dropped before it is even buffered — precisely
+    // the 2026-08-05 failure that binned 4 of 4 real phone numbers and reported 0% conversion.
+    const midFlow = state.qualify[info.jid] || (state.awaitingPhone || {})[info.jid];
     if (humanTouched.has(info.jid) && !midFlow){
       // A human owns this chat. That is a legitimate ending (TM staff watch this inbox), but it
       // used to leave no trace at all, so the day's story had a hole exactly where the bot chose
@@ -784,11 +911,23 @@ function rehydrateGreeted(entries){
   return n;
 }
 
+// Called by the morning drain when a parked lead finally reaches a rep. The rep owns the chat from
+// that moment, so the bot must stop asking qualifying questions into it.
+function clearQualify(jid){
+  if (!jid) return;
+  let n = 0;
+  if (state.qualify[jid]){ delete state.qualify[jid]; n++; }
+  if ((state.awaitingPhone || {})[jid]){ delete state.awaitingPhone[jid]; n++; }
+  if (n) persist();
+  return n;
+}
+
 function init(deps){ D = deps; D.log('firstresponse init — ON:', ON(), 'debounce:', DEBOUNCE_MS + 'ms'); }
-module.exports = { init, onMessage, markHuman, rehydrateGreeted, gateSweep, gateReadEvents, gateLogParked, readFrEvents,
+module.exports = { init, onMessage, markHuman, rehydrateGreeted, gateSweep, gateReadEvents, gateLogParked, readFrEvents, clearQualify,
   gateStatus: () => Object.entries(state.awaitingPhone || {}).map(([jid, h]) => ({
     jid, cat: h.cat, asks: h.asks, note: h.note || '',
     waitingMin: Math.round((Date.now() - (h.ts || Date.now())) / 60000),
     minutesLeft: Math.max(0, Math.round((GATE_MS - (Date.now() - (h.ts || Date.now()))) / 60000)) })),
   _gateParsePhone: gateParsePhone, _classify: classify, _tpl: tpl, _isEnglish: isEnglish, _state: () => state,
+  _qualifyAsk: qualifyAsk, _closingLine: closingLine,
   _frLogEvent: frLogEvent, _eventsFile: () => FR_EVENTS_FILE, RE_BIKE };

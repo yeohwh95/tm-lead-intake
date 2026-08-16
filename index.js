@@ -1003,6 +1003,31 @@ async function larkUpdateSalesman(recordId, openId){
   await fetch(`${LARK_BASE}/bitable/v1/apps/${LARK_APP_TOKEN}/tables/${LARK_TABLE_ID}/records/${recordId}`, { method: 'PUT', headers: { 'Authorization': 'Bearer ' + tok, 'Content-Type': 'application/json' }, body: JSON.stringify({ fields: { Salesman: [{ id: openId }] } }) });
 }
 
+// ---- Off-hours qualification (2026-08-16): enrich the row that already exists ----
+// 🚨 The deferred queue snapshotted the ORIGINAL want at first-message time. Monday's rep DM is
+// built from that snapshot, so patching Lark alone would leave the rep opening the STALE
+// pre-qualification text ("Hi") while the CRM row said "Hi | qualified: Z900, cash". Both move.
+async function larkPatchWant(recordId, text){
+  if (!recordId || !text) return;
+  const tok = await larkToken();
+  await fetch(`${LARK_BASE}/bitable/v1/apps/${LARK_APP_TOKEN}/tables/${LARK_TABLE_ID}/records/${recordId}`,
+    { method: 'PUT', headers: { 'Authorization': 'Bearer ' + tok, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ fields: { 'Customer want': text } }) });
+  const e = frDeferred.find(x => x.recordId === recordId);
+  if (e && e.want !== undefined){ e.want = text; frDeferPersist(); }
+}
+// Same shape, for the phone the customer finally gives at the gate. Used INSTEAD of a second
+// assign() when the lead was already parked — see gateRelease's two-salespeople note.
+async function larkPatchPhone(recordId, phone){
+  if (!recordId || !phone) return;
+  const tok = await larkToken();
+  await fetch(`${LARK_BASE}/bitable/v1/apps/${LARK_APP_TOKEN}/tables/${LARK_TABLE_ID}/records/${recordId}`,
+    { method: 'PUT', headers: { 'Authorization': 'Bearer ' + tok, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ fields: { 'Phone number': phone } }) });
+  const e = frDeferred.find(x => x.recordId === recordId);
+  if (e){ e.phone = phone; frDeferPersist(); }
+}
+
 // ---- SLA: patch any set of SLA columns on a lead row (response/reassign/nudge/escalate) ----
 async function larkUpdateSLA(recordId, fields){
   if (!recordId || !fields || !Object.keys(fields).length) return;
@@ -1260,7 +1285,11 @@ function deferStaffNotify(entry){ frDeferred.push({ ...entry, queuedAt: Date.now
 // and would just be noise in there. Entries queued before this shipped (or re-queued from Lark by
 // rehydrateFromLark) carry no jid, so they are skipped rather than logged against the wrong chat.
 function gateLogParkRelease(e, assignee){
-  if (!e || !e.gated || !e.jid) return;
+  if (!e || !e.jid) return;
+  // A rep owns this chat from now on, so the bot must stop asking qualifying questions into it.
+  // Runs for EVERY released entry, gated or not — an off-hours qualify lead is not a gate lead.
+  try { firstresponse.clearQualify(e.jid); } catch(err){ log('FR clearQualify err', String(err.message||err).slice(0,60)); }
+  if (!e.gated) return;
   try {
     firstresponse.gateLogParked(e.jid, {
       cat: e.cat || '', salesperson: assignee || '', reason: 'released from overnight park',
@@ -1308,7 +1337,11 @@ setInterval(() => { firstresponse.gateSweep().catch(e => log('FR gate sweep err'
   // boot: a snapshot would keep treating a departed rep as staff, and would treat a NEWLY added rep's
   // own messages as customer leads, until the next deploy.
   const isStaffPhone = p => { const d = String(p || '').replace(/\D/g, ''); return !!d && (!!identity.nameByPhone(STAFF_BY_LAST9, d) || FR_EXTRA_INTERNAL.has(d)); };
-  firstresponse.init({ waSend, assignLeads, larkWriteLead, notifyStaff, sla, getUnavailable, log, isStaffPhone, wooCheckStock, aiClassify, inDistHours: inFRDistHours, inOpenHours: inFROpenHours, deferStaffNotify, hoursLabel });
+  firstresponse.init({ waSend, assignLeads, larkWriteLead, notifyStaff, sla, getUnavailable, log, isStaffPhone, wooCheckStock, aiClassify, inDistHours: inFRDistHours, inOpenHours: inFROpenHours, deferStaffNotify, hoursLabel,
+    // WHEN a rep will actually pick the lead up, derived from the DISTRIBUTION window — never the
+    // operating hours, and never hardcoded (2026-07-30). Tests inject their own.
+    nextWindowLabel: () => require('./hours').nextWindowLabel(Date.now(), FR_DIST_DAYS, FR_DIST_START, FR_DIST_END),
+    larkPatchWant, larkPatchPhone });
   log('🕘 Operating hours (told to customers): ' + hoursLabel().en + ' / ' + hoursLabel().bm);
   log('🕘 Lead auto-assignment window: ' + fmtHours(FR_DIST_DAYS, FR_DIST_START, FR_DIST_END).en + ' — deliberately narrower than operating hours');
   setTimeout(() => rehydrateFromLark().catch(e => log('rehydrate err:', String(e.message||e).slice(0,80))), 20000);
