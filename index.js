@@ -13,13 +13,18 @@ const WASENDER_TOKEN = process.env.WASENDER_TOKEN || '';
 // "no lead found" alert → internal work group "AI Agent Project TM Motoworld" via the PA number (own token).
 const REVIEW_GROUP_JID = process.env.REVIEW_GROUP_JID || '';     // 120363409140518905@g.us
 const REVIEW_TOKEN     = process.env.REVIEW_TOKEN || '';         // PA WaSender token (different number)
+// Returns TRUE only when the group actually received it. The summary window marker advances on
+// that boolean and nothing else: a failed send must leave the window open so the NEXT card
+// absorbs the span, instead of silently skipping it (2026-08-15).
 async function alertReview(text){
-  if (!REVIEW_GROUP_JID || !REVIEW_TOKEN) return;
+  if (!REVIEW_GROUP_JID || !REVIEW_TOKEN) return false;
   try {
-    await fetch(WASENDER_BASE + '/send-message', { method:'POST',
+    const r = await fetch(WASENDER_BASE + '/send-message', { method:'POST',
       headers:{ 'Authorization':'Bearer '+REVIEW_TOKEN, 'Content-Type':'application/json', 'User-Agent':UA },
       body: JSON.stringify({ to: REVIEW_GROUP_JID, text }) });
-  } catch (e) { log('alertReview failed', String(e.message||e)); }
+    if (!r.ok) log('alertReview HTTP ' + r.status);
+    return !!r.ok;
+  } catch (e) { log('alertReview failed', String(e.message||e)); return false; }
 }
 // ---- SLA group digest: buffer routine notices → ONE summary at 12PM + 6PM MYT (no more 1-by-1 spam) ----
 const _fs = require('fs'), _path = require('path');
@@ -121,36 +126,98 @@ async function larkSummaryCross(dayStartMs, dayEndMs){
     return { rows, capped: items.length >= 100, error: null };
   } catch (e){ return { rows: 0, capped: false, error: String(e.message || e).slice(0, 80) }; }
 }
-// Read + summarise one MYT day. Returns { summary, cross }. A read failure propagates as
-// `read_error` all the way to the card, which then prints "couldn't read" and NO counts.
+// ⏰ PARKED TOO LONG — this is the EXACT signature of the 14 leads lost 31 Jul → 1 Aug:
+// Origin='WhatsApp Direct' AND Salesman empty AND `SLA Assigned At` empty, created before the
+// drain that should already have released them. Read from Lark, not from the decision log,
+// because the whole failure mode is the queue being GONE while the CRM row survives.
+async function larkParkedTooLong(cutoffMs){
+  if (!cutoffMs) return { rows: [], capped: false, error: null };
+  try {
+    const items = await larkSearch({
+      filter: { conjunction: 'and', conditions: [
+        { field_name: 'Origin', operator: 'is', value: ['WhatsApp Direct'] },
+        { field_name: 'Salesman', operator: 'isEmpty', value: [] },
+        { field_name: 'SLA Assigned At', operator: 'isEmpty', value: [] },
+      ]},
+      sort: [{ field_name: 'date created', desc: true }],
+    });
+    const rows = [];
+    for (const it of items){
+      const f = it.fields || {};
+      const created = slaRecCreated(f);
+      if (!created || created >= cutoffMs) continue;
+      const want = slaFieldText(f['Customer want']);
+      if (/^TRADE-IN:/i.test(want)) continue;   // Fitri owns these, no round-robin, never "stuck"
+      rows.push({ ts: Math.floor(created / 1000), phone: slaFieldText(f['Phone number']).replace(/\D/g, ''),
+        want, recordId: it.record_id });
+    }
+    return { rows, capped: items.length >= 100, error: null };
+  } catch (e){ return { rows: [], capped: false, error: String(e.message || e).slice(0, 80) }; }
+}
+
+// ---- The report WINDOW MARKER (2026-08-15) ----------------------------------------------------
+// End timestamp of the last summary that ACTUALLY SENT. This, not the clock, is what makes the
+// windows contiguous: skip Sunday, miss a 10:00, restart mid-window — the next card still starts
+// exactly where the last one stopped, so no lead can fall between two reports.
+const SUMMARY_MARK_FILE = process.env.SUMMARY_MARK_FILE || _path.join(__dirname, 'summary_mark.json');
+let summaryMark = { lastEnd: 0 };
+try { summaryMark = JSON.parse(_fs.readFileSync(SUMMARY_MARK_FILE, 'utf8')); } catch { /* first run */ }
+function summaryMarkSet(endMs){
+  summaryMark = { lastEnd: endMs, at: Date.now() };
+  try { _fs.writeFileSync(SUMMARY_MARK_FILE, JSON.stringify(summaryMark)); }
+  catch (e){ log('summary mark persist err', String(e.message || e).slice(0, 60)); }
+}
+
+// Read + summarise ONE WINDOW. A read failure propagates as `read_error` all the way to the card,
+// which then prints "couldn't read" and NO counts.
+async function buildLeadSummaryWindow(win, withCross){
+  const r = firstresponse.readFrEvents();
+  const parsed = r.ok ? leadsummary.parseEvents(r.text) : { events: [], parse_errors: 0 };
+  const summary = leadsummary.summarizeWindow(parsed.events, win.startMs, win.endMs,
+    { parse_errors: parsed.parse_errors, read_error: r.ok ? null : r.error });
+  const cross = withCross && LIVE_LARK ? { lark: await larkSummaryCross(win.startMs, win.endMs) } : {};
+  // Everything only index.js can fetch. Each is independently fallible and says so on the card
+  // rather than rendering an empty category that reads like "nothing wrong here".
+  const extras = { window: win,
+    larkParked: LIVE_LARK
+      ? await larkParkedTooLong(leadsummary.lastDrainStart(win.endMs, FR_DIST_DAYS, FR_DIST_START))
+      : { rows: [], capped: false, error: null },
+    undelivered: digest.events.filter(e => e.type === 'undelivered' && e.t >= win.startMs && e.t < win.endMs)
+      .map(e => ({ ts: Math.floor(e.t / 1000), to: e.to, error: e.err, attempts: e.attempts, text: e.text })),
+    // 🚨 The Render bot genuinely CANNOT read box 66's inbox capture. Saying so is the honest
+    // answer; approximating it would be inventing a number (client, 2026-08-15).
+    inboxCheck: { available: false } };
+  return { summary, cross, extras };
+}
+// Kept for the endpoint's ad-hoc `?date=` lookups and replays.
 async function buildLeadSummary(dateStr, withCross){
+  const dayStart = Date.parse(dateStr + 'T00:00:00Z') - MYT_OFF;
   const r = firstresponse.readFrEvents();
   const parsed = r.ok ? leadsummary.parseEvents(r.text) : { events: [], parse_errors: 0 };
   const summary = leadsummary.summarize(parsed.events, dateStr, Date.now(),
     { parse_errors: parsed.parse_errors, read_error: r.ok ? null : r.error });
-  const dayStart = Date.parse(dateStr + 'T00:00:00Z') - MYT_OFF;
   const cross = withCross && LIVE_LARK ? { lark: await larkSummaryCross(dayStart, dayStart + 24 * 3600e3) } : {};
   return { summary, cross };
 }
 
+// Build the summary card for one slot. Returns { text, win } — the caller advances the marker
+// ONLY after the send actually succeeds.
+async function buildSummaryCard(hr){
+  const win = leadsummary.reportWindow(Date.now(), hr, summaryMark.lastEnd);
+  try {
+    const { summary, cross, extras } = await buildLeadSummaryWindow(win, true);
+    return { text: leadsummary.summaryText(summary, cross, extras), win };
+  } catch (e){
+    log('digest summary err', String(e.message || e).slice(0, 80));
+    return { text: `📋 *Leads*\n⚠️ couldn't build the lead summary: ${String(e.message || e).slice(0, 80)}`, win: null };
+  }
+}
+
 async function buildDigest(label, sinceMs, kind){
   kind = kind || 'sla';
-  // The summary half is ALWAYS day-to-date (midnight MYT → now), whatever SLA window sits above it.
-  const summarySection = async () => {
-    try {
-      const { summary, cross } = await buildLeadSummary(mytNow().date, true);
-      return leadsummary.summaryText(summary, cross);
-    } catch (e){
-      log('digest summary err', String(e.message || e).slice(0, 80));
-      return `📋 *Leads today*\n⚠️ couldn't build the lead summary: ${String(e.message || e).slice(0, 80)}`;
-    }
-  };
-  // Summary-only card: no SLA half at all, so it survives SLA_ON being toggled off.
-  if (kind === 'summary') return await summarySection();
   // SLA half is meaningless without the SLA engine — say nothing rather than print an empty card.
-  if (!SLA_ON) return kind === 'sla+summary' ? await summarySection() : null;
-  const sla_part = await buildSlaDigest(label, sinceMs);
-  return kind === 'sla+summary' ? sla_part + '\n\n' + '─'.repeat(18) + '\n\n' + await summarySection() : sla_part;
+  if (!SLA_ON) return null;
+  return await buildSlaDigest(label, sinceMs);
 }
 
 async function buildSlaDigest(label, sinceMs){
@@ -195,16 +262,22 @@ async function buildSlaDigest(label, sinceMs){
   if (BOOT_AT > sinceMs) L.push('', `ℹ️ Bot restarted at ${hhmmMYT(BOOT_AT)} — the lists above may be incomplete. The totals are read from Lark and unaffected.`);
   return L.join('\n');
 }
-// checks every 5 min; fires once when it crosses 12:00, 16:00 and 18:00 MYT (health poller keeps the bot awake)
+// checks every 5 min; fires once when it crosses 10:00, 12:00, 16:00 and 18:00 MYT (health poller
+// keeps the bot awake). All four are IN-BOT timers on the one existing 5-min interval — no new cron,
+// and no dependency on the 09:57 VPS audit, which makes OpenAI calls and can overrun. The client's
+// reports read the decision log and Lark directly; the VPS cross-check stays an independent net.
 async function digestTick(){
   const p = mytNow();
-  // TM operates Mon–Sat. A Sunday summary is noise, so the summary halves are skipped then
-  // (Benjamin, 2026-08-14). The 18:00 SLA-only card keeps today's behaviour exactly.
+  // TM operates Mon–Sat. A Sunday report is noise, so the summaries are skipped then. ⚠️ This is
+  // exactly why the window is anchored on the last SUCCESSFUL SEND and not on the clock: with
+  // fixed times, "Sat 16:00 → Sun 16:00" would belong to no report at all, a 24h hole every week.
+  // Monday 10:00 now naturally covers Sat 16:00 onwards instead.
   const isSunday = new Date(Date.now() + MYT_OFF).getUTCDay() === 0;
   const windows = [
-    [12, 'Midday update (9AM–12PM)',    0,  isSunday ? 'sla' : 'sla+summary'],  // ONE card, not two
-    [16, 'Lead summary (day so far)',   0,  isSunday ? null  : 'summary'],      // NEW: the client's report
-    [18, 'End-of-day update (12PM–6PM)', 12, 'sla'],                            // UNCHANGED
+    [10, 'Morning report',               0,  isSunday ? null : 'summary'],   // client report
+    [12, 'Midday update (9AM–12PM)',     0,  'sla'],                         // UNCHANGED
+    [16, 'Afternoon report',             0,  isSunday ? null : 'summary'],   // client report
+    [18, 'End-of-day update (12PM–6PM)', 12, 'sla'],                         // UNCHANGED
   ];
   for (const [hr, label, startHr, kind] of windows){
     if (!kind) continue;
@@ -213,11 +286,24 @@ async function digestTick(){
       const since = Date.parse(p.date + 'T00:00:00Z') - MYT_OFF + startHr * 3600 * 1000;
       digest.sent[key] = true;   // claim the slot BEFORE the awaited build/send so a slow Lark read can't double-fire
       try {
-        const card = await buildDigest(label, since, kind);
-        if (card) await alertReview(card);
+        if (kind === 'summary'){
+          const { text, win } = await buildSummaryCard(hr);
+          const ok = await alertReview(text);
+          // 🚨 THE MARKER MOVES ONLY ON A CONFIRMED SEND. If the group never received the card,
+          // the window stays open and the NEXT report absorbs it. A failed send must never be
+          // able to skip a window — that is the whole point of anchoring on the send.
+          if (ok && win) summaryMarkSet(win.endMs);
+          else if (!ok) log('summary NOT sent — window stays open, the next report will absorb it');
+        } else {
+          const card = await buildDigest(label, since, kind);
+          if (card) await alertReview(card);
+        }
       }
       catch (e){ log('digest send err', String(e.message || e)); }
-      const cut = Date.now() - 26 * 3600 * 1000;
+      // 8 days, not 26h: the Monday 10:00 card can legitimately cover Sat 16:00 onwards, and an
+      // undelivered-message record from Saturday must still be in it. The SLA halves filter by
+      // their own `sinceMs`, so keeping more events changes nothing for them.
+      const cut = Date.now() - 8 * 24 * 3600 * 1000;
       digest.events = digest.events.filter(e => e.t >= cut);
       for (const k of Object.keys(digest.sent)) if (k < p.date) delete digest.sent[k];
       digestPersist();
@@ -401,6 +487,11 @@ function alertSendFailure(to, text, res){
   if (now - _sendFailAlertAt < 5 * 60 * 1000) { _sendFailSuppressed++; return; }
   const extra = _sendFailSuppressed ? `\n\n(+${_sendFailSuppressed} more suppressed in the last 5 min)` : '';
   _sendFailAlertAt = now; _sendFailSuppressed = 0;
+  // Same signal, recorded rather than only shouted — the summary's "message not delivered"
+  // category reads this. Deliberately NOT a second detector: this is the only place that knows
+  // a send was finally given up on. Rides the existing durable digest store (now on /data).
+  try { digestPush({ type: 'undelivered', to: who, err: String(res.error || '').slice(0, 80),
+    attempts: res.attempts, text: String(text || '').slice(0, 120) }); } catch {}
   alertReview(`🚨 *Message NOT delivered*\n👤 ${who}\n⚠️ ${res.error} — gave up after ${res.attempts} attempt(s)\n\n📝 ${String(text || '').slice(0, 180)}\n\n👉 Please follow up manually — the bot will NOT retry this one.${extra}`)
     .catch(e => log('send-failure alert err', String(e.message || e)));
 }
@@ -1668,6 +1759,19 @@ http.createServer((req, res) => {
     // prove the 12:00/16:00 cards actually went out (durable now they live on /data).
     const q = new URL(req.url, 'http://x').searchParams;
     const date = /^\d{4}-\d{2}-\d{2}$/.test(q.get('date') || '') ? q.get('date') : mytNow().date;
+    // ?window=10|16 renders the LIVE contiguous window exactly as the card would, card text and
+    // all — that is what makes the report inspectable without waiting for 10:00 to come round.
+    const slot = ['10', '16'].includes(q.get('window') || '') ? Number(q.get('window')) : null;
+    if (slot){
+      buildSummaryCard(slot).then(({ text, win }) => {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ slot, window: win, markEnd: summaryMark.lastEnd || null, card: text, sent: digest.sent }, null, 1));
+      }).catch(e => {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ slot, read_error: String(e.message || e).slice(0, 200), sent: digest.sent }, null, 1));
+      });
+      return;
+    }
     buildLeadSummary(date, q.get('cross') === '1').then(({ summary, cross }) => {
       const body = summary.read_error
         ? { date, read_error: summary.read_error, sent: digest.sent }

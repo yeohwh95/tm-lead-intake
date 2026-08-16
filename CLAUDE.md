@@ -2,6 +2,86 @@
 
 WhatsApp lead → AI extract → Lark CRM + notify the assigned salesperson. **LIVE.**
 
+## 👀 "NEEDS A LOOK" — the report's real job, and gap-proof windows — 2026-08-16 (batch 2b)
+⚠️ **CODE COMMITTED, NOT DEPLOYED.** VPS half is live and idle until the endpoint ships.
+
+Client feedback on batch 2, in their words: *"need more info for leads that is unsure or suspicious,
+so the admin can cross check, **that is the main point**."* **The counts were never the product.**
+Three changes.
+
+### 1. Report times → 10:00 and 16:00 MYT
+The bot's own SLA digest still fires at **12:00 and 18:00, unchanged**. All four are in-bot timers on
+the one existing 5-min interval. **No new cron.** ⚠️ Deliberately independent of the 09:57 VPS
+`audit_fr.py` run, which makes OpenAI calls and can overrun: the cards read the decision log and Lark
+directly, and the VPS cross-check stays a separate safety net.
+
+### 2. 🚨 Windows are CONTIGUOUS and anchored on the last SUCCESSFUL SEND, not on the clock
+The 10:00 card covers everything since the last 16:00 card; the 16:00 card covers 10:00 → 16:00.
+**Implementing that with fixed clock times would have opened a 24h hole every single week**: with
+Sunday skipped, "Sat 16:00 → Sun 16:00" belongs to no report at all. So the window start is the **end
+timestamp of the last report that actually sent**, persisted in `summary_mark.json` (env
+`SUMMARY_MARK_FILE`, `/data` in prod, same pattern as batch 1).
+
+| Situation | What happens |
+|---|---|
+| Skipped Sunday | Mon 10:00 covers **Sat 16:00 → Mon 10:00 (42h)** |
+| Bot down at 10:00 | the 16:00 card absorbs that span |
+| Restart mid-window | marker is on disk, so no gap and no double-count |
+| **Send FAILS** | 🚨 marker does **not** advance, window stays open, next card re-covers it |
+
+- `alertReview()` now **returns whether the group actually received it**, and the marker moves on
+  that boolean and nothing else. A failed send must never be able to skip a window.
+- Every card prints its own window: `🪟 Window: Sat 15 Aug 16:00 → Mon 17 Aug 10:00 (42h, covers the
+  weekend)`. Longer than normal ⇒ it **says why** (weekend, or the previous report did not send).
+- No marker on a first run ⇒ falls back to the usual boundary and **says it is a fallback** rather
+  than silently reporting a partial window. A marker dated in the FUTURE is treated as no marker.
+
+### 3. 👀 The NEEDS A LOOK block — seven categories, severity-ordered
+`🚨 nobody took it → ⏰ parked too long → ⚠️ inbox gap → 📵 cannot be contacted → 📤 not delivered
+→ ❓ could not classify → 🔁 came back, got silence`, stalest first inside each. Every entry carries
+**timestamp · phone or @handle · their first message verbatim (~70 chars) · what the bot did · a
+`wa.me` link**.
+- 🚨 **Never a fabricated `wa.me` link.** No number ⇒ "reply in the *TM Marketing (93210)* inbox".
+  A dead link that looks actionable is the 2026-08-02 failure wearing a new hat.
+- **⏰ parked too long** is read from **Lark, not the decision log** — the exact 14-lead signature
+  (`Origin=WhatsApp Direct` + Salesman empty + `SLA Assigned At` empty, older than the last drain),
+  because the whole failure mode is the queue being GONE while the CRM row survives. Age in days.
+  `lastDrainStart()` works under `FR_DIST_DAYS=1-5` **and** `1-6`, so Q1 stays env-only.
+- **❓ could not classify** needed a new signal: `classifier_skip` conflated **a vendor robot**
+  (ignore forever) with **a message the classifier could not read** (a possible buyer who got
+  nothing). Now `vendor_auto` vs `unclassified`, and only the second reaches the block.
+- **📤 not delivered** reuses `alertSendFailure` — the one place that knows a send was given up on.
+  It now *records* as well as shouts, via the existing durable digest store. ⚠️ Digest retention
+  raised 26h → 8 days so a Saturday failure still appears on the Monday 42h card.
+- ⚠️ **⚠️ inbox gap CANNOT be derived here and the card SAYS SO.** The Render bot genuinely cannot
+  read box 66's capture file. It is checked by `audit_fr.py` at 09:57 and the category renders
+  *"checked on box 66 by the 09:57 audit, not from here"*. **Approximating it would be inventing a
+  number.**
+
+### 🐛🐛 Two bugs found by RENDERING THE REAL BACKLOG, not by reading the code
+1. 🚨 **The card was 6,322 chars. WhatsApp rejects anything over 4,096 (422).** And `alertReview`
+   does **not** route through `waSend`, so it has none of `waSend`'s truncation — an over-long card
+   is not trimmed, **it simply never arrives**. With the real 54-lead Lark backlog the client's most
+   important report would have failed silently on day one. Fixed with a character budget
+   (`BLOCK_CHAR_BUDGET`) on top of the entry cap; severity ordering means the worst entries are the
+   ones that survive, and the true count still prints (`⏰ Parked too long (54)`) alongside
+   `⚠️ 42 more not shown`. Real card now **3,693 chars**.
+2. `[ad click — model belum stated…]` is a **bot-authored** string that now renders on the card, so
+   it was swept to a comma. ⚠️ Rows written before this still carry the em dash, so it will show in
+   quoted historic data for a while. Customer text is quoted **verbatim** by design, so the dash
+   assert covers bot copy, not what a customer typed.
+
+### Verified on real data (2026-08-16)
+- **Sat 15 Aug: 29 inbound chats vs 25 Lark rows.** The 4-lead gap is **four salespeople sending SLA
+  acks** — Allysa `PASS`, Jebat `✅`, Nazrin `👍🏻`, Roy `Done` — logged `ai_skip(staff_or_internal)`,
+  excluded from lead totals, shown on the "not sales leads" line. The VPS audit independently
+  measured `inbox_chats=29`. **29 − 4 = 25 = Lark. Reconciles exactly.**
+- **All 14 orphans of 31 Jul–1 Aug surface** in ⏰ parked too long with correct ages (**16–17 days**),
+  first `recvqWC7aSoj5n` +60126233609, last `recvr0Q02rcLni` +601156402131.
+- Live Lark today shows **54** rows matching that stuck signature, not 14. The backlog is real.
+
+Tests: leadsummary **100** · firstresponse **173** · full suite **599** (was 544).
+
 ## 📋 "HOW MANY LEADS TODAY, HOW MANY ASSIGNED, WHY NOT THE REST" — 2026-08-14 (batch 2)
 ⚠️ **CODE COMMITTED, NOT DEPLOYED.** The Render half is not live. The VPS half IS live and is
 deliberately idle until the endpoint ships (see the PENDING note below).

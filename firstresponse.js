@@ -511,7 +511,7 @@ async function gateRelease(jid, h, phone, reason){
   frLogEvent(ctx.outcome || 'assigned', jid, {
     has_phone: !!phone, cat: h.cat, assignee: ctx.assignee || (card && card.name) || '',
     phone: phone || '', want: String(h.want || '').slice(0, 120), recordId: ctx.recordId || null,
-    note: 'gate_' + reason });
+    asks: h.asks || 0, note: 'gate_' + reason });
   gateLogEvent(reason === 'timeout' ? 'timeout' : 'assigned', jid, {
     cat: h.cat, phone: phone || '', reason,
     salesperson: (card && card.name) || ctx.assignee || '',
@@ -625,7 +625,7 @@ async function flush(jid){
     // they answered our "berminat motor apa?" — category confirmed → assign FIRST, reply with the card.
     delete state.pending[jid]; persist();
     const finalCat = (cat === 'sell' || cat === 'loan' || cat === 'testride') ? cat : 'product';
-    const want = VAGUE(text) && !b.hasImage ? '[ad click — model belum stated, sila probe]' : (text || '[gambar/screenshot iklan]');
+    const want = VAGUE(text) && !b.hasImage ? '[ad click, model belum stated, sila probe]' : (text || '[gambar/screenshot iklan]');
     const stockLine = await stockLineFor(finalCat, text, lang);
     const closed = !!(D.inOpenHours && !D.inOpenHours());   // genuinely shut, NOT merely outside the assign window
     if (!b.phone){
@@ -649,8 +649,13 @@ async function flush(jid){
     // Not a sales lead — vendor auto-reply / OTP / unrelated long text. Reported on its own line
     // ("not sales leads"), never folded into the lead total, but logged so the inbox cross-check
     // can account for the chat instead of flagging it as a webhook we never received.
+    // 🚨 Split (2026-08-15, client): `classifier_skip` covered two OPPOSITE cases. A vendor
+    // auto-reply/OTP is noise nobody ever needs to see again. A message the classifier simply
+    // could not read is a POSSIBLE BUYER who got no answer, and the admin must eyeball it. Same
+    // bucket for counting, different note, and only the second reaches "needs a look".
     frLogEvent('ai_skip', jid, { has_phone: !!b.phone, cat: 'skip', phone: b.phone || '',
-      want: String(text).slice(0, 120), recordId: null, note: 'classifier_skip' });
+      want: String(text).slice(0, 120), recordId: null,
+      note: RE_VENDOR_AUTO.test(String(text || '')) ? 'vendor_auto' : 'unclassified' });
     return;
   }
   if (state.greeted[jid] && now - state.greeted[jid] < REGREET_MS){

@@ -501,8 +501,18 @@ ok(/ADIB : 017-8869542/.test(sent[sent.length-1].text), 'flow: reply carries ass
     fr.onMessage({ jid: 'custSkip1@s.whatsapp.net', phone: '60107070701', kind: 'text', text: '35935 is your Facebook confirmation code' });
     await wait(120);
     const e = evOf('custSkip1@s.whatsapp.net');
-    ok(e.length === 1 && e[0].outcome === 'ai_skip' && e[0].note === 'classifier_skip',
-       'events: a vendor/OTP message logs ai_skip(classifier_skip)');
+    ok(e.length === 1 && e[0].outcome === 'ai_skip' && e[0].note === 'vendor_auto',
+       'events: a vendor/OTP message logs ai_skip(vendor_auto), which the report ignores forever');
+
+    // 🚨 The other half of the old `classifier_skip`. A long message the classifier could not read
+    // is a POSSIBLE BUYER who got no answer, and it must reach the admin's "needs a look" block.
+    // Lumping it in with vendor robots is how a real customer stays invisible.
+    fr.onMessage({ jid: 'custSkip2@s.whatsapp.net', phone: '60107070704', kind: 'text',
+      text: 'Assalamualaikum semua. Mari belajar fahami makna Al-Quran m bersama kami di kelas mingguan setiap khamis' });
+    await wait(120);
+    const u = evOf('custSkip2@s.whatsapp.net');
+    ok(u.length === 1 && u[0].outcome === 'ai_skip' && u[0].note === 'unclassified',
+       '🚨 events: a message the classifier could NOT read logs ai_skip(unclassified), not vendor_auto');
 
     // junk number: dropped at the door, but no longer silently
     fr.onMessage({ jid: '447700900999@s.whatsapp.net', phone: '447700900999', kind: 'text', text: 'hello' });

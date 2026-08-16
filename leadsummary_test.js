@@ -78,7 +78,7 @@ const endOf = (dateStr) => Date.parse(`${dateStr}T00:00:00Z`) - MYT + 24 * 3600e
   ok(monday.total === 1 && monday.buckets.assigned === 1,
      '🚨 carryover: Monday counts only the NEW lead — the Friday one is not double-counted');
   ok(monday.carriedResolved === 1, 'carryover: Monday reports it as an earlier lead resolved today');
-  ok(/🔁 1 earlier lead\(s\) resolved today/.test(S.summaryText(monday, null)), 'carryover: and says so on the card');
+  ok(/🔁 1 earlier lead\(s\) resolved in this window/.test(S.summaryText(monday, null)), 'carryover: and says so on the card');
 }
 
 // ── 5. the unassigned list carries the WHY, plus phone + first message ──────
@@ -91,6 +91,11 @@ const endOf = (dateStr) => Date.parse(`${dateStr}T00:00:00Z`) - MYT + 24 * 3600e
   const card = S.summaryText(r, null);
   ok(/1 parked for the next assignment window/.test(card), 'card: the reason is in plain English');
   ok(/\+60126233609 · nak tanya harga tracer 9 gt/.test(card), 'card: names who they are');
+  // A multi-line customer message must stay ONE list entry, or the card becomes unreadable.
+  const multi = S.summarize([ev('m', 'parked', at('2026-08-11', 19),
+    { phone: '60195233727', want: 'hi\nnak tanya.. credit card EPP bank apa' })], '2026-08-11', endOf('2026-08-11'));
+  ok(/• \+60195233727 · hi nak tanya\.\. credit card EPP bank apa/.test(S.summaryText(multi, null)),
+     'card: a multi-line message is collapsed onto one line');
 }
 
 // ── 6. 🚨 a failed read says "couldn't read". NEVER zero. ───────────────────
@@ -208,6 +213,235 @@ const endOf = (dateStr) => Date.parse(`${dateStr}T00:00:00Z`) - MYT + 24 * 3600e
      'lookback: beyond the window the first event is invisible, so the lead reads as today\'s (documented limit)');
   const wide = S.summarize(evs, '2026-08-11', endOf('2026-08-11'), { lookbackH: 24 * 30 });
   ok(wide.total === 0 && wide.carriedResolved === 1, 'lookback: a wide enough window attributes it to its own day');
+}
+
+// =============================================================================================
+// CONTIGUOUS, GAP-PROOF WINDOWS (2026-08-15)
+// =============================================================================================
+// The whole reason the window is anchored on the LAST SUCCESSFUL SEND and not on the clock: with
+// fixed times and Sunday skipped, "Sat 16:00 -> Sun 16:00" would belong to NO report at all.
+const ms = (d, h, m) => Date.parse(`${d}T00:00:00Z`) - MYT + h * 3600e3 + (m || 0) * 60e3;
+
+// -- 14. normal days ---------------------------------------------------------------------------
+{
+  // Tue 11 Aug 2026 is a Tuesday. 16:00 report, marker left by that morning's 10:00 report.
+  const w = S.reportWindow(ms('2026-08-11', 16), 16, ms('2026-08-11', 10));
+  ok(w.startMs === ms('2026-08-11', 10) && w.hours === 6, 'window: normal 16:00 covers 10:00 -> 16:00 (6h)');
+  ok(!w.note, 'window: a normal-length window explains nothing (nothing to explain)');
+  ok(/Tue 11 Aug 10:00 → Tue 11 Aug 16:00 \(6h\)/.test(S.windowHeader(w)), 'window: header prints the real span');
+
+  // Next morning's 10:00 picks up exactly where 16:00 stopped.
+  const w2 = S.reportWindow(ms('2026-08-12', 10), 10, w.endMs);
+  ok(w2.startMs === ms('2026-08-11', 16) && w2.hours === 18, 'window: normal 10:00 covers the previous 16:00 -> 10:00 (18h)');
+  ok(!w2.note, 'window: 18h is normal for the morning slot, so no note');
+  ok(w2.startMs === w.endMs, '🚨 window: contiguous — no gap and no overlap between consecutive reports');
+}
+
+// -- 15. 🚨 skipped Sunday: Monday absorbs the whole weekend ------------------------------------
+{
+  // Sat 15 Aug 2026 16:00 was the last send. Sunday is skipped entirely. Mon 17 Aug 10:00.
+  const w = S.reportWindow(ms('2026-08-17', 10), 10, ms('2026-08-15', 16));
+  ok(w.startMs === ms('2026-08-15', 16) && w.hours === 42,
+     '🚨 window: skipped Sunday — Monday 10:00 covers Sat 16:00 -> Mon 10:00 (42h), no 24h hole');
+  ok(/covers the weekend/.test(w.note), 'window: and it SAYS why it is 42h instead of 18h');
+  ok(/Sat 15 Aug 16:00 → Mon 17 Aug 10:00 \(42h, covers the weekend\)/.test(S.windowHeader(w)),
+     'window: the header reads exactly as the client asked');
+}
+
+// -- 16. a missed 10:00 is absorbed by 16:00 ---------------------------------------------------
+{
+  // Bot was down at 10:00 on Wed, so no marker was written that morning. The 16:00 report still
+  // starts from Tuesday 16:00 and covers the lot.
+  const w = S.reportWindow(ms('2026-08-12', 16), 16, ms('2026-08-11', 16));
+  ok(w.startMs === ms('2026-08-11', 16) && w.hours === 24,
+     '🚨 window: a missed 10:00 is absorbed by the 16:00 card, not lost');
+  ok(/previous report did not send/.test(w.note), 'window: and says the previous report did not send');
+}
+
+// -- 17. a failed SEND must not advance the marker ----------------------------------------------
+{
+  // Simulates index.js: the marker only moves on a confirmed send, so a failed 10:00 leaves the
+  // window open and the 16:00 card starts from the LAST GOOD send.
+  let mark = ms('2026-08-11', 16);
+  const wMorning = S.reportWindow(ms('2026-08-12', 10), 10, mark);
+  const sendOk = false;
+  if (sendOk) mark = wMorning.endMs;                        // not taken
+  const wAfternoon = S.reportWindow(ms('2026-08-12', 16), 16, mark);
+  ok(wAfternoon.startMs === ms('2026-08-11', 16),
+     '🚨 window: a FAILED send leaves the window open — the next card re-covers that span');
+  ok(wAfternoon.hours === 24, 'window: so nothing between the two reports can be dropped');
+}
+
+// -- 18. a restart mid-window changes nothing ---------------------------------------------------
+{
+  // The marker lives on disk, so a process restart at 13:00 has no effect on the 16:00 window.
+  const beforeRestart = S.reportWindow(ms('2026-08-11', 16), 16, ms('2026-08-11', 10));
+  const afterRestart  = S.reportWindow(ms('2026-08-11', 16), 16, ms('2026-08-11', 10));
+  ok(beforeRestart.startMs === afterRestart.startMs && afterRestart.hours === 6,
+     '🚨 window: a restart mid-window cannot open a gap or double-count (the marker is on disk)');
+}
+
+// -- 19. first run ever, no marker --------------------------------------------------------------
+{
+  const w = S.reportWindow(ms('2026-08-12', 10), 10, 0);
+  ok(w.fallback === true && w.startMs === ms('2026-08-11', 16),
+     'window: no marker -> falls back to the previous 16:00 boundary');
+  ok(/no previous report on record/.test(w.note),
+     '🚨 window: and SAYS it is a fallback rather than silently reporting a partial window');
+  const w16 = S.reportWindow(ms('2026-08-12', 16), 16, 0);
+  ok(w16.fallback === true && w16.startMs === ms('2026-08-12', 10), 'window: no marker on the 16:00 slot -> previous 10:00');
+  // A marker from the future is corrupt (clock skew / hand-edited file) and must not be trusted.
+  const wBad = S.reportWindow(ms('2026-08-12', 10), 10, ms('2026-09-01', 10));
+  ok(wBad.fallback === true, 'window: a marker in the FUTURE is treated as no marker, never a negative window');
+}
+
+// -- 20. lastDrainStart, under both settings of the open Saturday question ----------------------
+{
+  const MonFri = [1, 2, 3, 4, 5], MonSat = [1, 2, 3, 4, 5, 6];
+  ok(S.lastDrainStart(ms('2026-08-17', 10), MonFri, 9) === ms('2026-08-17', 9),
+     'drain: Monday 10:00 -> this morning 09:00');
+  ok(S.lastDrainStart(ms('2026-08-17', 8), MonFri, 9) === ms('2026-08-14', 9),
+     'drain: Monday 08:00 (before today opens) -> last Friday 09:00');
+  ok(S.lastDrainStart(ms('2026-08-16', 12), MonFri, 9) === ms('2026-08-14', 9),
+     'drain: Sunday with FR_DIST_DAYS=1-5 -> Friday 09:00');
+  ok(S.lastDrainStart(ms('2026-08-16', 12), MonSat, 9) === ms('2026-08-15', 9),
+     'drain: Sunday with FR_DIST_DAYS=1-6 -> Saturday 09:00 (Q1 stays env-only)');
+  ok(S.lastDrainStart(Date.now(), [], 9) === null, 'drain: an empty day set returns null, never a guess');
+}
+
+// =============================================================================================
+// 👀 NEEDS A LOOK — the main point of the report
+// =============================================================================================
+const ev2 = (jid, outcome, ts, extra) => Object.assign({ jid, outcome, ts, has_phone: true,
+  cat: 'product', phone: '60123456789', want: 'zontes 368G', recordId: 'r1' }, extra || {});
+const winOf = (a, b) => ({ startMs: ms(a[0], a[1]), endMs: ms(b[0], b[1]) });
+
+// -- 21. every category renders, in the client's severity order --------------------------------
+{
+  const W = winOf(['2026-08-11', 10], ['2026-08-11', 16]);
+  const evs = [
+    ev2('nr', 'no_rep', at('2026-08-11', 11), { phone: '60111000001', want: 'ada ninja 400?' }),
+    ev2('uc', 'ai_skip', at('2026-08-11', 12), { note: 'unclassified', phone: '60111000002', want: 'boleh tolong sikit' }),
+    ev2('vd', 'ai_skip', at('2026-08-11', 12), { note: 'vendor_auto', phone: '60111000003', want: 'Thank you for contacting X' }),
+    ev2('st', 'ai_skip', at('2026-08-11', 12), { note: 'staff_or_internal', phone: '60128174828', want: '' }),
+    ev2('gd', 'assigned', at('2026-08-11', 13), { note: 'gate_timeout', has_phone: false, phone: '', asks: 2, want: 'harga vulcan' }),
+    ev2('rp', 'repeat', at('2026-08-11', 14), { phone: '60111000005', want: 'still waiting?' }),
+  ];
+  const s = S.summarizeWindow(evs, W.startMs, W.endMs);
+  const extras = { window: S.reportWindow(W.endMs, 16, W.startMs),
+    larkParked: { rows: [{ ts: at('2026-08-08', 18), phone: '60111000006', want: 'tracer 900gt ada?' }], capped: false, error: null },
+    undelivered: [{ ts: at('2026-08-11', 15), to: '60111000007', error: 'HTTP 520', attempts: 3, text: 'reply' }],
+    inboxCheck: { available: false } };
+  const b = S.needsALook(s, extras);
+  const keys = b.groups.filter(g => g.entries.length).map(g => g.key);
+  ok(JSON.stringify(keys) === JSON.stringify(['no_rep', 'parked_long', 'gate_dead', 'undelivered', 'unclassified', 'repeat']),
+     '🚨 needs-a-look: categories render in the client\'s severity order');
+  ok(b.found === 6, 'needs-a-look: counts every entry across categories');
+  const t = S.needsALookText(s, extras).text;
+  ok(!/60111000003|Thank you for contacting/.test(t), '🚨 needs-a-look: a VENDOR auto-reply is NOT flagged for review');
+  ok(!/60128174828/.test(t), '🚨 needs-a-look: a STAFF chat is NOT flagged for review');
+  ok(/boleh tolong sikit/.test(t), 'needs-a-look: but a message the classifier could not read IS flagged');
+  ok(/asked 2× for a number or username/.test(t), 'needs-a-look: the gate entry says how many times it asked');
+  ok(/gave up after 3 attempt\(s\): HTTP 520/.test(t), 'needs-a-look: the undelivered entry reuses the alertSendFailure signal');
+  ok(/3 day\(s\) after the drain/.test(t), 'needs-a-look: parked-too-long shows the age in days');
+  ok(/this bot cannot read the inbox capture/.test(t),
+     '🚨 needs-a-look: the inbox-gap category SAYS it is checked on box 66, rather than approximating');
+}
+
+// -- 22. entry format + the dead-link rule ------------------------------------------------------
+{
+  const W = winOf(['2026-08-11', 10], ['2026-08-11', 16]);
+  const evs = [
+    ev2('a', 'no_rep', at('2026-08-11', 11), { phone: '60126233609', want: 'Hi bos.. pg tracer 900gt ada stock x…. Kalau ada boleh bagi harga tak, saya nak compare dulu' }),
+    ev2('b', 'no_rep', at('2026-08-11', 12), { phone: '', has_phone: false, want: '@mat.arip (username, not dialable) · aveta vanguard loan' }),
+    ev2('c', 'no_rep', at('2026-08-11', 13), { phone: '', has_phone: false, want: 'cbr150 ada?' }),
+  ];
+  const s = S.summarizeWindow(evs, W.startMs, W.endMs);
+  const t = S.needsALookText(s, {}).text;
+  ok(/• Tue 11 Aug 11:00 · \+60126233609 · "Hi bos\.\. pg tracer 900gt ada stock x…\. Kalau ada boleh bagi harga tak,…"/.test(t),
+     'entry: timestamp · phone · verbatim first message, truncated at ~70 chars');
+  ok(!/saya nak compare dulu/.test(t), 'entry: the tail past the truncation point really is cut');
+  ok(/↳ the CRM row has no owner/.test(t), 'entry: one line on what the bot did');
+  ok(/👉 https:\/\/wa\.me\/60126233609/.test(t), 'entry: a real number gets a wa.me link');
+  ok(/@mat\.arip \(username, not dialable\)\. Reply in the \*TM Marketing \(93210\)\* inbox/.test(t),
+     'entry: a handle is shown as a handle, with the inbox route');
+  ok(/no number\. Reply to them in the \*TM Marketing \(93210\)\* inbox/.test(t),
+     '🚨 entry: no phone -> the inbox route, NEVER a fabricated wa.me link (the 2026-08-02 failure)');
+  ok(!/wa\.me\/undefined|wa\.me\/\s|wa\.me\/$/m.test(t), '🚨 entry: no dead wa.me link anywhere');
+  // stalest first
+  const order = t.split('\n').filter(l => l.includes('·') && l.includes('•'));
+  ok(/11:00/.test(order[0]) && /13:00/.test(order[2]), 'entry: stalest first inside a category');
+}
+
+// -- 23. 🚨 a capped block SAYS how many it dropped ---------------------------------------------
+{
+  const W = winOf(['2026-08-11', 10], ['2026-08-11', 16]);
+  const evs = [];
+  for (let i = 0; i < S.BLOCK_CAP + 7; i++)
+    evs.push(ev2('j' + i, 'no_rep', at('2026-08-11', 11) + i, { phone: '6011100' + String(1000 + i) }));
+  const s = S.summarizeWindow(evs, W.startMs, W.endMs);
+  const r = S.needsALookText(s, {});
+  // Two limits bind, whichever comes first: BLOCK_CAP entries, and the character budget that
+  // keeps the card inside one WhatsApp message. The invariant that MATTERS is that nothing is
+  // silently lost: everything found is either shown or explicitly counted as dropped.
+  ok(r.found === S.BLOCK_CAP + 7, 'cap: every entry is FOUND, whatever gets shown');
+  ok(r.shown + r.dropped === r.found, '🚨 cap: shown + dropped always equals found, nothing vanishes');
+  ok(r.shown < r.found && r.dropped > 0, 'cap: a long block really is trimmed');
+  ok(r.text.includes(`⚠️ ${r.dropped} more not shown`),
+     '🚨 cap: and SAYS how many were dropped, so it never reads as complete');
+}
+
+// -- 23b. 🚨 the card must FIT IN ONE WhatsApp MESSAGE (4096 chars) -----------------------------
+// Found 2026-08-16 by rendering the real 54-lead Lark backlog: the card came to 6,322 chars.
+// `alertReview` does NOT route through `waSend`, so it has no truncation of its own — an
+// over-long card is not trimmed, it is REJECTED (422) and the report simply never arrives.
+{
+  const W = winOf(['2026-08-15', 16], ['2026-08-17', 10]);
+  const evs = [];
+  for (let i = 0; i < 40; i++)
+    evs.push(ev2('big' + i, 'parked', at('2026-08-16', 10) + i,
+      { phone: '6011200' + String(1000 + i), want: 'Assalammualaikum nak tanya, motor ni ada lagi ke bos? boleh bagi harga' }));
+  const rows = [];
+  for (let i = 0; i < 54; i++)
+    rows.push({ ts: at('2026-07-31', 18) + i * 600, phone: '6013300' + String(1000 + i),
+      want: 'Boleh bagi brochure moda sporter v2 dan harga ansuran bulanan' });
+  const s = S.summarizeWindow(evs, W.startMs, W.endMs);
+  const t = S.summaryText(s, { lark: { rows: 40, capped: false, error: null } },
+    { window: S.reportWindow(W.endMs, 10, W.startMs),
+      larkParked: { rows, capped: false, error: null }, undelivered: [], inboxCheck: { available: false } });
+  ok(t.length <= 4000, `🚨 card: a 54-lead backlog still fits in one WhatsApp message (${t.length} chars, limit 4096)`);
+  ok(/more not shown/.test(t), '🚨 card: and it says how many entries it had to drop to fit');
+  ok(/⏰ \*Parked too long \(54\)\*/.test(t), 'card: the true COUNT is still shown even when the list is trimmed');
+  ok(/🚨 \*Nobody took it/.test(t) === false && /Fri 31 Jul 18:00/.test(t),
+     'card: severity order means the most serious entries are the ones that survive the trim');
+}
+
+// -- 24. a clean window says so, and an unreadable Lark says THAT --------------------------------
+{
+  const W = winOf(['2026-08-11', 10], ['2026-08-11', 16]);
+  const s = S.summarizeWindow([ev2('ok1', 'assigned', at('2026-08-11', 11))], W.startMs, W.endMs);
+  ok(/✅ Nothing suspicious in this window/.test(S.needsALookText(s, { inboxCheck: { available: true } }).text),
+     'clean: a window with nothing wrong says so plainly');
+  ok(/couldn't read Lark: HTTP 500/.test(
+       S.needsALookText(s, { larkParked: { rows: [], capped: false, error: 'HTTP 500' } }).text),
+     '🚨 clean: an unreadable Lark says so instead of rendering an empty "parked too long"');
+}
+
+// -- 25. the card is dash-free (bot-authored output) --------------------------------------------
+{
+  const W = winOf(['2026-08-15', 16], ['2026-08-17', 10]);
+  const s = S.summarizeWindow([
+    ev2('d1', 'no_rep', at('2026-08-16', 11), { phone: '60111000001' }),
+    ev2('d2', 'parked', at('2026-08-16', 12), { phone: '60111000002' }),
+  ], W.startMs, W.endMs);
+  const t = S.summaryText(s, { lark: { rows: 9, capped: true, error: null } },
+    { window: S.reportWindow(W.endMs, 10, W.startMs),
+      larkParked: { rows: [{ ts: at('2026-08-08', 18), phone: '60111000006', want: 'x' }], capped: false, error: null },
+      undelivered: [{ ts: at('2026-08-16', 15), to: '60111000007', error: 'HTTP 520', attempts: 3 }],
+      inboxCheck: { available: false } });
+  ok(!/—/.test(t), '🚨 dash: the whole rendered card contains no em dash');
+  ok(!/ - /.test(t), '🚨 dash: and no standalone spaced hyphen');
+  ok(/covers the weekend/.test(t), 'dash: the 42h weekend window still explains itself');
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);
