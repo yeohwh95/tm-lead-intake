@@ -162,8 +162,10 @@ async function larkParkedTooLong(cutoffMs){
 const SUMMARY_MARK_FILE = process.env.SUMMARY_MARK_FILE || _path.join(__dirname, 'summary_mark.json');
 let summaryMark = { lastEnd: 0 };
 try { summaryMark = JSON.parse(_fs.readFileSync(SUMMARY_MARK_FILE, 'utf8')); } catch { /* first run */ }
-function summaryMarkSet(endMs){
-  summaryMark = { lastEnd: endMs, at: Date.now() };
+// `backlog` rides along so the NEXT card can say whether the stuck pile grew — a rising number is
+// the only part of a standing backlog that is actually news.
+function summaryMarkSet(endMs, backlog){
+  summaryMark = { lastEnd: endMs, at: Date.now(), backlog: backlog == null ? null : backlog };
   try { _fs.writeFileSync(SUMMARY_MARK_FILE, JSON.stringify(summaryMark)); }
   catch (e){ log('summary mark persist err', String(e.message || e).slice(0, 60)); }
 }
@@ -180,13 +182,14 @@ async function buildLeadSummaryWindow(win, withCross){
   // rather than rendering an empty category that reads like "nothing wrong here".
   const extras = { window: win,
     larkParked: LIVE_LARK
-      ? await larkParkedTooLong(leadsummary.lastDrainStart(win.endMs, FR_DIST_DAYS, FR_DIST_START))
+      ? await larkParkedTooLong(leadsummary.lastCompletedDrain(win.endMs, FR_DIST_DAYS, FR_DIST_START))
       : { rows: [], capped: false, error: null },
     undelivered: digest.events.filter(e => e.type === 'undelivered' && e.t >= win.startMs && e.t < win.endMs)
       .map(e => ({ ts: Math.floor(e.t / 1000), to: e.to, error: e.err, attempts: e.attempts, text: e.text })),
     // 🚨 The Render bot genuinely CANNOT read box 66's inbox capture. Saying so is the honest
     // answer; approximating it would be inventing a number (client, 2026-08-15).
-    inboxCheck: { available: false } };
+    inboxCheck: { available: false },
+    prevBacklog: summaryMark.backlog == null ? null : summaryMark.backlog };
   return { summary, cross, extras };
 }
 // Kept for the endpoint's ad-hoc `?date=` lookups and replays.
@@ -206,7 +209,8 @@ async function buildSummaryCard(hr){
   const win = leadsummary.reportWindow(Date.now(), hr, summaryMark.lastEnd);
   try {
     const { summary, cross, extras } = await buildLeadSummaryWindow(win, true);
-    return { text: leadsummary.summaryText(summary, cross, extras), win };
+    const card = leadsummary.summaryCard(summary, cross, extras);
+    return { text: card.text, win, backlog: card.backlog };
   } catch (e){
     log('digest summary err', String(e.message || e).slice(0, 80));
     return { text: `📋 *Leads*\n⚠️ couldn't build the lead summary: ${String(e.message || e).slice(0, 80)}`, win: null };
@@ -287,12 +291,12 @@ async function digestTick(){
       digest.sent[key] = true;   // claim the slot BEFORE the awaited build/send so a slow Lark read can't double-fire
       try {
         if (kind === 'summary'){
-          const { text, win } = await buildSummaryCard(hr);
+          const { text, win, backlog } = await buildSummaryCard(hr);
           const ok = await alertReview(text);
           // 🚨 THE MARKER MOVES ONLY ON A CONFIRMED SEND. If the group never received the card,
           // the window stays open and the NEXT report absorbs it. A failed send must never be
           // able to skip a window — that is the whole point of anchoring on the send.
-          if (ok && win) summaryMarkSet(win.endMs);
+          if (ok && win) summaryMarkSet(win.endMs, backlog);
           else if (!ok) log('summary NOT sent — window stays open, the next report will absorb it');
         } else {
           const card = await buildDigest(label, since, kind);
@@ -1765,7 +1769,8 @@ http.createServer((req, res) => {
     if (slot){
       buildSummaryCard(slot).then(({ text, win }) => {
         res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ slot, window: win, markEnd: summaryMark.lastEnd || null, card: text, sent: digest.sent }, null, 1));
+        res.end(JSON.stringify({ slot, window: win, markEnd: summaryMark.lastEnd || null,
+          prevBacklog: summaryMark.backlog == null ? null : summaryMark.backlog, card: text, sent: digest.sent }, null, 1));
       }).catch(e => {
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ slot, read_error: String(e.message || e).slice(0, 200), sent: digest.sent }, null, 1));

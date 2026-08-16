@@ -63,18 +63,29 @@ function fmtMyt(ms, off){
 // ---------------------------------------------------------------------------------------------
 // WINDOW
 // ---------------------------------------------------------------------------------------------
-// The most recent moment the DISTRIBUTION window opened at or before `nowMs`. A lead written to
-// Lark before this and still unassigned should have been released by the drain, so it is stuck.
-// Works for any day set, so the open Saturday-assignment question stays env-only.
-function lastDrainStart(nowMs, days, startH, off){
+// The most recent drain that has actually COMPLETED. A lead written to Lark before this and still
+// unassigned should have been released by it, so it is genuinely stuck.
+//
+// 🚨 "COMPLETED", not "opened" (fixed 2026-08-16). The drain releases one queued entry per 60s
+// tick, so a window that opened moments ago has NOT finished working through a weekend backlog.
+// Taking the opening instant as the boundary flagged EVERY weekend lead as "parked too long"
+// while the drain was still mid-flight — 39 perfectly healthy leads presented to an admin as
+// failures. DRAIN_GRACE_MS is how long we give it before its output is treated as final.
+//
+// Derived from the same FR_DIST_DAYS / FR_DIST_START the drain itself uses, never a hardcoded
+// weekday list, so it stays correct under both `1,2,3,4,5` and `1,2,3,4,5,6`.
+const DRAIN_GRACE_MS = 60 * 60 * 1000;
+function lastCompletedDrain(nowMs, days, startH, off, graceMs){
   off = off == null ? MYT_OFF_DEFAULT : off;
+  const grace = graceMs == null ? DRAIN_GRACE_MS : graceMs;
   const list = (days || []).filter(n => Number.isInteger(n) && n >= 0 && n <= 6);
   if (!list.length) return null;
+  const cutoff = nowMs - grace;
   for (let back = 0; back < 14; back++){
     const probe = new Date(nowMs + off - back * 24 * HOUR);
     if (!list.includes(probe.getUTCDay())) continue;
     const start = Date.UTC(probe.getUTCFullYear(), probe.getUTCMonth(), probe.getUTCDate(), startH) - off;
-    if (start <= nowMs) return start;
+    if (start <= cutoff) return start;
   }
   return null;
 }
@@ -320,24 +331,41 @@ function needsALook(s, extras, off){
   push('repeat', a.repeat.map(e => ({ ...e,
     did: 'already greeted within 7 days, so the bot stayed silent by design' })));
 
-  for (const g of groups) g.entries.sort((p, q) => p.ts - q.ts);   // stalest first
+  // 🚨 NEW vs ALREADY-KNOWN (2026-08-16). The stuck backlog reappears on every card forever, and a
+  // list that never changes stops being read — by Wednesday the admin scrolls past the whole block
+  // and a genuinely new stuck lead hides inside it. Same failure as an alert nobody acts on.
+  // So: DETAIL only what is new since the last report, and collapse the rest to one line.
+  // The split is the report window itself, which is already anchored on the last successful send.
+  const since = s.windowStart || 0;
+  for (const g of groups){
+    g.entries.sort((p, q) => p.ts - q.ts);                       // stalest first
+    g.fresh = g.entries.filter(e => e.ts * 1000 >= since);
+    g.known = g.entries.filter(e => e.ts * 1000 < since);
+  }
   const found = groups.reduce((n, g) => n + g.entries.length, 0);
-  return { groups, found };
+  const backlog = groups.reduce((n, g) => n + g.known.length, 0);
+  return { groups, found, backlog };
 }
 
 function needsALookText(s, extras, off){
+  const x = extras || {};
   const b = needsALook(s, extras, off);
-  const L = ['', '━━━━━━━━━━━━━━━━━━━━', `👀 *NEEDS A LOOK (${b.found})*`];
+  const fresh = b.groups.reduce((n, g) => n + g.fresh.length, 0);
+  // The headline counts what is NEW. The standing backlog gets its own line below, because a
+  // number that never moves is not news and must not dilute one that does.
+  const L = ['', '━━━━━━━━━━━━━━━━━━━━', `👀 *NEEDS A LOOK (${fresh} new)*`];
   if (!b.found && !b.groups.some(g => g.unavailable)){
     L.push('✅ Nothing suspicious in this window.');
-    return { text: L.join('\n'), found: 0, shown: 0, dropped: 0 };
+    return { text: L.join('\n'), found: 0, shown: 0, dropped: 0, backlog: 0 };
   }
   let budget = BLOCK_CAP, chars = 0, shown = 0, dropped = 0;
   for (const g of b.groups){
     if (!g.entries.length && !g.unavailable) continue;
-    L.push('', `${g.icon} *${g.title} (${g.entries.length})*`);
-    if (g.unavailable){ L.push(`   ℹ️ ${g.unavailable}`); if (!g.entries.length) continue; }
-    for (const e of g.entries){
+    if (!g.fresh.length && !g.unavailable) continue;   // known-only: it rolls into the backlog line
+    L.push('', `${g.icon} *${g.title} (${g.fresh.length} new`
+      + (g.known.length ? `, ${g.known.length} already known` : '') + ')*');
+    if (g.unavailable){ L.push(`   ℹ️ ${g.unavailable}`); if (!g.fresh.length) continue; }
+    for (const e of g.fresh){
       const block = [`   • ${fmtMyt(e.ts * 1000, off)} · ${who(e)} · "${said(e)}"`,
         `     ↳ ${e.did}`, contactLine(e)];
       const cost = block.join('\n').length + 1;
@@ -347,9 +375,22 @@ function needsALookText(s, extras, off){
       L.push(...block);
     }
   }
+  // 🚨 ONE line for everything already reported, and the DIRECTION of travel, because a rising
+  // backlog is the only part of it that is news. `prevBacklog` comes from the window marker.
+  if (b.backlog){
+    const oldest = Math.max(...b.groups.flatMap(g => g.known.map(e =>
+      Math.round((( s.windowEnd || Date.now()) - e.ts * 1000) / (24 * HOUR)))));
+    const prev = x.prevBacklog;
+    const trend = prev == null ? 'first time this has been counted'
+      : b.backlog > prev ? `UP from ${prev} at the last report`
+      : b.backlog < prev ? `down from ${prev} at the last report`
+      : 'unchanged';
+    L.push('', `${b.backlog > (prev == null ? -1 : prev) ? '🔺' : '🔴'} Old backlog: ${b.backlog} lead(s) still stuck `
+      + `(oldest ${oldest} days, ${trend}) → /lead-summary`);
+  }
   // 🚨 Rule 4. A capped list that reads as complete is the failure the cap was meant to prevent.
   if (dropped) L.push('', `⚠️ ${dropped} more not shown (this card has to fit in one WhatsApp message). Full list: /lead-summary`);
-  return { text: L.join('\n'), found: b.found, shown, dropped };
+  return { text: L.join('\n'), found: b.found, shown, dropped, backlog: b.backlog };
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -414,7 +455,14 @@ function summaryText(s, cross, extras){
   L.push(needsALookText(s, x, off).text);
   return L.join('\n');
 }
+// Same render, but also hands back the backlog count so the caller can persist it on the window
+// marker and the NEXT card can say whether the backlog grew.
+function summaryCard(s, cross, extras){
+  const text = summaryText(s, cross, extras);
+  const b = s.read_error ? { backlog: 0 } : needsALookText(s, extras || {}, (extras || {}).tzOffsetMs);
+  return { text, backlog: b.backlog || 0 };
+}
 
-module.exports = { parseEvents, summarize, summarizeWindow, summaryText, needsALook, needsALookText,
-  reportWindow, previousBoundary, lastDrainStart, windowHeader, fmtMyt,
+module.exports = { parseEvents, summarize, summarizeWindow, summaryText, summaryCard, needsALook, needsALookText,
+  reportWindow, previousBoundary, lastCompletedDrain, DRAIN_GRACE_MS, windowHeader, fmtMyt,
   LEAD_BUCKETS, NON_LEAD_BUCKETS, SLOTS, BLOCK_CAP, mytDate };

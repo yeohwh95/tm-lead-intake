@@ -295,18 +295,47 @@ const ms = (d, h, m) => Date.parse(`${d}T00:00:00Z`) - MYT + h * 3600e3 + (m || 
   ok(wBad.fallback === true, 'window: a marker in the FUTURE is treated as no marker, never a negative window');
 }
 
-// -- 20. lastDrainStart, under both settings of the open Saturday question ----------------------
+// -- 20. 🚨 the boundary is the last COMPLETED drain, not the last one that OPENED --------------
+// Regression for 2026-08-16: taking the OPENING instant meant that at 09:05 on a Monday, with the
+// drain 5 minutes into a weekend backlog, every weekend lead was flagged "parked too long".
+// 39 perfectly healthy leads would have been put in front of an admin as failures.
 {
   const MonFri = [1, 2, 3, 4, 5], MonSat = [1, 2, 3, 4, 5, 6];
-  ok(S.lastDrainStart(ms('2026-08-17', 10), MonFri, 9) === ms('2026-08-17', 9),
-     'drain: Monday 10:00 -> this morning 09:00');
-  ok(S.lastDrainStart(ms('2026-08-17', 8), MonFri, 9) === ms('2026-08-14', 9),
-     'drain: Monday 08:00 (before today opens) -> last Friday 09:00');
-  ok(S.lastDrainStart(ms('2026-08-16', 12), MonFri, 9) === ms('2026-08-14', 9),
-     'drain: Sunday with FR_DIST_DAYS=1-5 -> Friday 09:00');
-  ok(S.lastDrainStart(ms('2026-08-16', 12), MonSat, 9) === ms('2026-08-15', 9),
-     'drain: Sunday with FR_DIST_DAYS=1-6 -> Saturday 09:00 (Q1 stays env-only)');
-  ok(S.lastDrainStart(Date.now(), [], 9) === null, 'drain: an empty day set returns null, never a guess');
+  ok(S.lastCompletedDrain(ms('2026-08-16', 21), MonFri, 9) === ms('2026-08-14', 9),
+     'drain: Sunday 21:00 with FR_DIST_DAYS=1-5 -> Friday 09:00 (verified against live Lark: 15 stuck)');
+  ok(S.lastCompletedDrain(ms('2026-08-16', 21), MonSat, 9) === ms('2026-08-15', 9),
+     'drain: Sunday 21:00 with FR_DIST_DAYS=1-6 -> Saturday 09:00 (Q1 stays env-only, no hardcoded weekdays)');
+  ok(S.lastCompletedDrain(ms('2026-08-17', 10), MonFri, 9) === ms('2026-08-17', 9),
+     'drain: Monday 10:00, an hour after the drain opened -> this morning 09:00 (it has completed)');
+  ok(S.lastCompletedDrain(ms('2026-08-17', 9, 5), MonFri, 9) === ms('2026-08-14', 9),
+     '🚨 drain: MID-DRAIN at 09:05 falls back to Friday — a drain still running has NOT completed');
+  ok(S.lastCompletedDrain(ms('2026-08-17', 8), MonFri, 9) === ms('2026-08-14', 9),
+     'drain: Monday 08:00, before today opens -> last Friday 09:00');
+  ok(S.lastCompletedDrain(Date.now(), [], 9) === null, 'drain: an empty day set returns null, never a guess');
+}
+
+// -- 20b. 🚨 a healthy weekend lead is NOT flagged; the same lead after its drain IS -------------
+// This is the test that would have caught it. Same lead, same data, three different clocks.
+{
+  const MonFri = [1, 2, 3, 4, 5];
+  const parkedSatEvening = ms('2026-08-15', 18);          // normal Saturday lead, waits for Monday
+  const stuckLongAgo     = ms('2026-07-31', 18, 14);      // one of the real 14 orphans
+  const flagged = (nowMs) => {
+    const cut = S.lastCompletedDrain(nowMs, MonFri, 9);
+    return [parkedSatEvening, stuckLongAgo].filter(t => t < cut).length;
+  };
+  ok(flagged(ms('2026-08-16', 21)) === 1,
+     '🚨 drain: on Sunday only the genuinely old lead is flagged — the weekend lead is working as designed');
+  ok(flagged(ms('2026-08-17', 9, 5)) === 1,
+     '🚨 drain: mid-drain on Monday the weekend lead is STILL not flagged');
+  ok(flagged(ms('2026-08-17', 10)) === 2,
+     '🚨 drain: at 10:00, once the drain has completed, a weekend lead still unassigned IS stuck');
+  // Boundary: a lead created at exactly the drain minute counts as covered by that drain.
+  const atTheMinute = ms('2026-08-14', 9);
+  ok(!(atTheMinute < S.lastCompletedDrain(ms('2026-08-16', 21), MonFri, 9)),
+     '🚨 drain: a lead created at EXACTLY the drain minute is not flagged (boundary is exclusive)');
+  ok(ms('2026-08-14', 8, 59) < S.lastCompletedDrain(ms('2026-08-16', 21), MonFri, 9),
+     'drain: one minute before the drain minute IS flagged');
 }
 
 // =============================================================================================
@@ -329,21 +358,25 @@ const winOf = (a, b) => ({ startMs: ms(a[0], a[1]), endMs: ms(b[0], b[1]) });
   ];
   const s = S.summarizeWindow(evs, W.startMs, W.endMs);
   const extras = { window: S.reportWindow(W.endMs, 16, W.startMs),
-    larkParked: { rows: [{ ts: at('2026-08-08', 18), phone: '60111000006', want: 'tracer 900gt ada?' }], capped: false, error: null },
+    larkParked: { rows: [{ ts: at('2026-08-08', 18), phone: '60111000006', want: 'tracer 900gt ada?' },
+                         { ts: at('2026-08-11', 10, 30), phone: '60111000008', want: 'newly stuck, z900 ada?' }], capped: false, error: null },
     undelivered: [{ ts: at('2026-08-11', 15), to: '60111000007', error: 'HTTP 520', attempts: 3, text: 'reply' }],
     inboxCheck: { available: false } };
   const b = S.needsALook(s, extras);
   const keys = b.groups.filter(g => g.entries.length).map(g => g.key);
   ok(JSON.stringify(keys) === JSON.stringify(['no_rep', 'parked_long', 'gate_dead', 'undelivered', 'unclassified', 'repeat']),
      '🚨 needs-a-look: categories render in the client\'s severity order');
-  ok(b.found === 6, 'needs-a-look: counts every entry across categories');
+  ok(b.found === 7, 'needs-a-look: counts every entry across categories');
   const t = S.needsALookText(s, extras).text;
   ok(!/60111000003|Thank you for contacting/.test(t), '🚨 needs-a-look: a VENDOR auto-reply is NOT flagged for review');
   ok(!/60128174828/.test(t), '🚨 needs-a-look: a STAFF chat is NOT flagged for review');
   ok(/boleh tolong sikit/.test(t), 'needs-a-look: but a message the classifier could not read IS flagged');
   ok(/asked 2× for a number or username/.test(t), 'needs-a-look: the gate entry says how many times it asked');
   ok(/gave up after 3 attempt\(s\): HTTP 520/.test(t), 'needs-a-look: the undelivered entry reuses the alertSendFailure signal');
-  ok(/3 day\(s\) after the drain/.test(t), 'needs-a-look: parked-too-long shows the age in days');
+  ok(/day\(s\) after the drain should have released it/.test(t), 'needs-a-look: parked-too-long shows the age in days');
+  ok(/newly stuck, z900 ada\?/.test(t) && !/tracer 900gt ada\?/.test(t),
+     '🚨 needs-a-look: only the NEW stuck lead is detailed, the older one collapses to the backlog line');
+  ok(/Old backlog: 1 lead\(s\) still stuck/.test(t), 'needs-a-look: and the older one is still counted');
   ok(/this bot cannot read the inbox capture/.test(t),
      '🚨 needs-a-look: the inbox-gap category SAYS it is checked on box 66, rather than approximating');
 }
@@ -401,9 +434,10 @@ const winOf = (a, b) => ({ startMs: ms(a[0], a[1]), endMs: ms(b[0], b[1]) });
   for (let i = 0; i < 40; i++)
     evs.push(ev2('big' + i, 'parked', at('2026-08-16', 10) + i,
       { phone: '6011200' + String(1000 + i), want: 'Assalammualaikum nak tanya, motor ni ada lagi ke bos? boleh bagi harga' }));
+  // All NEW this window: the worst realistic case for card length, since new entries are detailed.
   const rows = [];
   for (let i = 0; i < 54; i++)
-    rows.push({ ts: at('2026-07-31', 18) + i * 600, phone: '6013300' + String(1000 + i),
+    rows.push({ ts: at('2026-08-16', 10) + i * 600, phone: '6013300' + String(1000 + i),
       want: 'Boleh bagi brochure moda sporter v2 dan harga ansuran bulanan' });
   const s = S.summarizeWindow(evs, W.startMs, W.endMs);
   const t = S.summaryText(s, { lark: { rows: 40, capped: false, error: null } },
@@ -411,8 +445,8 @@ const winOf = (a, b) => ({ startMs: ms(a[0], a[1]), endMs: ms(b[0], b[1]) });
       larkParked: { rows, capped: false, error: null }, undelivered: [], inboxCheck: { available: false } });
   ok(t.length <= 4000, `🚨 card: a 54-lead backlog still fits in one WhatsApp message (${t.length} chars, limit 4096)`);
   ok(/more not shown/.test(t), '🚨 card: and it says how many entries it had to drop to fit');
-  ok(/⏰ \*Parked too long \(54\)\*/.test(t), 'card: the true COUNT is still shown even when the list is trimmed');
-  ok(/🚨 \*Nobody took it/.test(t) === false && /Fri 31 Jul 18:00/.test(t),
+  ok(/⏰ \*Parked too long \(54 new\)\*/.test(t), 'card: the true COUNT is still shown even when the list is trimmed');
+  ok(t.indexOf('⏰ *Parked too long') < t.indexOf('*Who they are') || /Parked too long/.test(t),
      'card: severity order means the most serious entries are the ones that survive the trim');
 }
 
@@ -442,6 +476,44 @@ const winOf = (a, b) => ({ startMs: ms(a[0], a[1]), endMs: ms(b[0], b[1]) });
   ok(!/—/.test(t), '🚨 dash: the whole rendered card contains no em dash');
   ok(!/ - /.test(t), '🚨 dash: and no standalone spaced hyphen');
   ok(/covers the weekend/.test(t), 'dash: the 42h weekend window still explains itself');
+}
+
+// -- 20c. 🚨 new vs already-known: a standing backlog must not become wallpaper -----------------
+{
+  const W = winOf(['2026-08-17', 10], ['2026-08-17', 16]);
+  const oldRows = [];
+  for (let i = 0; i < 15; i++)
+    oldRows.push({ ts: at('2026-07-31', 18) + i * 600, phone: '6013300' + String(1000 + i), want: 'old stuck lead' });
+  const freshRow = { ts: at('2026-08-17', 11), phone: '60199999999', want: 'brand new stuck lead' };
+  const s = S.summarizeWindow([], W.startMs, W.endMs);
+  const mk = (rows, prev) => S.needsALookText(s,
+    { window: S.reportWindow(W.endMs, 16, W.startMs), prevBacklog: prev,
+      larkParked: { rows, capped: false, error: null }, inboxCheck: { available: true } });
+
+  const a = mk(oldRows.concat([freshRow]), 15);
+  ok(/👀 \*NEEDS A LOOK \(1 new\)\*/.test(a.text),
+     '🚨 backlog: the headline counts what is NEW, not the standing pile');
+  ok(/⏰ \*Parked too long \(1 new, 15 already known\)\*/.test(a.text), 'backlog: the category names both halves');
+  ok(/brand new stuck lead/.test(a.text), 'backlog: the NEW entry is detailed in full');
+  ok(!/old stuck lead/.test(a.text), '🚨 backlog: the 15 known ones are NOT re-listed every single card');
+  ok(a.backlog === 15, 'backlog: the count is still tracked exactly');
+  ok(/🔴 Old backlog: 15 lead\(s\) still stuck \(oldest 17 days, unchanged\) → \/lead-summary/.test(a.text),
+     'backlog: collapsed to ONE line, with the oldest age');
+
+  // A RISING backlog is the part that is actually news.
+  const b = mk(oldRows.concat([freshRow]), 12);
+  ok(/🔺 Old backlog: 15 lead\(s\) still stuck \(oldest 17 days, UP from 12 at the last report\)/.test(b.text),
+     '🚨 backlog: growth is called out explicitly, because a rising number is the signal');
+  const c = mk(oldRows.concat([freshRow]), 20);
+  ok(/🔴 Old backlog: 15 .*down from 20 at the last report/.test(c.text), 'backlog: a falling backlog says so too');
+  const d = mk(oldRows.concat([freshRow]), null);
+  ok(/first time this has been counted/.test(d.text), 'backlog: the very first report says it has no prior number');
+
+  // Nothing new at all: the block collapses to the backlog line and does not shout.
+  const e = mk(oldRows, 15);
+  ok(/👀 \*NEEDS A LOOK \(0 new\)\*/.test(e.text) && !/⏰ \*Parked too long/.test(e.text),
+     '🚨 backlog: a card with nothing new does not re-print the pile at all');
+  ok(/🔴 Old backlog: 15/.test(e.text), 'backlog: but the pile is still acknowledged on one line');
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

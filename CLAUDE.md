@@ -71,6 +71,43 @@ timestamp of the last report that actually sent**, persisted in `summary_mark.js
    quoted historic data for a while. Customer text is quoted **verbatim** by design, so the dash
    assert covers bot copy, not what a customer typed.
 
+### 🐛 Corrections after the coordinator re-verified against live Lark (2026-08-16)
+**Two things, and only one of them was a code bug. Be precise about which.**
+
+1. **My "Parked too long (54)" was a BAD VERIFICATION, not a boundary bug.** `lastDrainStart`
+   returned the correct `Fri 14 Aug 09:00` at the real clock. I rendered the card with `now = Mon
+   17 Aug 10:00` — a *future* clock — against a Lark snapshot taken Sunday evening, so leads that
+   had not yet had their Monday drain looked overdue. 🚨 **A replay whose clock and whose data
+   come from different moments will produce a confident, wrong number.** Pin both to the same
+   instant, or the render is fiction.
+2. **A REAL bug the review exposed: "the last drain that OPENED" ≠ "the last drain that
+   COMPLETED".** The drain releases one queued entry per 60s tick, so at 09:05 on a Monday it is
+   minutes into a weekend backlog. Taking the opening instant as the boundary flagged **every**
+   weekend lead as "parked too long" *while the drain was still running* — 39 healthy leads
+   presented to an admin as failures on the first morning. Now `lastCompletedDrain()` with a
+   `DRAIN_GRACE_MS` (60 min) hold-off. Live counts at Sun 16 Aug 21:00: **89** unassigned
+   WhatsApp-Direct rows · **54** match the stuck signature · **15 genuinely stuck** (before
+   Fri 14 Aug 09:00) · **39 normal weekend leads that must NOT be flagged**.
+   Regression tests: same lead at three clocks (Sunday, mid-drain Monday 09:05, Monday 10:00),
+   plus the exact-drain-minute boundary, under `FR_DIST_DAYS=1-5` and `1-6`.
+
+### 🔴 A permanent nag list becomes wallpaper
+Those 15 would have appeared on every card forever. By Wednesday the admin scrolls past the block
+and a genuinely new stuck lead hides inside a list they have stopped reading — the same failure as
+an alert nobody acts on. So the block now splits on the window marker it already keeps:
+- **Only entries NEW since the last report are detailed.** Headline counts new: `👀 NEEDS A LOOK
+  (1 new)`, category reads `⏰ Parked too long (1 new, 15 already known)`.
+- Everything already reported collapses to **one line**:
+  `🔴 Old backlog: 15 lead(s) still stuck (oldest 17 days, unchanged) → /lead-summary`.
+- 🚨 **A GROWING backlog is the signal**, so it is called out: `🔺 … UP from 15 at the last report`.
+  The count rides on the window marker (`summaryMark.backlog`), persisted only on a confirmed send.
+- Applies to every category generically. In practice only `parked_long` can persist — the
+  event-derived ones are already window-scoped and are therefore always new.
+
+**Proof it still screams when it should:** modelling a FAILED Monday drain (the 14-lead scenario
+repeating) renders `👀 NEEDS A LOOK (24 new)` + `🔺 Old backlog: 30 … UP from 15`, 3,944 chars.
+The realistic card, with the drain succeeding, is `(0 new)` + one backlog line, 1,182 chars.
+
 ### Verified on real data (2026-08-16)
 - **Sat 15 Aug: 29 inbound chats vs 25 Lark rows.** The 4-lead gap is **four salespeople sending SLA
   acks** — Allysa `PASS`, Jebat `✅`, Nazrin `👍🏻`, Roy `Done` — logged `ai_skip(staff_or_internal)`,
