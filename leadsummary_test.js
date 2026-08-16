@@ -516,5 +516,65 @@ const winOf = (a, b) => ({ startMs: ms(a[0], a[1]), endMs: ms(b[0], b[1]) });
   ok(/🔴 Old backlog: 15/.test(e.text), 'backlog: but the pile is still acknowledged on one line');
 }
 
+// -- 26. 🚨🚨 THE MOST IMPORTANT TEST IN THIS FEATURE ------------------------------------------
+// Monday's 09:00 drain fails outright and the whole weekend queue sits dead. The 10:00 card MUST
+// report that backlog as NEW, not zero. This is the 31 Jul incident happening again, and the card
+// existing at all is only worth anything if it screams here.
+//
+// ⚠️ Drain timing is measured, not assumed: drainFRDeferred empties the WHOLE queue in one
+// invocation (a `while` loop), paced by the serialized send chain at SEND_GAP=5200ms. A 46-lead
+// backlog therefore takes ~4 minutes, finishing ~09:04 — not ~09:46.
+{
+  const MonFri = [1, 2, 3, 4, 5];
+  const NOW = ms('2026-08-17', 10);                    // the morning card fires
+  const lastSend = ms('2026-08-15', 16);               // Saturday afternoon report
+  // 46 real weekend leads, written to Lark, never assigned because the drain died.
+  const rows = [];
+  for (let i = 0; i < 46; i++)
+    rows.push({ ts: at('2026-08-15', 17) + i * 1800, phone: '6019900' + String(1000 + i),
+      want: 'nak tanya motor ada stok tak' });
+  const w = S.reportWindow(NOW, 10, lastSend);
+  const s = S.summarizeWindow([], w.startMs, w.endMs);
+  const cut = S.lastCompletedDrain(NOW, MonFri, 9);
+  const r = S.needsALookText(s, { window: w, prevBacklog: 15,
+    larkParked: { rows: rows.filter(x => x.ts * 1000 < cut), capped: false, error: null },
+    inboxCheck: { available: false } });
+  ok(cut === ms('2026-08-17', 9), 'dead drain: the boundary is this morning 09:00, which has completed');
+  ok(r.found === 46, '🚨🚨 dead drain: ALL 46 stranded leads are found, not zero');
+  ok(/👀 \*NEEDS A LOOK \(46 new\)\*/.test(r.text),
+     '🚨🚨 dead drain: the 10:00 card reports 46 NEW, so a failed drain cannot render as a quiet morning');
+  ok(/⏰ \*Parked too long \(46 new\)\*/.test(r.text), 'dead drain: named under the right category');
+  ok(r.shown > 0 && r.shown + r.dropped === 46, 'dead drain: entries are detailed, and any trimmed are counted');
+  // …and the healthy case must stay quiet, or the alarm is worthless.
+  const healthy = S.needsALookText(s, { window: w, prevBacklog: 15,
+    larkParked: { rows: [], capped: false, error: null }, inboxCheck: { available: false } });
+  ok(/👀 \*NEEDS A LOOK \(0 new\)\*/.test(healthy.text),
+     'dead drain: a drain that WORKED leaves the same card at 0 new (the alarm discriminates)');
+}
+
+// -- 26b. 🚨 why 15 minutes and not 60 — the grace must not race the report ---------------------
+{
+  const MonFri = [1, 2, 3, 4, 5], drain = ms('2026-08-17', 9);
+  const visible = (now, graceMin) => S.lastCompletedDrain(now, MonFri, 9, null, graceMin * 60000) === drain;
+  // A dead 09:00 drain must be unambiguously stuck by 09:15, well before the 10:00 card.
+  ok(visible(ms('2026-08-17', 9, 15), 15), '🚨 grace 15: a dead drain is visible from 09:15');
+  ok(!visible(ms('2026-08-17', 9, 15), 60), 'grace 60 would still be hiding it at 09:15');
+  ok(!visible(ms('2026-08-17', 9, 30), 60), 'grace 60 would still be hiding it at 09:30 (endpoint + probe read this)');
+  // 🚨 The real danger: at exactly 10:00 a 60-min grace has ZERO margin (09:00 <= 09:00). One
+  // second early, or any change to the report time or FR_DIST_START, and a dead drain reads clean.
+  ok(!visible(ms('2026-08-17', 9, 59) + 59000, 60),
+     '🚨 grace 60: one second before 10:00 a DEAD drain renders as clean — zero margin against the report');
+  ok(visible(ms('2026-08-17', 9, 59) + 59000, 15), 'grace 15: the same instant is correctly flagged');
+  // And a normal drain (~4 min for 46 leads) is never flagged mid-flight under 15 min.
+  ok(!visible(ms('2026-08-17', 9, 4), 15), 'grace 15: a normal 4-minute drain is never flagged mid-flight');
+  ok(!visible(ms('2026-08-17', 9, 14), 15), 'grace 15: still not flagged at 09:14, with margin over the real drain time');
+  // 🚨 Pin the DEFAULT, not just the mechanism. Without this, someone raising DRAIN_GRACE_MIN back
+  // to 60 breaks nothing in the suite while quietly reopening the race against the 10:00 report.
+  ok(S.DRAIN_GRACE_MS === 15 * 60 * 1000,
+     '🚨 grace: the DEFAULT is 15 minutes (raising it races the report, lowering it flags mid-drain)');
+  ok(S.lastCompletedDrain(ms('2026-08-17', 9, 15), MonFri, 9) === drain,
+     '🚨 grace: with the default in force, a dead 09:00 drain is flagged by 09:15');
+}
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

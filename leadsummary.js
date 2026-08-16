@@ -66,15 +66,23 @@ function fmtMyt(ms, off){
 // The most recent drain that has actually COMPLETED. A lead written to Lark before this and still
 // unassigned should have been released by it, so it is genuinely stuck.
 //
-// 🚨 "COMPLETED", not "opened" (fixed 2026-08-16). The drain releases one queued entry per 60s
-// tick, so a window that opened moments ago has NOT finished working through a weekend backlog.
-// Taking the opening instant as the boundary flagged EVERY weekend lead as "parked too long"
-// while the drain was still mid-flight — 39 perfectly healthy leads presented to an admin as
-// failures. DRAIN_GRACE_MS is how long we give it before its output is treated as final.
+// 🚨 "COMPLETED", not "opened" (fixed 2026-08-16). Taking the opening instant as the boundary
+// flagged EVERY weekend lead as "parked too long" while the drain was still mid-flight — 39
+// perfectly healthy leads presented to an admin as failures.
 //
-// Derived from the same FR_DIST_DAYS / FR_DIST_START the drain itself uses, never a hardcoded
-// weekday list, so it stays correct under both `1,2,3,4,5` and `1,2,3,4,5,6`.
-const DRAIN_GRACE_MS = 60 * 60 * 1000;
+// ⚠️ HOW LONG THE DRAIN ACTUALLY TAKES — measured from the code, not assumed (corrected
+// 2026-08-16). `drainFRDeferred` is NOT one lead per 60s tick: it holds a
+// `while (frDeferred.length && inFRDistHours())` loop that empties the WHOLE queue in a single
+// invocation, and the 60s interval merely re-triggers it. The real pacing is the serialized send
+// chain, `SEND_GAP = 5200`ms. So a 46-lead weekend backlog drains in about 4 minutes, finishing
+// ~09:04 — not ~09:46.
+//
+// 15 minutes is therefore ~3.5× the real drain time: long enough that a normal drain is never
+// flagged mid-flight, short enough that a drain which FAILED at 09:00 is unambiguously stuck by
+// 09:15, well clear of the 10:00 report. 🚨 A 60-minute grace would have raced the report itself:
+// "completed" would land at exactly 10:00, so a totally dead drain could render "0 new stuck"
+// while 46 leads sat there. The grace must never approach the gap between the drain and the card.
+const DRAIN_GRACE_MS = Number(process.env.DRAIN_GRACE_MIN || 15) * 60 * 1000;
 function lastCompletedDrain(nowMs, days, startH, off, graceMs){
   off = off == null ? MYT_OFF_DEFAULT : off;
   const grace = graceMs == null ? DRAIN_GRACE_MS : graceMs;

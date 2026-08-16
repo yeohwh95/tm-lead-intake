@@ -90,6 +90,26 @@ timestamp of the last report that actually sent**, persisted in `summary_mark.js
    Fri 14 Aug 09:00) · **39 normal weekend leads that must NOT be flagged**.
    Regression tests: same lead at three clocks (Sunday, mid-drain Monday 09:05, Monday 10:00),
    plus the exact-drain-minute boundary, under `FR_DIST_DAYS=1-5` and `1-6`.
+3. ⚠️ **My first grace value (60 min) was sized off a WRONG PREMISE.** I wrote that the drain
+   "releases one entry per 60s tick". It does not: `drainFRDeferred` holds a
+   `while (frDeferred.length && inFRDistHours())` loop that empties the **whole queue in one
+   invocation**, and the 60s interval merely re-triggers it. The real pacing is the serialized
+   send chain, `SEND_GAP = 5200`ms, so a 46-lead backlog drains in **~4 minutes, finishing ~09:04**.
+   🚨 A 60-minute grace put "completed" at exactly **10:00 — the moment the report fires**, with
+   *literally zero margin* (`09:00 <= 09:00`): one second early, or any change to the report time
+   or `FR_DIST_START`, and a totally dead drain would render as a clean morning.
+   **Now `DRAIN_GRACE_MIN`, default 15** (~3.5× the real drain time). ⚠️ Note the coordinator's
+   requested pin (dead drain → 10:00 card shows the full backlog) passes under BOTH values; what
+   actually discriminates is 09:15–09:59 and the zero-margin instant, so the suite also **pins the
+   default itself** — otherwise raising it back to 60 breaks nothing while reopening the race.
+   🚨 **The grace must never approach the gap between the drain and the card.**
+
+### ⚖️ The `Yamaha MT15` row stays on the list (Benjamin, 2026-08-16) — do NOT re-raise
+I proposed a suppression marker for it. **Rejected, and the reasoning is worth keeping**: it is a
+real 6 Aug customer with no reachable number, recovered record-only, and **nobody has ever picked
+them up**. It is not a false positive, it is an unresolved lead correctly appearing on a list of
+unresolved leads. A row leaves the list the moment someone assigns a salesman. **Do not build a
+mechanism to hide work that has not been done**, and do not modify that row.
 
 ### 🔴 A permanent nag list becomes wallpaper
 Those 15 would have appeared on every card forever. By Wednesday the admin scrolls past the block
