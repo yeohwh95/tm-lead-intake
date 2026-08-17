@@ -176,6 +176,26 @@ function summarizeWindow(events, startMs, endMs, opts){
   if (o.read_error) return { windowStart: startMs, windowEnd: endMs, date: o.date || mytDate(endMs, off),
     read_error: String(o.read_error), parse_errors: o.parse_errors || 0 };
 
+  // 🚨 Rule 3, the case it MISSED. A date before the log begins is not a quiet day, it is a day we
+  // cannot see — and the two must never render the same. Rule 3 guarded an unreadable file and an
+  // unmounted disk; it did not guard the dominant real case, a perfectly healthy file that simply
+  // does not reach back that far. Measured 2026-08-17: `/lead-summary?date=` answered
+  // `total:0, sumOk:true` for every date 03–16 Aug, including Sat 15 Aug — a day this repo's own
+  // notes record as 29 inbound chats and 25 Lark rows. A confident zero about a day we have no
+  // record of is precisely the lie this module exists to prevent.
+  // `logFirstMs` is derived from the events themselves, so it moves correctly if the file is ever
+  // pruned. Reduce, not Math.min(...spread) — the log is unbounded and a spread would blow the stack.
+  const logFirstMs = o.logFirstMs != null ? o.logFirstMs
+    : (events && events.length
+        ? events.reduce((m, e) => (m == null || e.ts < m ? e.ts : m), null) * 1000
+        : null);
+  if (logFirstMs == null || endMs <= logFirstMs)
+    return { windowStart: startMs, windowEnd: endMs, date: o.date || mytDate(endMs, off),
+      no_data: true, logStartsAt: logFirstMs, parse_errors: o.parse_errors || 0, read_error: null };
+  // The window OPENS before the log does: countable, but the early part is invisible and the card
+  // has to say from when the numbers actually start.
+  const partialFrom = logFirstMs > startMs ? logFirstMs : null;
+
   const lookbackStart = startMs - lookbackH * HOUR;
   const byJid = new Map();
   for (const e of events || []){
@@ -243,7 +263,8 @@ function summarizeWindow(events, startMs, endMs, opts){
 
   return { date: o.date || mytDate(endMs, off), windowStart: startMs, windowEnd: endMs,
     total, notLeads, buckets, sumOk: bucketSum === total, bucketSum, unassigned, attention,
-    carried, carriedResolved, larkMissing, parse_errors: o.parse_errors || 0, read_error: null };
+    carried, carriedResolved, larkMissing, parse_errors: o.parse_errors || 0, read_error: null,
+    logStartsAt: logFirstMs, partialFrom };
 }
 
 // Day-scoped wrapper. Kept because the endpoint still answers `?date=YYYY-MM-DD` for ad-hoc
@@ -355,8 +376,13 @@ function needsALook(s, extras, off){
   return { groups, found, backlog };
 }
 
-function needsALookText(s, extras, off){
+// `charBudget` lets the caller size this block against the header it has ALREADY built. The header
+// used to be near-constant, so a fixed BLOCK_CHAR_BUDGET was safe; it no longer is (the blind-window
+// warnings vary its length), and a fixed budget plus a grown header is how the 4,096 limit gets
+// breached again — silently, because alertReview does not truncate.
+function needsALookText(s, extras, off, charBudget){
   const x = extras || {};
+  const CB = charBudget == null ? BLOCK_CHAR_BUDGET : Math.max(600, charBudget);
   const b = needsALook(s, extras, off);
   const fresh = b.groups.reduce((n, g) => n + g.fresh.length, 0);
   // The headline counts what is NEW. The standing backlog gets its own line below, because a
@@ -378,7 +404,7 @@ function needsALookText(s, extras, off){
         `     ↳ ${e.did}`, contactLine(e)];
       const cost = block.join('\n').length + 1;
       // Severity order means the entries that survive the budget are the ones that matter most.
-      if (budget <= 0 || chars + cost > BLOCK_CHAR_BUDGET){ dropped++; continue; }
+      if (budget <= 0 || chars + cost > CB){ dropped++; continue; }
       budget--; chars += cost; shown++;
       L.push(...block);
     }
@@ -422,10 +448,25 @@ function summaryText(s, cross, extras){
     return L.join('\n');
   }
 
+  // 🚨 The same one-line treatment for a date the log does not reach. Deliberately worded so it can
+  // never be skim read as a quiet day, because that is exactly how it used to read.
+  if (s.no_data){
+    L.push(`ℹ️ We have no lead records for this date, so there are no counts to show.`);
+    L.push(s.logStartsAt
+      ? `👉 Lead logging only began ${fmtMyt(s.logStartsAt, off)}. Anything before that was never recorded. This is NOT a quiet day.`
+      : `👉 The lead log is empty, so nothing has been recorded yet. This is NOT a quiet day.`);
+    return L.join('\n');
+  }
+
   const assigned = s.buckets.assigned;
   L.push(`📥 ${s.total} lead${s.total === 1 ? '' : 's'}`
     + (s.notLeads ? ` (+${s.notLeads} skipped / human-owned chats, not sales leads)` : ''));
   L.push(`✅ ${assigned} assigned · ❓ ${s.total - assigned} not assigned`);
+
+  // The window opened before the log did, so the count is real but incomplete, and saying so is the
+  // difference between an undercount and a lie.
+  if (s.partialFrom)
+    L.push(`⚠️ These counts only cover ${fmtMyt(s.partialFrom, off)} onward, because lead logging began then. Anything earlier in this window was never recorded.`);
 
   // 🚨 Rule 1. If the numbers do not add up, SAY SO rather than printing a tidy lie.
   if (!s.sumOk) L.push(`⚠️ buckets don't sum to the total (${s.bucketSum} vs ${s.total}), treat these numbers as suspect`);
@@ -460,14 +501,29 @@ function summaryText(s, cross, extras){
   if (s.larkMissing) L.push('', `🚨 ${s.larkMissing} lead(s) have NO Lark row (the CRM write failed). Nothing downstream will find them.`);
   if (s.parse_errors) L.push('', `⚠️ ${s.parse_errors} unreadable line(s) in the decision log were skipped`);
 
-  L.push(needsALookText(s, x, off).text);
+  // 🚨 Size the block against the header we actually built, not against a constant. 3,900 leaves
+  // headroom under WhatsApp's hard 4,096, and the block keeps its own severity ordering, so what
+  // survives a tighter budget is still the worst of it.
+  const headLen = L.join('\n').length;
+  let blockBudget = Math.min(BLOCK_CHAR_BUDGET, 3900 - headLen);
+  let block = needsALookText(s, x, off, blockBudget);
+  // 🚨 The budget governs ENTRY text only: category headers, the backlog line and the "not shown"
+  // line all ride on top of it, so a budget alone has never actually bounded the card. Rather than
+  // hand-tune an allowance that rots the next time a line is added, MEASURE the assembled card and
+  // tighten until it fits. Severity ordering means what gets dropped is always the least severe.
+  for (let i = 0; i < 6 && headLen + block.text.length > 3900; i++){
+    blockBudget = Math.max(600, blockBudget - (headLen + block.text.length - 3900) - 120);
+    block = needsALookText(s, x, off, blockBudget);
+  }
+  L.push(block.text);
   return L.join('\n');
 }
 // Same render, but also hands back the backlog count so the caller can persist it on the window
 // marker and the NEXT card can say whether the backlog grew.
 function summaryCard(s, cross, extras){
   const text = summaryText(s, cross, extras);
-  const b = s.read_error ? { backlog: 0 } : needsALookText(s, extras || {}, (extras || {}).tzOffsetMs);
+  const b = (s.read_error || s.no_data) ? { backlog: 0 }
+    : needsALookText(s, extras || {}, (extras || {}).tzOffsetMs);
   return { text, backlog: b.backlog || 0 };
 }
 

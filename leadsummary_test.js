@@ -576,5 +576,65 @@ const winOf = (a, b) => ({ startMs: ms(a[0], a[1]), endMs: ms(b[0], b[1]) });
      '🚨 grace: with the default in force, a dead 09:00 drain is flagged by 09:15');
 }
 
+// ── A DATE BEFORE THE LOG BEGINS IS NOT A QUIET DAY ────────────────────────
+// 🚨 THE REAL INCIDENT, 2026-08-17. Lead logging deployed 17 Aug 12:07 MYT. Asked for any earlier
+// date, `/lead-summary` answered `total:0, sumOk:true` — a CONFIDENT zero for days that had ~25
+// leads. Rule 3 caught an unreadable file; it never caught a healthy file that does not reach back.
+{
+  // The log begins 17 Aug 12:07. Everything below is asked of that same log.
+  const log = [ev('x', 'assigned', at('2026-08-17', 12, 30)), ev('y', 'repeat', at('2026-08-17', 14))];
+
+  // (1) A date entirely before the log: no counts at all, and it must SAY so.
+  const before = S.summarize(log, '2026-08-15', endOf('2026-08-15'));
+  ok(before.no_data === true, '🚨 pre-log date: reports no_data, not a total');
+  ok(before.total === undefined && before.sumOk === undefined,
+     '🚨 pre-log date: emits NO count fields at all, so nothing downstream can read a zero');
+  const cardBefore = S.summaryText(before, null);
+  ok(/no lead records for this date/i.test(cardBefore), 'pre-log card: says we have no records');
+  ok(/NOT a quiet day/.test(cardBefore), '🚨 pre-log card: cannot be skim read as a quiet day');
+  ok(!/📥 0 lead/.test(cardBefore), '🚨 pre-log card: never prints "0 leads"');
+
+  // (2) The window STRADDLES the log start: counts are real but incomplete, and it says from when.
+  const straddle = S.summarizeWindow(log, Date.parse('2026-08-17T02:00:00Z'), endOf('2026-08-17'),
+    { date: '2026-08-17' });
+  ok(straddle.no_data !== true, 'straddling window: still counts, it is not blind');
+  ok(straddle.total === 1, 'straddling window: the one real lead is counted');
+  ok(straddle.partialFrom === at('2026-08-17', 12, 30) * 1000,
+     'straddling window: partialFrom is the first moment the log actually covers');
+  const cardStraddle = S.summaryText(straddle, null);
+  ok(/only cover/.test(cardStraddle) && /never recorded/.test(cardStraddle),
+     '🚨 straddling card: warns the early part of the window is missing');
+
+  // (3) 🚨 TODAY is itself partial, and that is not a bug. Logging began 17 Aug 12:07 but the 17 Aug
+  // card covered from 10:00, so the morning is missing and the card must say so. This is the live
+  // case: the "9 leads" on the first real card is an undercount.
+  const today = S.summarize(log, '2026-08-17', endOf('2026-08-17'));
+  ok(today.partialFrom === at('2026-08-17', 12, 30) * 1000,
+     '🚨 the FIRST logged day is itself partial, and says from when');
+
+  // (4) A date fully inside the log is completely unchanged — no warning, real counts.
+  const log2 = [ev('w', 'assigned', at('2026-08-16', 9)), ev('x', 'assigned', at('2026-08-17', 12, 30))];
+  const covered = S.summarize(log2, '2026-08-17', endOf('2026-08-17'));
+  ok(covered.total === 1 && covered.sumOk === true, 'covered date: counts normally');
+  ok(covered.partialFrom === null, 'covered date: no partial warning');
+  ok(!/only cover|no lead records/.test(S.summaryText(covered, null)),
+     'covered date: card carries no blindness warning');
+
+  // (4) An EMPTY log is blind, not quiet. This is the unmounted-disk shape one step further on.
+  const empty = S.summarize([], '2026-08-17', endOf('2026-08-17'));
+  ok(empty.no_data === true && empty.total === undefined,
+     '🚨 empty log: blind, never "0 leads today"');
+
+  // (5) A read error still wins over no_data — an unreadable file and an out-of-range date are
+  // different facts and must not collapse into one message.
+  const err = S.summarize([], '2026-08-15', endOf('2026-08-15'), { read_error: 'ENOENT /data' });
+  ok(err.read_error && !err.no_data, 'read_error still takes precedence over no_data');
+
+  // (6) summaryCard must not throw on a no_data summary (it has no `attention`).
+  let threw = false;
+  try { S.summaryCard(before, null, {}); } catch { threw = true; }
+  ok(!threw, 'summaryCard survives a no_data summary');
+}
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

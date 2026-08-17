@@ -2,6 +2,62 @@
 
 WhatsApp lead → AI extract → Lark CRM + notify the assigned salesperson. **LIVE.**
 
+## 🚨 A DATE BEFORE THE LOG BEGINS IS NOT A QUIET DAY — 2026-08-17
+
+**Measured, not predicted.** `GET /lead-summary?date=` was asked for every date 03–16 Aug. Every one
+answered **`total: 0, sumOk: true`** — a confident, verified-looking zero. Sat 15 Aug is recorded in
+this very file as **29 inbound chats / 25 Lark rows**.
+
+**Root cause: lead logging only deployed 17 Aug 12:07 MYT, so `fr_events.jsonl` does not reach back.**
+Rule 3 ("a failed read says couldn't read, never 0") guarded an unreadable file and an unmounted
+`/data`. It never guarded **a perfectly healthy file that simply does not cover the date asked** —
+which is the dominant real case, and the one that produced a client-facing lie.
+
+| Situation | Before | Now |
+|---|---|---|
+| Date entirely before the log | `📥 0 leads` | `no_data: true`, **no count fields at all**, card says *"NOT a quiet day"* |
+| Window straddles the log start | silent undercount | counts, plus `⚠️ These counts only cover HH:MM onward` |
+| Date fully inside the log | unchanged | unchanged |
+| Empty log | `0 leads` | blind, not quiet |
+| Unreadable file | `read_error` | `read_error` still wins — two different facts, two different messages |
+
+- 🚨 **`no_data` emits NO `total`/`sumOk`/`buckets`.** A zero that does not exist cannot be read as
+  a zero by anything downstream. Same shape as `read_error`, for the same reason.
+- ⚠️ **The 17 Aug card is ITSELF partial** — it covered from 10:00 but logging began 12:07, so its
+  "9 leads" is an undercount. `partialFrom` now says so on the card.
+- `logFirstMs` is derived from the events, so it moves correctly if the file is ever pruned.
+  Reduce, never `Math.min(...spread)` — the log is unbounded and a spread would blow the stack.
+
+### 🐛 Found by the suite, not by reading: the char budget never actually bounded the card
+Adding one header line pushed the real 54-lead card from 3,693 to **4,083 chars** against a 4,000
+assert (WhatsApp hard-rejects at 4,096, and `alertReview` does not truncate — an over-long card
+simply never arrives). `BLOCK_CHAR_BUDGET` only ever governed **entry** text; category headers, the
+backlog line and the "N more not shown" line always rode on top of it, and the header was assumed
+near-constant. It is not anymore.
+**Fix:** `needsALookText` takes a `charBudget`, and `summaryText` **measures the assembled card and
+tightens until it fits** (≤3,900, max 6 iterations) instead of trusting a constant. Severity
+ordering means what gets dropped is always the least severe. 🚨 **Do not replace this with a
+hand-tuned allowance** — that is the assumption that just broke.
+
+### ⚠️ What the other sources can and cannot back up (verified 2026-08-17)
+| Figure | Source | Trust | Reaches back to |
+|---|---|---|---|
+| Old backlog (15) | Lark | ✅ full history, no page cap hit | all of it |
+| Gate / no-phone | `gate_events.jsonl` | ✅ | 04 Aug (feature go-live) |
+| Daily lead counts | `fr_events.jsonl` | ⚠️ | **17 Aug 12:07 only** |
+| "In the inbox but not in our log" | box-66 console | 🔴 **~4 days** | **13 Aug** |
+| Lark `Stage` column | Lark | 🔴 **no signal** | 677 of 680 rows = `Passed lead`, a default |
+
+- 🔴 **The box-66 console is NOT an archive.** This file elsewhere claims it "persists EVERY
+  forwarded message" (true when written, used for June reconstructions). Live store now holds
+  **nothing before 13 Aug 09:00 MYT** — sampled across 11 chats incl. the 758-message intake group.
+  Mechanism (reset vs prune) could not be determined from the API. **Any inbox-vs-log claim older
+  than ~4 days is unverifiable, and the card's `(0 new)` on that category means "cannot see".**
+- 🔴 **WaSender's token has no read scope** (`/api/chats` returns an HTML login page), so the console
+  is the ONLY inbox mirror. There is no second place to go for old history.
+- ⚠️ `/gate-status` returns only the **last 500 events** and computes `event_counts` from that same
+  slice, with no truncation flag. 179 events today at ~14/day, so it starts silently lying in ~5 weeks.
+
 ## 🔁 THE LLM MAY UPGRADE TO `sell`, NEVER DOWNGRADE ONE — 🟢 LIVE 2026-08-17 (`94e2b09`)
 Two trade-in customers in two days went to a salesperson instead of **Fitri the purchaser**, so TM
 never bought the bike. Both were caught by the 09:57 FR self-audit, one day apart:
