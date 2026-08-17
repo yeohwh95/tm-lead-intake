@@ -123,9 +123,18 @@ const CS_PRICE_EN = `For the price & monthly plan I'm customer service only, I d
 // ONE message that asks the two things a salesperson always needs before they can help: which
 // model, and cash or loan. Replaces the old bare "berminat motor apa?" outside the window, so the
 // rep opens a qualified lead on Monday instead of "Hi".
-const qualifyAsk = lang => lang === 'en'
-  ? `Can I get a bit more detail, which model are you interested in? Cash or loan? 😊 I'll pass all the details to our salesman so he can help you straight away.`
-  : `Boleh saya tahu sikit, tuan minat model yang mana ya? Nak cash atau loan? 😊 Saya pass semua detail kat salesman supaya dia terus boleh bantu tuan.`;
+// Two forms, because asking "which model?" straight after the bot has just NAMED the exact unit
+// reads like it wasn't listening (client, 2026-08-17). `modelKnown` drops the model half and asks
+// only the thing we still genuinely need.
+//   modelKnown = false → the full ask (unchanged, byte for byte)
+//   modelKnown = true  → cash-or-loan only
+const qualifyAsk = (lang, modelKnown) => lang === 'en'
+  ? (modelKnown
+      ? `Cash or loan ya? 😊 I'll pass all the details to our salesman so he can help you straight away.`
+      : `Can I get a bit more detail, which model are you interested in? Cash or loan? 😊 I'll pass all the details to our salesman so he can help you straight away.`)
+  : (modelKnown
+      ? `Nak cash atau loan ya bos? 😊 Saya pass semua detail kat salesman supaya dia terus boleh bantu tuan.`
+      : `Boleh saya tahu sikit, tuan minat model yang mana ya? Nak cash atau loan? 😊 Saya pass semua detail kat salesman supaya dia terus boleh bantu tuan.`);
 // 🚨 THE DAY IS COMPUTED (D.nextWindowLabel), NEVER HARDCODED. Writing "Isnin" into this string is
 // exactly the 2026-07-30 hours-drift incident: a customer-facing fact that also exists as config
 // will drift from it. `label` comes from the real FR_DIST_* window.
@@ -689,7 +698,7 @@ async function flush(jid){
       // second row or a second queue entry — the answer only ENRICHES what exists.
       if (vague && (q.asks || 1) < QUALIFY_MAX_ASKS){
         q.asks = (q.asks || 1) + 1; q.ts = now; state.qualify[jid] = q; persist();
-        await D.waSend(sendTarget(jid, b.phone), qualifyAsk(q.lang || lang));
+        await D.waSend(sendTarget(jid, b.phone), qualifyAsk(q.lang || lang, !!q.modelKnown));
         return;
       }
       if (vague){ delete state.qualify[jid]; persist(); return; }   // asked twice, go quiet. Queue untouched.
@@ -767,7 +776,8 @@ async function flush(jid){
     // own event, so this only ever shows up for customers who never replied.
     frLogEvent('awaiting_model', jid, { has_phone: !!b.phone, cat: 'greeting', phone: b.phone || '',
       want: String(text).slice(0, 120), recordId: null });
-    await D.waSend(sendTarget(jid, b.phone), offWindow ? qualifyAsk(lang) : tpl('greeting', lang));
+    // `false` by definition: a bare "Hi" or an ad click has named no model, so the full ask stands.
+    await D.waSend(sendTarget(jid, b.phone), offWindow ? qualifyAsk(lang, false) : tpl('greeting', lang));
     return;
   }
   persist();
@@ -795,12 +805,19 @@ async function flush(jid){
       frLogEvent('gate_held', jid, { has_phone: false, cat, phone: '',
         want: String(want).slice(0, 120), recordId: null, note: 'qualify_before_gate' });
     }
+    // 🚨 The signal the code ALREADY trusts for "a bike was named": `RE_BIKE` is what routes a
+    // message to `product` in classify() and what gates stockLineFor(). Deliberately not a second
+    // signal invented for this — two sources of truth for one fact always drift.
+    // ⚠️ Its known imprecision: RE_BIKE also matches BARE BRAND words ("ada yamaha apa2"), which
+    // name a brand, not a model. See the note in CLAUDE.md — bounded, and reported rather than
+    // worked around.
+    const modelKnown = RE_BIKE.test(String(text || ''));
     state.qualify[jid] = { ts: now, asks: 1, phase: 'detail', cat, want: String(want).slice(0, 160),
-      lang, recordId };
+      lang, recordId, modelKnown };
     persist();
     // ONE message: the stock answer (if any) plus the qualifying ask. No closing line yet, no
     // salesman card, and NO phone ask — that comes last, and only after they answer.
-    await D.waSend(sendTarget(jid, b.phone), (stockLine ? stockLine + '\n\n' : '') + qualifyAsk(lang));
+    await D.waSend(sendTarget(jid, b.phone), (stockLine ? stockLine + '\n\n' : '') + qualifyAsk(lang, modelKnown));
     return;
   }
 

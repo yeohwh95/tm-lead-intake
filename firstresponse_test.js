@@ -460,7 +460,9 @@ ok(/ADIB : 017-8869542/.test(sent[sent.length-1].text), 'flow: reply carries ass
   ok(sent.length === nSentSat + 1, 'saturday: customer still gets an instant reply');
   ok(!/Waktu operasi kami|bila pejabat dibuka semula/.test(satReply.text), 'saturday: NO "we are closed / when we reopen" line — the shop is open');
   ok(!/ADIB : |https:\/\/wa\.me\/60178869542/.test(satReply.text), 'saturday: NO salesman card — nobody is auto-assigned');
-  ok(/Isnin pagi|minat model yang mana/.test(satReply.text),
+  // ⚠️ This fixture NAMES a model ("ninja 250"), so the qualifying ask is the SHORT form
+  // (cash-or-loan only) — asking "which model?" back would read like the bot wasn't listening.
+  ok(/Isnin pagi|minat model yang mana|Nak cash atau loan ya bos/.test(satReply.text),
      'saturday: still promises follow-up, now naming the real next working day');
   ok(satDeferred.some(e => e.kind === 'pool'), 'saturday: staff-facing half queued for the Monday 9am drain (backstop)');
 

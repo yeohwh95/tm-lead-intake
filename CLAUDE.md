@@ -3,7 +3,9 @@
 WhatsApp lead → AI extract → Lark CRM + notify the assigned salesperson. **LIVE.**
 
 ## 🌙 "DON'T SAY WE ARE CLOSED" — off-hours qualification — 2026-08-16 (batch 3)
-⚠️ **CODE COMMITTED, NOT DEPLOYED.**
+🟢 **LIVE** — batches 1–3 deployed 2026-08-17 12:07 MYT (through `7976d3e`).
+⚠️ The short-ask tweak below (2026-08-17) is **committed, NOT deployed** — it lands on top of
+running production code.
 
 Client: *"Outside operating hours, don't say we are closed now. Say something like I will get the
 sales person to contact you in the next working day ya."* Plus: qualify the customer first, so the
@@ -68,12 +70,37 @@ binned **4 of 4** real phone numbers and made the gate report **0% conversion wh
 **Kill switch `FR_QUALIFY=0`** — pre-qualification behaviour, but the closure sentence stays removed
 and the computed closing day stays. The client banned that sentence; a kill switch must not resurrect it.
 
-⚠️ **Open copy question for the client, NOT reworded by me:** when the customer already named a
-model ("z900 ada stok tak?"), the approved ask still says *"tuan minat model yang mana ya?"*. It is
-defensible (TM stocks several Z900 variants, and asking about stock is not the same as committing to
-a model) but it reads slightly redundant. Approved copy was used verbatim.
+### ✅ RESOLVED 2026-08-17 — the ask now adapts to what the customer already told us
+The open copy question above is answered (client approved). Asking *"tuan minat model yang mana ya?"*
+immediately after the bot has **named the exact unit** reads like it wasn't listening.
 
-Tests: hours **41** (+25) · qualify **58** (new) · firstresponse **174** · full suite **717** (was 633).
+| Customer's first message | Ask |
+|---|---|
+| Names a model (`"z900 ada stok tak?"`) | **short**: `Nak cash atau loan ya bos? 😊 Saya pass semua detail…` |
+| Names nothing (`"Hi"`, bare ad click) | **full form, byte-identical to before** |
+
+- 🚨 **The signal is `RE_BIKE`** — the one the code ALREADY trusts to mean "a bike was named": it is
+  what routes a message to `product` in `classify()` and what gates `stockLineFor()`. Deliberately
+  **not** a second signal invented for this; two sources of truth for one fact always drift.
+- Three call sites, audited: the qualify-machine re-ask passes the `modelKnown` recorded on the
+  entry (same original message, same answer) · the greeting path passes **`false`** by definition ·
+  the main off-window path computes `RE_BIKE.test(text)`.
+- ⚠️ **An entry written by the previously-deployed build has no `modelKnown`.** `undefined` is
+  falsy, so an in-flight customer gets the full ask — exactly today's behaviour. No migration.
+- ⚠️ **KNOWN IMPRECISION, reported not worked around.** `RE_BIKE` also matches **bare BRAND words**
+  (`yamaha`, `ducati`, `ktm`…, added 2026-07-22 because brand-only enquiries got no reply at all).
+  So `"ada yamaha apa2"` reads as "model known" when it names a brand, not a model.
+  - **Usually self-correcting:** a brand query with several Woo matches gets the multi-match stock
+    line, which already ends *"Yang mana satu bos berminat ya?"* — the model question is still asked,
+    just by the stock line rather than the qualify ask. Verified by rendering.
+  - **The residual gap** is a brand-only message with NO Woo match: the neutral stock line plus the
+    short ask, and the model question is genuinely not asked. Verified by rendering.
+  - It is a **copy-precision** issue, not a lead-loss one — the lead is still parked, still queued,
+    still assigned, and the rep still gets cash-or-loan. Tightening it would mean splitting `RE_BIKE`
+    into model-vs-brand tokens, i.e. the second signal this deliberately avoids. **Flagged for the
+    client's call, not fixed.**
+
+Tests: hours **41** (+25) · qualify **78** (new) · firstresponse **174** · full suite **737** (was 633).
 
 ## 👀 "NEEDS A LOOK" — the report's real job, and gap-proof windows — 2026-08-16 (batch 2b)
 ⚠️ **CODE COMMITTED, NOT DEPLOYED.** VPS half is live and idle until the endpoint ships.

@@ -68,7 +68,8 @@ const initWith = (o) => fr.init({ ...BASE, ...(o || {}) });
   fr.onMessage({ jid: 'q1@s.whatsapp.net', phone: '60111000001', kind: 'text', text: 'nak tanya z900 ada stok?' });
   await wait(80);
   ok('exactly ONE message back (stock answer + qualifying ask merged)', sent.length === 1);
-  ok('it asks the model AND cash-or-loan in one go', /minat model yang mana ya\? Nak cash atau loan\?/.test(texts()));
+  ok('🚨 model already named → SHORT ask, cash-or-loan only', /Nak cash atau loan ya bos\?/.test(texts()));
+  ok('🚨 and it does NOT ask which model, right after naming the exact unit', !/minat model yang mana/.test(texts()));
   ok('🚨 it NEVER says we are closed', !/Waktu operasi kami|pejabat dibuka semula|office hours/.test(texts()));
   ok('🚨 no salesman card is dangled while nobody owns it', !/NAZRIN/i.test(texts()));
   ok('🚨 no phone ask stacked on top — the gate comes LAST', !/nombor telefon tuan/.test(texts()));
@@ -125,7 +126,7 @@ const initWith = (o) => fr.init({ ...BASE, ...(o || {}) });
   const LID = '999000111222333@lid';
   fr.onMessage({ jid: LID, phone: '', kind: 'text', text: 'nak tanya ninja 400' });
   await wait(80);
-  ok('first reply asks the qualifying question', /minat model yang mana/.test(texts()));
+  ok('first reply asks the qualifying question', /minat model yang mana|Nak cash atau loan ya bos/.test(texts()));
   ok('🚨 and does NOT ask for a number in the same breath', !/nombor telefon tuan/.test(texts()));
   // ⚠️ No phone means the qualify flow cannot park a Lark row (writing one with staff:null stamps
   // SLA fields — the 2026-07-30 Fitri/Ikhwan defect), so this path holds at the gate as before.
@@ -145,7 +146,7 @@ const initWith = (o) => fr.init({ ...BASE, ...(o || {}) });
   await wait(80);
   fr.onMessage({ jid: LID2, phone: '', kind: 'text', text: 'tak nak bagi nombor' });
   await wait(80);
-  const asks = sent.filter(s => /minat model yang mana|nombor telefon tuan|username/.test(s.text)).length;
+  const asks = sent.filter(s => /minat model yang mana|Nak cash atau loan ya bos|nombor telefon tuan|username/.test(s.text)).length;
   ok(`🚨 at most 3 ask-type messages in the whole episode (got ${asks})`, asks <= 3);
   ok('and the lead is still not lost', fr.gateStatus().length === 1 || larkRows.length >= 1);
 
@@ -158,7 +159,9 @@ const initWith = (o) => fr.init({ ...BASE, ...(o || {}) });
   sent = [];
   fr.onMessage({ jid: 'q5@s.whatsapp.net', phone: '60111000005', kind: 'text', text: 'ok' });
   await wait(80);
-  ok('a vague reply gets ONE re-ask', sent.length === 1 && /minat model yang mana/.test(texts()));
+  ok('a vague reply gets ONE re-ask', sent.length === 1 && /Nak cash atau loan ya bos/.test(texts()));
+  ok('🚨 the re-ask remembers the model was already named (short form, not the full ask)',
+     !/minat model yang mana/.test(texts()));
   sent = [];
   fr.onMessage({ jid: 'q5@s.whatsapp.net', phone: '60111000005', kind: 'text', text: 'hmm' });
   await wait(80);
@@ -206,7 +209,7 @@ const initWith = (o) => fr.init({ ...BASE, ...(o || {}) });
   fr.onMessage({ jid: 'qin@s.whatsapp.net', phone: '60111000009', kind: 'text', text: 'z900 ada?' });
   await wait(80);
   ok('in-window: assigned immediately with the salesperson card', /NAZRIN/i.test(texts()));
-  ok('in-window: NO qualifying question', !/minat model yang mana/.test(texts()));
+  ok('in-window: NO qualifying question', !/minat model yang mana|Nak cash atau loan ya bos/.test(texts()));
   ok('in-window: no day promised — a rep has it now', !/Isnin pagi|esok pagi/.test(texts()));
   ok('in-window: one Lark row, no deferral', larkRows.length === 1 && deferred.length === 0);
 
@@ -269,7 +272,7 @@ const initWith = (o) => fr.init({ ...BASE, ...(o || {}) });
   reset();
   fr.onMessage({ jid: 'qoff@s.whatsapp.net', phone: '60111000011', kind: 'text', text: 'z900 ada?' });
   await wait(80);
-  ok('kill switch: no qualifying question', !/minat model yang mana/.test(texts()));
+  ok('kill switch: no qualifying question', !/minat model yang mana|Nak cash atau loan ya bos/.test(texts()));
   ok('🚨 kill switch: the banned closure sentence STAYS banned', !/Waktu operasi kami|pejabat dibuka semula/.test(texts()));
   ok('kill switch: still commits to the next working day', /contact tuan Isnin pagi ya/.test(texts()));
   ok('kill switch: lead still parked, never lost', larkRows.length === 1 && deferred.length === 1);
@@ -307,6 +310,64 @@ const initWith = (o) => fr.init({ ...BASE, ...(o || {}) });
     ok('🚨 no em dash in any new customer-facing string', strings.every(t => !/—/.test(t)));
     ok('🚨 no standalone spaced hyphen either', strings.every(t => !/ - /.test(t)));
   }
+
+  // -- 17. 🚨 SHORT vs FULL qualifying ask (client, 2026-08-17) ------------------------------
+  // Asking "which model?" straight after the bot has NAMED the exact unit reads like it wasn't
+  // listening. The signal is RE_BIKE — the same one classify() and stockLineFor() already trust.
+  console.log('\n17. The ask adapts to whether a model was already named');
+  const FULL_BM = 'Boleh saya tahu sikit, tuan minat model yang mana ya? Nak cash atau loan? 😊 Saya pass semua detail kat salesman supaya dia terus boleh bantu tuan.';
+  const SHORT_BM = 'Nak cash atau loan ya bos? 😊 Saya pass semua detail kat salesman supaya dia terus boleh bantu tuan.';
+  ok('short BM form is exactly the approved copy', fr._qualifyAsk('bm', true) === SHORT_BM);
+  ok('🚨 full BM form is BYTE-IDENTICAL to before (the regression risk)', fr._qualifyAsk('bm', false) === FULL_BM);
+  ok('EN short mirrors the structure', fr._qualifyAsk('en', true) === `Cash or loan ya? 😊 I'll pass all the details to our salesman so he can help you straight away.`);
+  ok('EN full unchanged', /Can I get a bit more detail, which model are you interested in\? Cash or loan\?/.test(fr._qualifyAsk('en', false)));
+  ok('short form still asks the thing we actually need', /cash atau loan/i.test(fr._qualifyAsk('bm', true)));
+  ok('short form still promises the handoff', /pass semua detail kat salesman/.test(fr._qualifyAsk('bm', true)));
+  ok('🚨 dash rule holds on both new strings',
+     [fr._qualifyAsk('bm', true), fr._qualifyAsk('en', true)].every(t => !/—/.test(t) && !/ - /.test(t)));
+
+  // …end to end: a NAMED model gets the short ask, a bare greeting gets the full one.
+  initWith({ nextWindowLabel: () => nextWindowLabel(FRI_1716, MON_FRI, 9, 17) });
+  reset();
+  fr.onMessage({ jid: 'qshort@s.whatsapp.net', phone: '60111000020', kind: 'text', text: 'cbr650r ada bos?' });
+  await wait(80);
+  ok('🚨 model named end-to-end → short ask', texts().includes(SHORT_BM) && !/minat model yang mana/.test(texts()));
+
+  reset();
+  fr.onMessage({ jid: 'qfull@s.whatsapp.net', phone: '60111000021', kind: 'text', text: 'Hi' });
+  await wait(80);
+  ok('🚨 nothing named end-to-end → FULL ask, unchanged behaviour', texts().includes(FULL_BM));
+  ok('the greeting path never parks a Lark row (nothing to park yet)', larkRows.length === 0);
+
+  // …and the machine still works identically in the short-ask case: it collects the answer and
+  // patches Lark, which is the whole point of asking.
+  reset();
+  fr.onMessage({ jid: 'qshort2@s.whatsapp.net', phone: '60111000022', kind: 'text', text: 'z900 ada?' });
+  await wait(80);
+  ok('short-ask path still parks the lead on message 1', larkRows.length === 1 && deferred.length === 1);
+  fr.onMessage({ jid: 'qshort2@s.whatsapp.net', phone: '60111000022', kind: 'text', text: 'loan' });
+  await wait(80);
+  ok('🚨 short-ask path still collects the answer and patches Customer want',
+     patchedWant.length === 1 && /qualified: loan/.test(patchedWant[0].text));
+  ok('short-ask path still closes with the computed day', /contact tuan Isnin pagi ya/.test(texts()));
+  ok('🚨 still exactly ONE Lark row', larkRows.length === 1);
+
+  // …and the FULL-ask path still collects its answer too (the greeting → model flow).
+  reset();
+  fr.onMessage({ jid: 'qfull2@s.whatsapp.net', phone: '60111000023', kind: 'text', text: 'Hello there' });
+  await wait(80);
+  const fullAsked = texts().includes(FULL_BM) || /which model are you interested in/i.test(texts());
+  ok('full-ask path asked the full question', fullAsked);
+  fr.onMessage({ jid: 'qfull2@s.whatsapp.net', phone: '60111000023', kind: 'text', text: 'z900, cash' });
+  await wait(80);
+  ok('🚨 full-ask path still assigns/parks the lead once answered', larkRows.length === 1);
+
+  // 🚨 A customer who answers NEITHER variant is still queued and still drains to a rep.
+  reset();
+  fr.onMessage({ jid: 'qsilent2@s.whatsapp.net', phone: '60111000024', kind: 'text', text: 'ninja 400 ada?' });
+  await wait(80);
+  ok('🚨 silent after the SHORT ask → still exactly one queue entry for the drain', deferred.length === 1);
+  ok('🚨 and the Lark row exists regardless of the ask variant', larkRows.length === 1);
 
   console.log(`\n${'='.repeat(54)}\n  ${pass} passed, ${fail} failed\n${'='.repeat(54)}`);
   for (const f of [process.env.FR_STATE_FILE, process.env.FR_EVENTS_FILE]) { try { require('fs').unlinkSync(f); } catch {} }
