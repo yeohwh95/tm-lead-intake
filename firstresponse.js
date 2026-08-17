@@ -350,6 +350,19 @@ async function classifySmart(text, hasImage){
     const cat = await D.aiClassify(t);
     if (cat && AI_CATS.has(cat)){
       if (hasImage && (cat === 'greeting' || cat === 'skip')) return rx;
+      // The LLM may UPGRADE something to `sell` (it reads Malay phrasings RE_SELL will never
+      // cover) but it may not DOWNGRADE a regex `sell`. RE_SELL only fires on an explicit
+      // "I want to sell/trade-in MY bike", and it already strips the "kedai ada jual X?"
+      // shop-sells trap before testing — when it says sell, it is sure. The LLM is not:
+      // 16 Aug "Cbr650r / Mt25 / Trade in mt25" → it chose `product` (the model names won)
+      // 17 Aug "hi boss nk tnye ... boleh trade in" → it chose `greeting` (the hello won)
+      // Both would have gone to a salesperson instead of Fitri the purchaser, so TM simply
+      // does not buy the bike. Asymmetric cost: a wrong `sell` costs one redirect; a missed
+      // one costs the trade-in.
+      if (rx.cat === 'sell' && cat !== 'sell'){
+        D.log(`FR 🛡 kept regex sell over ai ${cat}: "${t.slice(0, 60)}"`);
+        return rx;
+      }
       if (cat !== rx.cat) D.log(`FR 🧠 ai overrides regex ${rx.cat}→${cat}: "${t.slice(0, 60)}"`);
       return { cat, imageOnly: false };
     }
@@ -945,6 +958,7 @@ module.exports = { init, onMessage, markHuman, rehydrateGreeted, gateSweep, gate
     jid, cat: h.cat, asks: h.asks, note: h.note || '',
     waitingMin: Math.round((Date.now() - (h.ts || Date.now())) / 60000),
     minutesLeft: Math.max(0, Math.round((GATE_MS - (Date.now() - (h.ts || Date.now()))) / 60000)) })),
-  _gateParsePhone: gateParsePhone, _classify: classify, _tpl: tpl, _isEnglish: isEnglish, _state: () => state,
+  _gateParsePhone: gateParsePhone, _classify: classify, _classifySmart: classifySmart,
+  _tpl: tpl, _isEnglish: isEnglish, _state: () => state,
   _qualifyAsk: qualifyAsk, _closingLine: closingLine,
   _frLogEvent: frLogEvent, _eventsFile: () => FR_EVENTS_FILE, RE_BIKE };

@@ -641,9 +641,10 @@ Answer with EXACTLY one word from: sell, loan, testride, product, greeting, skip
 - loan = asking about financing to BUY from the shop: loan, ansuran, EPP, kad kredit, bulanan berapa, deposit, blacklist/CTOS/CCRIS.
 - testride = wants to test ride a bike.
 - product = wants to BUY / asks about a model, price, stock, availability, colours. NOTE: "kedai ada jual motor X?" asks whether the SHOP sells X — that is product, NOT sell.
-- greeting = only a greeting / vague ad click with no stated interest ("Hi", "salam", "pagi bos").
+- greeting = LAST RESORT, only when the message states no interest AT ALL ("Hi", "salam", "pagi bos"). A message that opens with a greeting and then says something is NOT greeting — classify what comes after the greeting ("hi boss nk tnye moto masih ade loan lgi boleh trade in" = sell, not greeting).
 - skip = automated vendor/OTP/verification messages, or long text unrelated to motorcycles.
-Priority for mixed messages: sell beats loan beats product.`;
+Priority for mixed messages: sell beats loan beats product beats greeting.
+Naming bike models does NOT make it product when the customer also wants to trade in or sell one — "Cbr650r / Mt25 / Trade in mt25 2024 mileage 25k" is sell, because they are handing us a bike.`;
 async function aiClassify(text){
   if (!OPENAI_KEY || process.env.FR_AI_CLASSIFY === '0') return null;
   const ctrl = new AbortController();
