@@ -2,6 +2,39 @@
 
 WhatsApp lead → AI extract → Lark CRM + notify the assigned salesperson. **LIVE.**
 
+## 🔁 THE LLM MAY UPGRADE TO `sell`, NEVER DOWNGRADE ONE — 🟢 LIVE 2026-08-17 (`94e2b09`)
+Two trade-in customers in two days went to a salesperson instead of **Fitri the purchaser**, so TM
+never bought the bike. Both were caught by the 09:57 FR self-audit, one day apart:
+
+| | Customer's first message | `aiClassify` said | Truth |
+|---|---|---|---|
+| 16/08 | `Cbr650r / Mt25 / Trade in mt25 2024 mileage 25k` | `product` (the model names won) | **sell** |
+| 17/08 | `hi boss nk tnye moto masih ade loan lgi boleh trade in` | `greeting` (the hello won) | **sell** |
+
+🚨 **`RE_SELL` had BOTH right.** It only fires on an explicit "I want to sell/trade-in MY bike" and
+already strips the `kedai ada jual X?` shop-sells trap before testing — when it says sell, it is
+sure. `classifySmart` handed the verdict to the LLM **unconditionally**, so a correct regex verdict
+was silently overwritten by a wrong model one.
+
+**The guard is deliberately asymmetric** (`firstresponse.js`, in `classifySmart`):
+```js
+if (rx.cat === 'sell' && cat !== 'sell') return rx;   // LLM may not downgrade
+```
+The LLM keeps its whole job in the other direction — it reads Malay phrasings (`jual`/`tolak`/
+`lepas`/`let go`) a regex will never keep up with, which is why it was added on 24 Jul. **The costs
+are not symmetric:** a wrong `sell` costs one redirect inside the shop; a missed one costs the
+trade-in, and TM buys its used stock this way.
+
+Prompt tightened in the same change for the phrasings the regex genuinely misses (`index.js`
+`CLASSIFY_PROMPT`): `greeting` is now stated as a **LAST RESORT** with the 17/08 message as the
+worked example, and the priority line reads `sell beats loan beats product beats greeting` plus
+*naming bike models does not make it product when the customer is also handing us a bike*.
+
+⚠️ **Do not "simplify" the guard away.** Two call sites in `classifySmart` differ only by where the
+verdict is trusted; the safe one was reasoning, not luck. `sell_override_test.js` (14) pins both real
+messages, the shop-sells trap and the 24 Jul trade-in-with-loan trap — **verified in both directions:
+removing the guard fails 4 of them.** Full suite **751**.
+
 ## 🌙 "DON'T SAY WE ARE CLOSED" — off-hours qualification — 2026-08-16 (batch 3)
 🟢 **LIVE** — batches 1–3 deployed 2026-08-17 12:07 MYT (through `7976d3e`).
 ⚠️ The short-ask tweak below (2026-08-17) is **committed, NOT deployed** — it lands on top of
