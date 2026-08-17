@@ -636,5 +636,38 @@ const winOf = (a, b) => ({ startMs: ms(a[0], a[1]), endMs: ms(b[0], b[1]) });
   ok(!threw, 'summaryCard survives a no_data summary');
 }
 
+// ── 🚨 THE OUTCOME CONTRACT: every outcome the bot writes must have a bucket ──
+// Found in PRODUCTION 2026-08-17: the qualify machine shipped an outcome (`qualified`) this file
+// had never been taught. Real leads fell into `other`, sumOk went false, and the client's card
+// printed "buckets don't sum to the total". The lead was never lost — the NUMBERS were.
+// 🚨 A hand-kept list is exactly what rotted. So SCAN THE SOURCE: the assert is the guarantee.
+{
+  const fs = require('fs');
+  const src = fs.readFileSync(require('path').join(__dirname, 'firstresponse.js'), 'utf8')
+            + fs.readFileSync(require('path').join(__dirname, 'index.js'), 'utf8');
+  const found = new Set();
+  for (const m of src.matchAll(/frLogEvent\(\s*'([a-z_]+)'/g)) found.add(m[1]);
+  for (const m of src.matchAll(/ctx\.outcome\s*=\s*'([a-z_]+)'/g)) found.add(m[1]);
+  // The `ctx.outcome || 'x'` defaults are the fallbacks at each call site.
+  for (const m of src.matchAll(/ctx\.outcome\s*\|\|\s*'([a-z_]+)'/g)) found.add(m[1]);
+  const known = new Set(S.LEAD_BUCKETS.concat(S.NON_LEAD_BUCKETS));
+  const orphaned = [...found].filter(o => !known.has(o));
+  ok(found.size >= 8, `outcome scan actually found outcomes (${found.size})`);
+  ok(orphaned.length === 0,
+     `🚨 EVERY outcome the bot writes has a bucket${orphaned.length ? ' — ORPHANED: ' + orphaned.join(', ') : ''}`);
+  ok(known.has('qualified'), '🚨 `qualified` specifically — the one that broke the client card');
+}
+
+// A qualified lead counts as a REAL lead and does not break the sum.
+{
+  const evs = [ev('a', 'assigned', at('2026-08-19', 10)), ev('b', 'qualified', at('2026-08-19', 18))];
+  const r = S.summarize(evs, '2026-08-19', endOf('2026-08-19'));
+  ok(r.total === 2 && r.sumOk === true, 'qualified: counts as a lead and the buckets still sum');
+  ok(r.buckets.qualified === 1 && r.buckets.other === 0, 'qualified: lands in its own bucket, not `other`');
+  const card = S.summaryText(r, null);
+  ok(/answered our question/.test(card), 'qualified: the card explains it in plain English');
+  ok(!/don't sum/.test(card), '🚨 qualified: no "buckets do not sum" warning any more');
+}
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

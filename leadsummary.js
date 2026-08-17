@@ -29,7 +29,14 @@ const MYT_OFF_DEFAULT = 8 * 3600 * 1000;
 const HOUR = 3600 * 1000;
 
 // Outcomes that describe a real sales lead. Order is the order they print.
-const LEAD_BUCKETS = ['assigned', 'parked', 'gate_held', 'no_rep', 'awaiting_model'];
+// 🚨 `qualified` was MISSING here until 2026-08-17 and the integrity check caught it in production:
+// the qualify machine (deployed 12:07 that day) writes an outcome this file had never been taught,
+// so real leads fell into `other`, `sumOk` went false, and the client's card printed
+// "⚠️ buckets don't sum to the total". The lead is genuine — its Lark row is written and the staff
+// half queued on the FIRST message — it is simply waiting for the drain, so it counts as a lead.
+// 🚨 THE LESSON: this list and `frLogEvent`'s outcomes are two halves of one contract. Adding an
+// outcome without adding it here does not lose the lead, but it DOES break the client's numbers.
+const LEAD_BUCKETS = ['assigned', 'parked', 'qualified', 'gate_held', 'no_rep', 'awaiting_model'];
 // Chats that are NOT sales leads. Reported on their own line so (a)(b)(c) reads on real leads —
 // never folded into the total, never hidden either.
 const NON_LEAD_BUCKETS = ['ai_skip', 'human_owned', 'repeat'];
@@ -37,6 +44,7 @@ const NON_LEAD_BUCKETS = ['ai_skip', 'human_owned', 'repeat'];
 // Plain English for the "why wasn't it assigned" list. A reason a salesperson can act on.
 const WHY = {
   parked:         'parked for the next assignment window',
+  qualified:      'answered our question, waiting for the next assignment window',
   gate_held:      'no phone number yet, still asking',
   no_rep:         '🚨 NOBODY took it (the CRM row has no owner)',
   awaiting_model: 'greeted, waiting for them to say which bike',

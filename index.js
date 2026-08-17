@@ -2074,10 +2074,19 @@ http.createServer((req, res) => {
       return;
     }
     buildLeadSummary(date, q.get('cross') === '1').then(({ summary, cross }) => {
+      // 🚨 `no_data` needs its OWN branch. Falling through to the counting branch emitted
+      // `total: undefined`, which JSON.stringify drops — so the response was a bare object with no
+      // total AND no reason. Not a lie any more, but unreadable: a consumer cannot tell "no records
+      // for this date" from "the endpoint is broken". Say which.
       const body = summary.read_error
         ? { date, read_error: summary.read_error, sent: digest.sent }
+        : summary.no_data
+        ? { date, no_data: true, logStartsAt: summary.logStartsAt || null,
+            note: 'No lead records exist for this date. Lead logging began later. This is NOT a quiet day.',
+            parse_errors: summary.parse_errors, sent: digest.sent }
         : { date, total: summary.total, notLeads: summary.notLeads, buckets: summary.buckets,
-            sumOk: summary.sumOk, unassigned: summary.unassigned, carried: summary.carried,
+            sumOk: summary.sumOk, bucketSum: summary.bucketSum, partialFrom: summary.partialFrom || null,
+            unassigned: summary.unassigned, carried: summary.carried,
             carriedResolved: summary.carriedResolved, larkMissing: summary.larkMissing,
             parse_errors: summary.parse_errors, cross, sent: digest.sent };
       res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(body, null, 1));
