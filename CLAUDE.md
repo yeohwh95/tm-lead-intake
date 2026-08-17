@@ -2,6 +2,56 @@
 
 WhatsApp lead → AI extract → Lark CRM + notify the assigned salesperson. **LIVE.**
 
+## 🩹 ORPHAN SWEEP — a phone with NO salesperson is now recovered, not reported — 2026-08-17
+⚠️ **COMMITTED, NOT DEPLOYED, AND OFF BY DEFAULT** (`ORPHAN_FROM` unset ⇒ recovers nothing).
+
+`slaSweep` rescues "has a salesperson, no SLA clock". **Nothing rescued the opposite shape: a real
+phone number and NO salesperson at all.** That row is invisible to everything — `slaSweep` filters
+`Salesman isNotEmpty`, the SLA engine only knows leads it registered, the drain only knows its own
+queue. It sits in the CRM looking like a lead and behaving like nothing.
+
+**That is the signature of the 14 leads lost 31 Jul - 1 Aug, and of +60186682249 on 17 Aug**
+("Hello! Can I get more info on this?", Brand HQ, phone present, Salesman empty). Every one was
+recoverable in a single round-robin call, and nothing ever looked.
+
+### 🚨 The reporting contract this serves (Benjamin, 2026-08-17)
+**发现 → 自己 fix → 3 次不行 → 才通知群组** — the same rule the self-heal alerts already use.
+A lead the bot can rescue **must never reach a report**. Only after `MAX_TRIES` (3) failed attempts
+does it become a human's problem and earn a line on the sales card. *A report that lists work the
+system could have done itself is how a report becomes wallpaper.*
+- **A success DELETES the state entry**, it does not record a win: the row stops matching the Lark
+  filter, so a kept entry only rots, and a re-orphaned lead should start from a clean count.
+- `GET /orphans` is the sales card's ONLY input: `needsHuman` = tried 3×, still stuck. Empty ⇒ the
+  card says "all assigned" and nothing more.
+- A DM that did not send is **NOT** a recovery. Counting it would hand a rep a lead they never heard
+  about and then delete it from the retry list — a silent second loss.
+
+### 🐛 Found by the test, not by reading: `0 = disabled` was not disabled
+The cutoff guard was `created < cutoff`. **Nothing is less than zero**, so with `ORPHAN_FROM` unset
+the sweep would have matched EVERY row — including the 11-17 day old stuck leads Benjamin
+explicitly ruled must not be auto-assigned. An unarmed feature that quietly recovers everything is
+the opposite of a safety cutoff. Now an explicit `if (!cutoff) return []`.
+🚨 `SLA_SWEEP_FROM` documents the same "0 = disabled" contract — it is enforced there by a separate
+`if (!SLA_SWEEP_FROM) return`. **Do not assume a comparison against 0 disables anything.**
+
+### Guards
+- Scope is `Origin='WhatsApp Direct'` only. TikTok rows are assigned by `sync.py`; a second assigner
+  on the same rows is how one customer gets two salespeople.
+- **20-minute grace** — the normal path writes the Lark row then assigns, and the off-hours path
+  parks for the 9am drain. Both look like an orphan mid-flight.
+- Distribution window only (`inFRDistHours`): a Saturday orphan waits for Monday like every other
+  deferred lead. Recovering it into a rep's phone on a day we do not assign is not a fix.
+- Junk-phone guards mirror intake (`<9` or `>13` digits, `447*`) — a number a rep cannot dial is
+  worse than leaving the row alone (2026-08-02).
+- `pruneState` drops rows a human assigned in the meantime, so an exhausted entry cannot nag forever.
+- Reuses `lead.staff` from `assignLeads` rather than re-deriving from `STAFF` — two sources of truth
+  for one fact always drift.
+
+**Env to arm it:** `ORPHAN_FROM=<epoch-ms cutoff>` (0/unset = off) · `ORPHAN_CAP` (default 10) ·
+`ORPHAN_STATE_FILE` (defaults beside `FR_STATE_FILE` ⇒ `/data`).
+**Rollback:** unset `ORPHAN_FROM` + redeploy. Additive; nothing else changes behaviour.
+Tests: orphan **29** (new) · full suite **796**.
+
 ## 🚨 A DATE BEFORE THE LOG BEGINS IS NOT A QUIET DAY — 2026-08-17
 
 **Measured, not predicted.** `GET /lead-summary?date=` was asked for every date 03–16 Aug. Every one

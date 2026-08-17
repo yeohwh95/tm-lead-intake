@@ -735,6 +735,7 @@ function matchStaff(raw){
 const identity = require('./identity');
 const wasend = require('./wasend');
 const roster = require('./roster');
+const orphan = require('./orphan');
 const STAFF_BY_LAST9 = identity.byLast9(STAFF);
 function staffNameByPhone(phone){ return identity.nameByPhone(STAFF_BY_LAST9, phone); }
 function fileOverrides(name){
@@ -1106,6 +1107,85 @@ async function slaSweep(){
   if (done) log(`SLA sweep: enrolled ${done} lead(s) (cap ${SLA_SWEEP_CAP})`);
   else if (skipRep) log(`SLA sweep: 0 enrolled — ${skipRep} candidate(s) have a salesperson not in the roster (check STAFF map)`);   // precutoff-only = steady state, stay quiet
 }
+// ---------------------------------------------------------------------------------------------
+// ORPHAN SWEEP — a Lark row with a PHONE but NO SALESPERSON (2026-08-17, Benjamin approved)
+// ---------------------------------------------------------------------------------------------
+// 🚨 `slaSweep` above rescues "has a salesperson, no SLA clock". NOTHING rescued the opposite:
+// a real phone number and no salesperson at all. That row is invisible to every mechanism we have.
+// It is the signature of the 14 leads lost 31 Jul - 1 Aug and of +60186682249 on 17 Aug — all of
+// them recoverable in one round-robin call, and nothing ever looked.
+//
+// 🚨 THE REPORTING CONTRACT: 发现 → 自己 fix → 3 次不行 → 才通知群组. A lead this can rescue must
+// never reach a report. Only after ORPHAN_MAX_TRIES failures does it earn a line on the sales card.
+const ORPHAN_FROM = parseInt(process.env.ORPHAN_FROM || '0', 10);   // 🚨 0 = recover NOTHING
+const ORPHAN_CAP  = parseInt(process.env.ORPHAN_CAP  || '10', 10);
+const ORPHAN_STATE_FILE = process.env.ORPHAN_STATE_FILE
+  || _path.join(_path.dirname(process.env.FR_STATE_FILE || _path.join(__dirname, 'fr_state.json')), 'orphan_state.json');
+let orphanState = {};
+try { orphanState = JSON.parse(_fs.readFileSync(ORPHAN_STATE_FILE, 'utf8')) || {}; } catch { orphanState = {}; }
+// Best-effort exactly like gateLogEvent: a bookkeeping failure must never break a lead.
+function orphanPersist(){
+  try { _fs.writeFileSync(ORPHAN_STATE_FILE, JSON.stringify(orphanState)); }
+  catch (e){ log('orphan state write err', String(e.message || e)); }
+}
+function orphanNeedsHuman(){ return orphan.needsHuman(orphanState); }
+
+async function orphanSweep(){
+  if (!ORPHAN_FROM) return;                       // disabled unless deliberately armed
+  const now = Date.now();
+  // Assign in the DISTRIBUTION window only. A Saturday orphan waits for Monday exactly like every
+  // other deferred lead — recovering it into a rep's phone on a day we do not assign is not a fix.
+  if (!inFRDistHours()) return;
+  const items = await larkSearch({
+    filter: { conjunction: 'and', conditions: [
+      { field_name: 'Salesman', operator: 'isEmpty', value: [] },
+      { field_name: 'SLA Assigned At', operator: 'isEmpty', value: [] },
+    ]},
+    sort: [{ field_name: 'date created', desc: true }],
+  });
+  const cands = orphan.pickCandidates(items, { now, cutoffMs: ORPHAN_FROM, state: orphanState });
+  // Drop entries whose row no longer matches — a human assigned it, or it was deleted. Without this
+  // an exhausted entry nags on the sales card forever after the work is already done.
+  orphanState = orphan.pruneState(orphanState, items.map(i => i.record_id));
+  let fixed = 0, failed = 0;
+  for (const c of cands.slice(0, ORPHAN_CAP)){
+    let okDone = false, err = null;
+    try {
+      // 🚨 A failed availability read must not silently become "everyone is available" of the wrong
+      // TYPE — `assignLeads` calls `unavail.has()`, so an array here throws mid-assignment. Empty Set.
+      let unavail = new Set(); try { unavail = await getUnavailable(); } catch {}
+      const enriched = assignLeads([{ phone: '+' + c.phone, name: '', interest: c.want, brand: c.brand }],
+        { origin: 'WhatsApp Direct' }, unavail);
+      const lead = enriched && enriched[0];
+      // `assignLeads` already resolves the roster entry onto the lead — re-deriving it from STAFF
+      // would be a second source of truth for the same fact, and they drift.
+      const rep = lead && lead.staff ? Object.assign({ name: lead.assignee }, lead.staff) : null;
+      if (!rep || !rep.phone) throw new Error('no rep available for brand ' + (c.brand || '?'));
+      const dm = [`🔔 *New Lead: ${c.brand || 'TM Motoworld'}*`, ``, `🎯 Wants: ${c.want}`,
+        `👉 https://wa.me/${c.phone}`, ``,
+        `✅ Reply YES once you have contacted this lead`].join('\n');
+      const dmMsgId = await waSend(rep.phone, dm);
+      // 🚨 A DM that did not send is NOT a recovery. Counting it would hand the lead to a rep who
+      // never heard about it and then delete it from the retry list — a silent second loss.
+      if (!dmMsgId) throw new Error('salesperson DM not delivered');
+      await larkUpdateSalesman(c.recordId, rep.openId);
+      await larkUpdateSLA(c.recordId, { 'SLA Assigned At': now, 'SLA Original Salesman': rep.name,
+        'SLA Status': 'Pending', 'SLA Reassign Count': 0 });
+      if (sla) sla.register(rep.name, rep.phone, [{ recordId: c.recordId, summary: c.want,
+        brand: c.brand, custName: '', custPhone: '+' + c.phone, override: true }], dmMsgId);
+      okDone = true;
+      log(`🩹 ORPHAN RECOVERED → ${rep.name} · +${c.phone} · "${String(c.want).slice(0, 40)}"`);
+    } catch (e){ err = e.message || e; log('🩹 orphan recovery FAILED +' + c.phone + ': ' + err); }
+    orphanState = orphan.recordAttempt(orphanState, c.recordId, okDone, err, now);
+    okDone ? fixed++ : failed++;
+  }
+  if (fixed || failed) orphanPersist();
+  if (fixed) log(`🩹 orphan sweep: ${fixed} recovered, ${failed} failed`);
+  // Only shout once the bot has genuinely given up. Below MAX_TRIES it stays silent and retries.
+  const stuck = orphanNeedsHuman();
+  if (stuck.length) log(`🚨 ${stuck.length} orphan lead(s) could not be recovered after ${orphan.MAX_TRIES} tries — these need a human`);
+}
+
 // ---- Rehydrate-from-Lark on boot (2026-07-24, Benjamin approved): Render deploys wipe the
 // ephemeral disk (sla_store.json / fr_state.json / fr_deferred.json). Lark is the durable record —
 // rebuild what matters from it so a deploy stops costing in-flight SLA timers, stops re-greeting
@@ -1354,6 +1434,12 @@ setInterval(() => { firstresponse.gateSweep().catch(e => log('FR gate sweep err'
   setInterval(() => { digestTick().catch(e => log('digest tick err', String(e.message || e))); }, 5 * 60 * 1000);
   if (SLA_ON){   // these belong to the SLA engine — keep them gated exactly as before the FR wiring
     // SLA SWEEP — enrol every new Lark lead (any source) into SLA. OFF unless SLA_SWEEP=1 + SLA_SWEEP_FROM set.
+    // 🩹 ORPHAN SWEEP — the opposite shape to slaSweep: a phone with NO salesperson. Shares the
+    // 3-minute cadence deliberately; a second timer is a second thing that can silently stop.
+    if (ORPHAN_FROM){
+      setInterval(() => { orphanSweep().catch(e => log('orphan sweep err', String(e.message||e))); }, 3 * 60 * 1000);
+      log('🩹 Orphan sweep ON — every 3min, from ' + new Date(ORPHAN_FROM).toISOString() + ', cap ' + ORPHAN_CAP + ', ' + orphan.MAX_TRIES + ' tries before a human is told');
+    } else log('🩹 Orphan sweep OFF (set ORPHAN_FROM to arm it)');
     if (process.env.SLA_SWEEP === '1'){
       setInterval(() => { slaSweep().catch(e => log('sla sweep err', String(e.message||e))); }, 3 * 60 * 1000);
       log('🧹 SLA sweep ON — every ' + '3min, from ' + (SLA_SWEEP_FROM || 'DISABLED (no cutoff)') + ', cap ' + SLA_SWEEP_CAP);
@@ -1789,6 +1875,14 @@ http.createServer((req, res) => {
       event_counts: counts,
       events,
     }, null, 1));
+  } else if (req.url.startsWith('/orphans')) {
+    // Read-only. The ONLY leads here are the ones the bot tried MAX_TRIES times and could not
+    // rescue — everything it fixed by itself is deleted from state and never appears. This is the
+    // sales card's whole input: if it is empty, the card says "all assigned" and nothing more.
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ armed: !!ORPHAN_FROM, maxTries: orphan.MAX_TRIES,
+      retrying: Object.values(orphanState).filter(v => v.tries < orphan.MAX_TRIES).length,
+      needsHuman: orphanNeedsHuman() }, null, 1));
   } else if (req.url.startsWith('/lead-summary')) {
     // Read-only. (a) today's leads (b) how many assigned (c) how many not and WHY.
     // ⚠️ A read failure returns HTTP **200** with `read_error` and NO count fields — never a 500,
