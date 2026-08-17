@@ -736,6 +736,7 @@ const identity = require('./identity');
 const wasend = require('./wasend');
 const roster = require('./roster');
 const orphan = require('./orphan');
+const cards = require('./cards');
 const STAFF_BY_LAST9 = identity.byLast9(STAFF);
 function staffNameByPhone(phone){ return identity.nameByPhone(STAFF_BY_LAST9, phone); }
 function fileOverrides(name){
@@ -1186,6 +1187,167 @@ async function orphanSweep(){
   if (stuck.length) log(`🚨 ${stuck.length} orphan lead(s) could not be recovered after ${orphan.MAX_TRIES} tries — these need a human`);
 }
 
+// ---------------------------------------------------------------------------------------------
+// THE FOUR CARDS (2026-08-17, Benjamin approved) — audience-split reporting
+// ---------------------------------------------------------------------------------------------
+// SALES + MARKETING in the morning, BOSS at day end. OPERATIONS is built on box-66 instead: it
+// needs the Mudah group ledger (`/opt/apps/tm-woo-upload/group_ledger.json`), which this process
+// genuinely cannot read. Approximating it here would be inventing a number.
+//
+// 🚨 THIS RUNS ALONGSIDE THE EXISTING REPORTS AND MUST NOT BE ABLE TO BREAK THEM.
+//   · its own interval, its own try/catch, its own `sent` markers (`cardsSent`, NOT `digest.sent`)
+//   · OFF unless CARDS_ON=1, and it sends to CARDS_GROUP_JID (the INTERNAL QA group by default),
+//     so nothing reaches the client until the shape is approved
+//   · one card failing must not stop the others, so each is built and sent independently
+const CARDS_ON = process.env.CARDS_ON === '1';
+const CARDS_GROUP_JID = process.env.CARDS_GROUP_JID || '120363409827976250@g.us';   // Benjamin QA group
+const CARDS_SALES_HR = parseInt(process.env.CARDS_SALES_HR || '9', 10);
+const CARDS_BOSS_HR  = parseInt(process.env.CARDS_BOSS_HR  || '18', 10);
+const cardsSent = {};
+
+async function cardsSend(text){
+  if (!CARDS_GROUP_JID || !REVIEW_TOKEN) return false;
+  try {
+    const r = await fetch(WASENDER_BASE + '/send-message', { method: 'POST',
+      headers: { 'Authorization': 'Bearer ' + REVIEW_TOKEN, 'Content-Type': 'application/json', 'User-Agent': UA },
+      body: JSON.stringify({ to: CARDS_GROUP_JID, text }) });
+    if (!r.ok) log('cardsSend HTTP ' + r.status);
+    return !!r.ok;
+  } catch (e){ log('cardsSend failed', String(e.message || e)); return false; }
+}
+
+// 🚨 `larkSearch` pages at 100 and does NOT paginate. TM already does 69 leads in a day, so a busy
+// day would silently truncate and the card would under-report. Paginate, and tell the caller if we
+// still hit a wall rather than returning a short list that looks complete.
+async function larkSearchAll(body, maxPages){
+  const tok = await larkToken();
+  const out = []; let pageToken = null;
+  for (let i = 0; i < (maxPages || 12); i++){
+    const qs = 'page_size=500' + (pageToken ? '&page_token=' + encodeURIComponent(pageToken) : '');
+    const r = await fetch(`${LARK_BASE}/bitable/v1/apps/${LARK_APP_TOKEN}/tables/${LARK_TABLE_ID}/records/search?${qs}`,
+      { method: 'POST', headers: { 'Authorization': 'Bearer ' + tok, 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    const j = await r.json();
+    if (j.code !== 0) throw new Error('lark search ' + j.code + ' ' + (j.msg || ''));
+    const d = j.data || {};
+    out.push(...(d.items || []));
+    if (!d.has_more) return { items: out, capped: false };
+    pageToken = d.page_token;
+  }
+  return { items: out, capped: true };
+}
+
+const MYT_DAY = 24 * 3600 * 1000;
+function mytDateStr(ms){ return new Date(ms + MYT_OFF).toISOString().slice(0, 10); }
+function niceDate(dateStr){
+  const d = new Date(dateStr + 'T00:00:00Z');
+  return d.toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short', timeZone: 'UTC' });
+}
+
+// Gathers everything the three bot-side cards need, from LARK ONLY — one source per fact. The
+// decision log is deliberately NOT consulted here: it covers WhatsApp Direct alone and only reaches
+// back to 2026-08-17, and two sources for "how many leads" is exactly the confusion being removed.
+async function gatherCardData(dateStr){
+  const { items, capped } = await larkSearchAll({ sort: [{ field_name: 'date created', desc: true }] });
+  const rows = items.filter(it => {
+    const c = slaRecCreated(it.fields || {});
+    return c && mytDateStr(c) === dateStr;
+  });
+  const bySource = {};
+  let assigned = 0;
+  const breachByRep = {}; let breached = 0; const stuck = [];
+  for (const it of rows){
+    const f = it.fields || {};
+    const src = slaFieldText(f['Origin']).trim() || '(unknown)';
+    bySource[src] = (bySource[src] || 0) + 1;
+    const sm = f['Salesman'];
+    const repName = Array.isArray(sm) && sm[0] ? (sm[0].name || '') : '';
+    if (repName) assigned++;
+    const st = slaFieldText(f['SLA Status']).trim();
+    // "Breached" = the desk did not respond in time. Reassigned rows are EXCLUDED: the system
+    // already rescued those, and by the reporting contract a rescue never reaches a card.
+    if (st === 'No-Response' || st === 'Escalated'){
+      breached++;
+      const short = (repName.split(/\s+/)[0] || repName || '?').replace(/^(\w)(\w*)$/, (m, a, b) => a.toUpperCase() + b);
+      breachByRep[short] = (breachByRep[short] || 0) + 1;
+      // Only ESCALATED reached the end of the road (reassigned once, still nothing). No-Response
+      // rows are still inside the machine, so they stay off the sales card.
+      if (st === 'Escalated') stuck.push({ rep: short, phone: slaFieldText(f['Phone number']),
+        want: slaFieldText(f['Customer want']) });
+    }
+  }
+  return { dateStr, capped, total: rows.length, assigned,
+    sources: Object.entries(bySource).map(([label, count]) => ({ label, count })),
+    breached, breachByRep: Object.entries(breachByRep).map(([rep, n]) => ({ rep, n })),
+    stuck: stuck.slice(0, 12) };
+}
+
+// The standing backlog: WhatsApp Direct rows with a phone, no salesperson and no SLA stamp that are
+// OLDER than the orphan cutoff, i.e. the ones deliberately excluded from auto-recovery.
+async function gatherBacklog(){
+  const { items } = await larkSearchAll({
+    filter: { conjunction: 'and', conditions: [
+      { field_name: 'Salesman', operator: 'isEmpty', value: [] },
+      { field_name: 'SLA Assigned At', operator: 'isEmpty', value: [] },
+    ]}, sort: [{ field_name: 'date created', desc: true }] });
+  const now = Date.now(); const out = [];
+  for (const it of items){
+    const f = it.fields || {};
+    if (slaFieldText(f['Origin']).trim() !== 'WhatsApp Direct') continue;
+    const c = slaRecCreated(f); if (!c) continue;
+    out.push({ days: Math.floor((now - c) / MYT_DAY), want: slaFieldText(f['Customer want']) });
+  }
+  out.sort((a, b) => b.days - a.days);
+  return out;
+}
+
+async function cardsTick(){
+  if (!CARDS_ON) return;
+  const p = mytNow();
+  const isSunday = new Date(Date.now() + MYT_OFF).getUTCDay() === 0;
+  if (isSunday) return;                               // TM operates Mon-Sat, same as the other reports
+  const morning = p.h === CARDS_SALES_HR && p.m >= 15 && p.m < 30;
+  const evening = p.h === CARDS_BOSS_HR && p.m < 15;
+  if (!morning && !evening) return;
+  const key = `${p.date}:${morning ? 'am' : 'pm'}`;
+  if (cardsSent[key]) return;
+  cardsSent[key] = true;                              // claim BEFORE awaiting, so a slow Lark read cannot double-fire
+  for (const k of Object.keys(cardsSent)) if (k.slice(0, 10) < p.date) delete cardsSent[k];
+
+  const dateStr = mytDateStr(Date.now() - MYT_DAY);   // yesterday in MYT
+  const label = niceDate(morning ? dateStr : p.date);
+  let d = null;
+  try { d = await gatherCardData(morning ? dateStr : p.date); }
+  catch (e){ log('cards: Lark read failed', String(e.message || e)); d = null; }
+  // 🚨 Rule 3 shape: a failed read renders "could not read", never zeros.
+  const base = d || { total: null, assigned: null, sources: [], breached: 0, breachByRep: [], stuck: [] };
+
+  if (morning){
+    // Each card is built AND sent independently: one throwing must never cost the other.
+    try {
+      const orph = orphanNeedsHuman();
+      // The orphan state holds record ids, not customer detail, so the card names the count and
+      // points at Lark rather than inventing a phone number it does not have.
+      await cardsSend(cards.salesCard({ dateLabel: label, total: base.total, assigned: base.assigned,
+        orphans: orph.map(o => ({ phone: '', want: 'Lark row ' + o.recordId })), stuck: base.stuck }));
+    } catch (e){ log('cards: sales card failed', String(e.message || e)); }
+    try { await cardsSend(cards.marketingCard({ dateLabel: label, total: base.total, sources: base.sources })); }
+    catch (e){ log('cards: marketing card failed', String(e.message || e)); }
+  } else {
+    try {
+      let backlog = [];
+      try { backlog = await gatherBacklog(); } catch (e){ log('cards: backlog read failed', String(e.message || e)); }
+      const top = base.sources.slice().sort((a, b) => b.count - a.count)[0];
+      const tk = base.sources.filter(s => /tiktok/i.test(s.label)).reduce((n, s) => n + s.count, 0);
+      await cardsSend(cards.bossCard({ dateLabel: label, total: base.total, assigned: base.assigned,
+        breached: base.breached, breachByRep: base.breachByRep,
+        neverContacted: backlog.length, oldestDays: backlog.length ? backlog[0].days : 0,
+        neverContactedModels: backlog.slice(0, 3).map(b => String(b.want || '').slice(0, 24)),
+        missingBikes: 0,
+        topSourceLabel: 'TikTok', topSourcePct: base.total && tk ? Math.round(100 * tk / base.total) : 0 }));
+    } catch (e){ log('cards: boss card failed', String(e.message || e)); }
+  }
+}
+
 // ---- Rehydrate-from-Lark on boot (2026-07-24, Benjamin approved): Render deploys wipe the
 // ephemeral disk (sla_store.json / fr_state.json / fr_deferred.json). Lark is the durable record —
 // rebuild what matters from it so a deploy stops costing in-flight SLA timers, stops re-greeting
@@ -1434,6 +1596,12 @@ setInterval(() => { firstresponse.gateSweep().catch(e => log('FR gate sweep err'
   setInterval(() => { digestTick().catch(e => log('digest tick err', String(e.message || e))); }, 5 * 60 * 1000);
   if (SLA_ON){   // these belong to the SLA engine — keep them gated exactly as before the FR wiring
     // SLA SWEEP — enrol every new Lark lead (any source) into SLA. OFF unless SLA_SWEEP=1 + SLA_SWEEP_FROM set.
+    // 📋 THE FOUR CARDS — its own interval and its own try/catch so it can never take down the
+    // existing 10:00/12:00/16:00/18:00 reporting running beside it.
+    if (CARDS_ON){
+      setInterval(() => { cardsTick().catch(e => log('cards tick err', String(e.message||e))); }, 5 * 60 * 1000);
+      log(`📋 Cards ON — sales+marketing ${CARDS_SALES_HR}:15, boss ${CARDS_BOSS_HR}:00 → ${CARDS_GROUP_JID}`);
+    } else log('📋 Cards OFF (set CARDS_ON=1 to arm them)');
     // 🩹 ORPHAN SWEEP — the opposite shape to slaSweep: a phone with NO salesperson. Shares the
     // 3-minute cadence deliberately; a second timer is a second thing that can silently stop.
     if (ORPHAN_FROM){
