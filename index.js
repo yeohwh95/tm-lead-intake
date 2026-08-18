@@ -1233,6 +1233,13 @@ const CARDS_ON = process.env.CARDS_ON === '1';
 const CARDS_GROUP_JID = process.env.CARDS_GROUP_JID || '120363409827976250@g.us';   // Benjamin QA group
 const CARDS_SALES_HR  = parseInt(process.env.CARDS_SALES_HR  || '9', 10);   // fires :15–:29 → 09:15
 const CARDS_SALES_HR2 = parseInt(process.env.CARDS_SALES_HR2 || '14', 10);  // 2nd sales card, covers TODAY so far
+// 🚨 CARD OWNERSHIP (2026-08-18). Marketing and Boss are built on BOX 66, not here: the Marketing
+// card is the LISTING backlog (group_ledger x Woo x the Mudah relay) and the Boss card needs the
+// same listing figures. Those files live on box 66 and this process genuinely cannot read them.
+// Leaving these on would put TWO marketing cards and TWO boss cards in the group every day.
+// Retired, not deleted (standing rule) — set to 1 only if ownership ever moves back here.
+const CARDS_MARKETING_ON = process.env.CARDS_MARKETING === '1';
+const CARDS_BOSS_ON      = process.env.CARDS_BOSS === '1';
 const CARDS_BOSS_HR   = parseInt(process.env.CARDS_BOSS_HR   || '18', 10);
 // 🚨 PERSISTENT DISK (2026-08-18), same defect the digest markers had: `cardsSent` was RAM-only,
 // so a redeploy inside the send window double-fired every card. Same derivation as the other
@@ -1479,7 +1486,7 @@ async function cardsTick(){
       await cardsDeliver('sales', `${p.date}:am:sales`, text);
     }
     // MARKETING — unchanged shape; rides the same working-day + confirmed-delivery mechanics.
-    if (!cardsState.sent[`${p.date}:am:marketing`]){
+    if (CARDS_MARKETING_ON && !cardsState.sent[`${p.date}:am:marketing`]){
       const base = d || { total: null, sources: [] };
       await cardsDeliver('marketing', `${p.date}:am:marketing`,
         cards.marketingCard({ dateLabel: label, total: base.total, sources: base.sources }));
@@ -1510,7 +1517,7 @@ async function cardsTick(){
     await cardsDeliver('sales', `${p.date}:pm2:sales`, text);
   }
 
-  if (evening && !cardsState.sent[`${p.date}:pm:boss`]){
+  if (evening && CARDS_BOSS_ON && !cardsState.sent[`${p.date}:pm:boss`]){
     // Boss card: same data logic as before, now delivery-confirmed like the others.
     let d = null;
     try { d = await gatherCardData(p.date); }
@@ -2229,6 +2236,7 @@ http.createServer((req, res) => {
         alarmBusinessHours: OPS_QUIET_ALARM_H,
         file: st.file, fileError: st.fileError, writeError: st.writeError },
       legacyReports: LEGACY_REPORTS_ON, cardsOn: CARDS_ON,
+      cardsOwned: { sales: true, ops: true, marketing: CARDS_MARKETING_ON, boss: CARDS_BOSS_ON },
       digestSent: digest.sent, cardsSent: cardsState.sent,
     }, null, 1));
   } else if (req.url.startsWith('/gate-status')) {
