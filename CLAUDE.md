@@ -2,6 +2,70 @@
 
 WhatsApp lead → AI extract → Lark CRM + notify the assigned salesperson. **LIVE.**
 
+## 📋 SALES + OPS CARDS, HEARTBEAT, LEGACY SWITCH — 2026-08-18
+⚠️ **COMMITTED, NOT DEPLOYED.** Everything is flag-off or legacy-preserving by default: `CARDS_ON`
+unset ⇒ no cards, `LEGACY_REPORTS` unset ⇒ the four scheduled client sends are byte-identical.
+
+### SALES card rewritten (`cards.js salesCard`) — the 3d8b44b contract, then the action list
+Order: `Yesterday: N leads → X assigned` + the WHY buckets (rendered from **`leadsummary.WHY`,
+now exported** — never a second copy of the map) → 🚨 **CUSTOMERS STILL WAITING** (Lark `SLA
+Status=Escalated`; ~23% of leads, the main event; rep · +phone · want · `wa.me`) → 🚨 NO
+SALESPERSON (orphan sweep, usually empty) → both empty ⇒ `✅ Everyone got a reply yesterday.`
+- Counts come from **`buildLeadSummary` — the SAME counting path as the client's summary** (its
+  `read_error`/`no_data`/`partialFrom` honesty included). Lark is the cross-check; disagree ⇒ BOTH
+  numbers print. The old card's Lark-only counting path is gone from the sales card.
+- 🚨 A failed Lark read renders the waiting list as **"UNKNOWN, not empty"** and blocks the
+  all-clear — an unreadable list is the confident-zero lie in list form.
+- `gatherCardData` no longer slices `stuck` at 12 — `fit()` already trims AND SAYS SO; the slice
+  was a silent cap that made "12 waiting" out of a worse day.
+
+### NEW OPS card (`cards.js opsCard`) — Benjamin's health card, QA group only
+SEV1 (losing leads now: `larkMissing`, undelivered sends) → SEV2 (client numbers broken: missing
+sent-markers, `sumOk:false`) → SEV3 (backlog rising vs `summaryMark.backlog` — related counters,
+both printed) → SEV4 (going blind: log unreadable, parse errors, Lark unreadable, **no inbound
+message for N business hours**). Healthy day = short + `▸` status lines + a MANDATORY `Blind:`
+line (inbox cross-check is box-66 09:57 only). Every line is grounded in a signal that exists.
+
+### 🫀 WEBHOOK HEARTBEAT (`heartbeat.js`) — quiet day vs dead WaSender session
+`recent[]` is RAM-only, so those two were indistinguishable from inside the bot — and a dead
+session is the failure that loses EVERY lead at once. Every inbound `messages.upsert` (echoes
+excluded) stamps `last_inbound.json` beside `FR_STATE_FILE` (⇒ `/data` in prod, no new env var),
+throttled to ≥60s between writes, best-effort with the ENOSPC test. The quiet measure is
+**BUSINESS hours** (`businessMinutesBetween`, minute-walk, 14-day cap that SAYS when it capped) so
+a weekend of silence is 25 minutes, not 39 hours — no Monday false alarm. Alarm default 3h
+(`OPS_QUIET_ALARM_H`). Exposed on **`GET /ops`** with both marker stores. Boot-read keeps the
+`readFrEvents` ENOENT split: missing file in a healthy dir = fresh; missing DIRECTORY = error.
+
+### cardsTick fixes (`index.js` + `cardsched.js`)
+- 🚨 **Reports the last WORKING day, not literal yesterday** (`cardsched.workingDayBefore`, MYT):
+  Monday reported SUNDAY and Saturday was covered by nothing, a weekly permanent hole.
+- 🚨 **Confirmed delivery**: the old code claimed `cardsSent[key]` BEFORE the await and ignored
+  `cardsSend`'s return — one transient 5xx lost a card silently forever. Now
+  `cardsched.sendWithRetry` (3 attempts, 5s/15s backoff), marker only on a confirmed outcome,
+  and after 3 failures a notice to the QA group (发现 → 自己 fix → 3 次不行 → 才通知群组).
+- 🚨 **Markers on the persistent disk** (`cards_sent.json` beside `FR_STATE_FILE`) — RAM-only
+  markers double-fired every card on a redeploy inside the window. Kept 3 days, because…
+- `digest.sent` retention 1 → **3 days**: Sunday's 12:00 prune deleted Saturday's markers a day
+  before the Monday ops card could prove Saturday's reports went out.
+- Schedule: sales **09:15 AND 14:00** (`CARDS_SALES_HR2`; the 14:00 one covers TODAY so far and is
+  labelled so), ops 09:15, boss 18:00 unchanged. Cards interval moved **outside the `SLA_ON`
+  gate** — same "reports must not die with the SLA toggle" lesson as digestTick.
+- `gatherBacklog`: `Origin='WhatsApp Direct'` filter → **30-day age cap** (`BACKLOG_MAX_DAYS`).
+  Measured identical today (15 rows); the Origin filter went blind to a stranded TikTok lead, and
+  without any filter it is 242 rows dominated by a 245-day-old "On Site Event" import.
+
+### LEGACY_REPORTS switch — retire, don't delete
+`LEGACY_REPORTS=0` disables ONLY the four scheduled client sends in `digestTick` (10:00/16:00
+summaries + 12:00/18:00 SLA digests). SLA engine, sweeps, ad-hoc alerts, cards: untouched. Event
+pruning still runs so the digest store cannot grow forever; sent-markers are NOT faked. Default
+`1` = byte-identical behaviour. ⚠️ **When it is eventually set to 0, box-66's
+`probe_tm_summary()` will alarm hourly unless retired in the same pass** — flagged, not touched.
+
+**Env added (all with safe defaults):** `LEGACY_REPORTS=1` · `CARDS_SALES_HR2=14` ·
+`CARDS_SENT_FILE` (beside `FR_STATE_FILE`) · `BACKLOG_MAX_DAYS=30` · `LAST_INBOUND_FILE` (beside
+`FR_STATE_FILE`) · `INBOUND_STAMP_MS=60000` · `OPS_QUIET_ALARM_H=3`.
+Tests: cards **81** · cardsched **15** (new) · heartbeat **28** (new) · full suite **927** (was 837).
+
 ## 🩹 ORPHAN SWEEP — a phone with NO salesperson is now recovered, not reported — 2026-08-17
 ⚠️ **COMMITTED, NOT DEPLOYED, AND OFF BY DEFAULT** (`ORPHAN_FROM` unset ⇒ recovers nothing).
 

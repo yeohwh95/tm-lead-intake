@@ -535,6 +535,8 @@ function summaryCard(s, cross, extras){
   return { text, backlog: b.backlog || 0 };
 }
 
+// `WHY` is exported so the sales card renders the SAME reason strings this file prints — a second
+// copy of the bucket→reason map is two sources of truth for one fact, and those always drift.
 module.exports = { parseEvents, summarize, summarizeWindow, summaryText, summaryCard, needsALook, needsALookText,
   reportWindow, previousBoundary, lastCompletedDrain, DRAIN_GRACE_MS, windowHeader, fmtMyt,
-  LEAD_BUCKETS, NON_LEAD_BUCKETS, SLOTS, BLOCK_CAP, mytDate };
+  LEAD_BUCKETS, NON_LEAD_BUCKETS, SLOTS, BLOCK_CAP, mytDate, WHY };

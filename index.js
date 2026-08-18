@@ -270,7 +270,27 @@ async function buildSlaDigest(label, sinceMs){
 // keeps the bot awake). All four are IN-BOT timers on the one existing 5-min interval — no new cron,
 // and no dependency on the 09:57 VPS audit, which makes OpenAI calls and can overrun. The client's
 // reports read the decision log and Lark directly; the VPS cross-check stays an independent net.
+// ---- LEGACY REPORT SWITCH (2026-08-18) ----
+// The four scheduled CLIENT sends below (10:00/16:00 lead summaries + 12:00/18:00 SLA digests) are
+// being replaced by the audience-split cards. Until now there was NO way to turn them off without
+// killing the SLA engine itself. `LEGACY_REPORTS=0` disables ONLY those four scheduled sends; the
+// SLA engine, sweeps, ad-hoc failure alerts and the cards are untouched. Default '1' = unchanged.
+// Retired, not deleted (standing rule) — flipping the env back restores them exactly.
+// ⚠️ When this is eventually set to 0, the box-66 jobhealth sentinel `probe_tm_summary()` will
+// alarm hourly (it proves the 10:00/16:00 markers exist) unless it is retired in the same pass.
+const LEGACY_REPORTS_ON = process.env.LEGACY_REPORTS !== '0';
 async function digestTick(){
+  if (!LEGACY_REPORTS_ON){
+    // The sends are off, but the durable event store must not grow forever — the pruning below
+    // normally rides on a send firing, so do it here instead. Markers are NOT written: a sent-
+    // marker for a report that never went out would make the jobhealth probe (and the ops card)
+    // report a send that did not happen.
+    const cut = Date.now() - 8 * 24 * 3600 * 1000;
+    const before = digest.events.length;
+    digest.events = digest.events.filter(e => e.t >= cut);
+    if (digest.events.length !== before) digestPersist();
+    return;
+  }
   const p = mytNow();
   // TM operates Mon–Sat. A Sunday report is noise, so the summaries are skipped then. ⚠️ This is
   // exactly why the window is anchored on the last SUCCESSFUL SEND and not on the clock: with
@@ -309,7 +329,11 @@ async function digestTick(){
       // their own `sinceMs`, so keeping more events changes nothing for them.
       const cut = Date.now() - 8 * 24 * 3600 * 1000;
       digest.events = digest.events.filter(e => e.t >= cut);
-      for (const k of Object.keys(digest.sent)) if (k < p.date) delete digest.sent[k];
+      // Sent-markers kept 3 days, not 1 (2026-08-18): the Monday 09:15 ops card proves SATURDAY's
+      // reports went out, and pruning `< today` on Sunday's 12:00 SLA tick deleted Saturday's
+      // markers a day before anything could read them.
+      const keepFrom = mytDateStr(Date.now() - 3 * 24 * 3600 * 1000);
+      for (const k of Object.keys(digest.sent)) if (k.slice(0, 10) < keepFrom) delete digest.sent[k];
       digestPersist();
     }
   }
@@ -737,6 +761,12 @@ const wasend = require('./wasend');
 const roster = require('./roster');
 const orphan = require('./orphan');
 const cards = require('./cards');
+const cardsched = require('./cardsched');
+const heartbeat = require('./heartbeat');
+// The one heartbeat instance: durable last-inbound-message marker on /data. Best-effort by
+// contract — nothing in it can throw into the webhook path.
+const hb = heartbeat.create({});
+const OPS_QUIET_ALARM_H = Number(process.env.OPS_QUIET_ALARM_H || 3);
 const STAFF_BY_LAST9 = identity.byLast9(STAFF);
 function staffNameByPhone(phone){ return identity.nameByPhone(STAFF_BY_LAST9, phone); }
 function fileOverrides(name){
@@ -1201,9 +1231,45 @@ async function orphanSweep(){
 //   · one card failing must not stop the others, so each is built and sent independently
 const CARDS_ON = process.env.CARDS_ON === '1';
 const CARDS_GROUP_JID = process.env.CARDS_GROUP_JID || '120363409827976250@g.us';   // Benjamin QA group
-const CARDS_SALES_HR = parseInt(process.env.CARDS_SALES_HR || '9', 10);
-const CARDS_BOSS_HR  = parseInt(process.env.CARDS_BOSS_HR  || '18', 10);
-const cardsSent = {};
+const CARDS_SALES_HR  = parseInt(process.env.CARDS_SALES_HR  || '9', 10);   // fires :15–:29 → 09:15
+const CARDS_SALES_HR2 = parseInt(process.env.CARDS_SALES_HR2 || '14', 10);  // 2nd sales card, covers TODAY so far
+const CARDS_BOSS_HR   = parseInt(process.env.CARDS_BOSS_HR   || '18', 10);
+// 🚨 PERSISTENT DISK (2026-08-18), same defect the digest markers had: `cardsSent` was RAM-only,
+// so a redeploy inside the send window double-fired every card. Same derivation as the other
+// /data files — beside FR_STATE_FILE, no new env var needed in prod.
+const CARDS_SENT_FILE = process.env.CARDS_SENT_FILE
+  || _path.join(_path.dirname(process.env.FR_STATE_FILE || _path.join(__dirname, 'fr_state.json')), 'cards_sent.json');
+let cardsState = { sent: {} };
+try { cardsState = JSON.parse(_fs.readFileSync(CARDS_SENT_FILE, 'utf8')); cardsState.sent = cardsState.sent || {}; }
+catch { /* fresh */ }
+function cardsPersist(){ try { _fs.writeFileSync(CARDS_SENT_FILE, JSON.stringify(cardsState)); }
+  catch (e){ log('cards marker persist err', String(e.message || e).slice(0, 60)); } }
+const cardsInFlight = {};   // RAM claim while a send is awaited, so overlapping ticks cannot double-send
+
+// Deliver one card: 3 attempts with a short backoff, and the durable marker moves ONLY on a
+// confirmed outcome. 🚨 The old code claimed the slot BEFORE the await and ignored `cardsSend`'s
+// return value — one transient HTTP failure lost the card silently forever. Now, per the standing
+// rule (发现 → 自己 fix → 3 次不行 → 才通知群组): retry 3×, and only then tell the QA group the
+// card could not be sent. The marker is set to 'failed' after the notice so the next 5-min tick
+// does not repeat the whole cycle inside the same window.
+async function cardsDeliver(name, key, text){
+  if (cardsState.sent[key] || cardsInFlight[key]) return;
+  cardsInFlight[key] = true;
+  try {
+    const r = await cardsched.sendWithRetry(() => cardsSend(text));
+    if (r.ok) cardsState.sent[key] = true;
+    else {
+      cardsState.sent[key] = 'failed';
+      log(`cards: ${name} card NOT sent after ${r.attempts} attempts`);
+      // Best-effort — if the channel itself is down this notice fails too, but the log line above
+      // and the missing marker (visible on /ops) still tell the story.
+      try { await cardsSend(`⚠️ The ${name} card failed to send after ${r.attempts} attempts. It was NOT delivered. See Render logs + /ops.`); } catch {}
+    }
+    const keepFrom = mytDateStr(Date.now() - 3 * 24 * 3600 * 1000);   // ops card reads yesterday's markers
+    for (const k of Object.keys(cardsState.sent)) if (k.slice(0, 10) < keepFrom) delete cardsState.sent[k];
+    cardsPersist();
+  } finally { delete cardsInFlight[key]; }
+}
 
 async function cardsSend(text){
   if (!CARDS_GROUP_JID || !REVIEW_TOKEN) return false;
@@ -1278,11 +1344,18 @@ async function gatherCardData(dateStr){
   return { dateStr, capped, total: rows.length, assigned,
     sources: Object.entries(bySource).map(([label, count]) => ({ label, count })),
     breached, breachByRep: Object.entries(breachByRep).map(([rep, n]) => ({ rep, n })),
-    stuck: stuck.slice(0, 12) };
+    // No cap here (2026-08-18): the card's own fit() trims to one WhatsApp message AND SAYS SO,
+    // whereas a silent slice made "12 waiting" out of a worse day — a silent cap by another name.
+    stuck };
 }
 
-// The standing backlog: WhatsApp Direct rows with a phone, no salesperson and no SLA stamp that are
-// OLDER than the orphan cutoff, i.e. the ones deliberately excluded from auto-recovery.
+// The standing backlog: rows with no salesperson and no SLA stamp, capped by AGE instead of by
+// Origin (2026-08-18). The old `Origin === 'WhatsApp Direct'` filter went blind the moment a
+// TikTok lead was ever stranded — a stuck lead is stuck whatever brought it in. Measured before
+// the change: the Origin filter and a 30-day cap return the IDENTICAL 15 rows today; with no
+// filter at all it would be 242 rows, dominated by a 245-day-old "On Site Event" import — the age
+// cap is what keeps the number meaningful.
+const BACKLOG_MAX_DAYS = Number(process.env.BACKLOG_MAX_DAYS || 30);
 async function gatherBacklog(){
   const { items } = await larkSearchAll({
     filter: { conjunction: 'and', conditions: [
@@ -1292,12 +1365,77 @@ async function gatherBacklog(){
   const now = Date.now(); const out = [];
   for (const it of items){
     const f = it.fields || {};
-    if (slaFieldText(f['Origin']).trim() !== 'WhatsApp Direct') continue;
     const c = slaRecCreated(f); if (!c) continue;
-    out.push({ days: Math.floor((now - c) / MYT_DAY), want: slaFieldText(f['Customer want']) });
+    const days = Math.floor((now - c) / MYT_DAY);
+    if (days > BACKLOG_MAX_DAYS) continue;
+    out.push({ days, want: slaFieldText(f['Customer want']) });
   }
   out.sort((a, b) => b.days - a.days);
   return out;
+}
+
+// Everything the OPS card needs, each signal independently fallible and saying so. 🚨 Only
+// signals that actually EXIST — nothing here is inferred or invented, and an unreadable source
+// produces "could not read", never a zero.
+async function gatherOpsData(){
+  const now = Date.now();
+  const wdate = cardsched.workingDayBefore(now, MYT_OFF);          // Monday looks at Saturday
+  const winStart = Date.parse(wdate + 'T00:00:00Z') - MYT_OFF;
+
+  // Decision log: readable? last event? parse errors? window integrity (larkMissing / sumOk)?
+  const r = firstresponse.readFrEvents();
+  let logInfo, counts;
+  if (!r.ok){
+    logInfo = { readable: false, error: r.error, lastEventLabel: null, parseErrors: null };
+    counts = { unavailable: 'decision log unreadable, so lead counts and integrity cannot be checked' };
+  } else {
+    const parsed = leadsummary.parseEvents(r.text);
+    const last = parsed.events.length ? parsed.events[parsed.events.length - 1] : null;
+    logInfo = { readable: true, error: null,
+      lastEventLabel: last ? leadsummary.fmtMyt(last.ts * 1000) : null, parseErrors: parsed.parse_errors };
+    const s = leadsummary.summarizeWindow(parsed.events, winStart, now, { parse_errors: parsed.parse_errors });
+    counts = (s.read_error || s.no_data) ? { larkMissing: null, sumOk: null }
+      : { larkMissing: s.larkMissing, sumOk: s.sumOk };
+  }
+
+  // Reports provably sent: the durable digest.sent markers for the last working day (retention
+  // is 3 days precisely so Saturday's are still here on Monday). With the legacy reports off,
+  // the cards' own markers are the proof instead.
+  let reports;
+  if (!LEGACY_REPORTS_ON){
+    const n = Object.keys(cardsState.sent).filter(k => k.slice(0, 10) === wdate && cardsState.sent[k] === true).length;
+    reports = { legacyOff: true, cardsSentYesterday: n };
+  } else {
+    const expected = ['10:00', '12:00', '16:00', '18:00'];
+    const missing = ['10', '12', '16', '18'].filter(h => !digest.sent[`${wdate}:${h}`]).map(h => h + ':00');
+    reports = { expected, sent: expected.filter(x => !missing.includes(x)), missing };
+  }
+
+  const undelivered = digest.events.filter(e => e.type === 'undelivered' && e.t >= winStart)
+    .map(e => ({ to: e.to, attempts: e.attempts, error: e.err }));
+
+  // Backlog: current count from Lark, previous from the client-report window marker. Related but
+  // not identical counters — the card prints both and says so, per the two-sources rule.
+  const backlog = { count: null, prev: summaryMark.backlog == null ? null : summaryMark.backlog, error: null };
+  try { backlog.count = (await gatherBacklog()).length; }
+  catch (e){ backlog.error = String(e.message || e).slice(0, 80); }
+
+  // Last inbound message → quiet BUSINESS hours. A weekend of silence is normal; N business hours
+  // of silence is a dead WaSender session until proven otherwise (SEV4, rendered by the card).
+  const st = hb.status(now);
+  const inbound = { at: st.at, minutesAgo: st.minutesAgo, quietBusinessHours: null,
+    alarmH: OPS_QUIET_ALARM_H, noMarker: !st.at, error: st.fileError || null };
+  if (st.at){
+    const q = heartbeat.businessMinutesBetween(st.at, now, BIZ_DAYS, 9, 18, MYT_OFF);
+    inbound.quietBusinessHours = Math.round(q.minutes / 6) / 10;   // hours, 1 decimal
+  }
+
+  const blind = ['inbox cross-check runs on box-66 at 09:57, not from this process'];
+  if (!st.at && !st.fileError) blind.push('no last-inbound marker yet, so session liveness cannot be judged');
+  if (st.writeError) blind.push(`last-inbound marker writes failing (${st.writeError})`);
+
+  return { upSinceLabel: leadsummary.fmtMyt(BOOT_AT), restartedInWindow: BOOT_AT >= winStart,
+    reports, log: logInfo, counts, undelivered, backlog, inbound, blind };
 }
 
 async function cardsTick(){
@@ -1305,46 +1443,89 @@ async function cardsTick(){
   const p = mytNow();
   const isSunday = new Date(Date.now() + MYT_OFF).getUTCDay() === 0;
   if (isSunday) return;                               // TM operates Mon-Sat, same as the other reports
-  const morning = p.h === CARDS_SALES_HR && p.m >= 15 && p.m < 30;
-  const evening = p.h === CARDS_BOSS_HR && p.m < 15;
-  if (!morning && !evening) return;
-  const key = `${p.date}:${morning ? 'am' : 'pm'}`;
-  if (cardsSent[key]) return;
-  cardsSent[key] = true;                              // claim BEFORE awaiting, so a slow Lark read cannot double-fire
-  for (const k of Object.keys(cardsSent)) if (k.slice(0, 10) < p.date) delete cardsSent[k];
-
-  const dateStr = mytDateStr(Date.now() - MYT_DAY);   // yesterday in MYT
-  const label = niceDate(morning ? dateStr : p.date);
-  let d = null;
-  try { d = await gatherCardData(morning ? dateStr : p.date); }
-  catch (e){ log('cards: Lark read failed', String(e.message || e)); d = null; }
-  // 🚨 Rule 3 shape: a failed read renders "could not read", never zeros.
-  const base = d || { total: null, assigned: null, sources: [], breached: 0, breachByRep: [], stuck: [] };
+  const morning = p.h === CARDS_SALES_HR && p.m >= 15 && p.m < 30;   // 09:15
+  const midday  = p.h === CARDS_SALES_HR2 && p.m < 15;               // 14:00 — covers TODAY so far
+  const evening = p.h === CARDS_BOSS_HR && p.m < 15;                 // 18:00 boss, unchanged
+  if (!morning && !midday && !evening) return;
+  // Slots are claimed per-card inside cardsDeliver, on a CONFIRMED outcome only, and the markers
+  // live on the persistent disk — a redeploy inside the window no longer double-fires, and a
+  // transient HTTP failure no longer burns the slot with nothing delivered.
 
   if (morning){
-    // Each card is built AND sent independently: one throwing must never cost the other.
-    try {
+    // 🚨 The morning card reports the last WORKING day, not literal yesterday. TM operates
+    // Mon–Sat: "yesterday" on a Monday reported SUNDAY (a closed day, always near-empty) and
+    // Saturday — a full working day — was never covered by any morning card at all.
+    const wdate = cardsched.workingDayBefore(Date.now(), MYT_OFF);
+    const label = niceDate(wdate);
+    let d = null, larkErr = null;
+    try { d = await gatherCardData(wdate); }
+    catch (e){ larkErr = String(e.message || e).slice(0, 80); log('cards: Lark read failed', larkErr); }
+
+    // SALES — counts + WHY from the decision log (buildLeadSummary: the SAME counting path as the
+    // client's summary card, incl. its read_error / no_data / partial-window honesty), waiting
+    // list from Lark `SLA Status=Escalated`, orphans from the sweep. Each is independently
+    // fallible and the card says which half it could not see.
+    if (!cardsState.sent[`${p.date}:am:sales`]){
+      let sum;
+      try { sum = await buildLeadSummary(wdate, true); }
+      catch (e){ sum = { summary: { read_error: String(e.message || e).slice(0, 80) }, cross: {} }; }
       const orph = orphanNeedsHuman();
       // The orphan state holds record ids, not customer detail, so the card names the count and
       // points at Lark rather than inventing a phone number it does not have.
-      await cardsSend(cards.salesCard({ dateLabel: label, total: base.total, assigned: base.assigned,
-        orphans: orph.map(o => ({ phone: '', want: 'Lark row ' + o.recordId })), stuck: base.stuck }));
-    } catch (e){ log('cards: sales card failed', String(e.message || e)); }
-    try { await cardsSend(cards.marketingCard({ dateLabel: label, total: base.total, sources: base.sources })); }
-    catch (e){ log('cards: marketing card failed', String(e.message || e)); }
-  } else {
-    try {
-      let backlog = [];
-      try { backlog = await gatherBacklog(); } catch (e){ log('cards: backlog read failed', String(e.message || e)); }
-      const top = base.sources.slice().sort((a, b) => b.count - a.count)[0];
-      const tk = base.sources.filter(s => /tiktok/i.test(s.label)).reduce((n, s) => n + s.count, 0);
-      await cardsSend(cards.bossCard({ dateLabel: label, total: base.total, assigned: base.assigned,
+      const text = cards.salesCard({ dateLabel: label, periodLabel: 'Yesterday',
+        s: sum.summary, cross: sum.cross,
+        stuck: d ? d.stuck : [], stuckUnavailable: d ? null : (larkErr || 'Lark read failed'),
+        orphans: orph.map(o => ({ phone: '', want: 'Lark row ' + o.recordId })) });
+      await cardsDeliver('sales', `${p.date}:am:sales`, text);
+    }
+    // MARKETING — unchanged shape; rides the same working-day + confirmed-delivery mechanics.
+    if (!cardsState.sent[`${p.date}:am:marketing`]){
+      const base = d || { total: null, sources: [] };
+      await cardsDeliver('marketing', `${p.date}:am:marketing`,
+        cards.marketingCard({ dateLabel: label, total: base.total, sources: base.sources }));
+    }
+    // OPS — Benjamin's health card, QA group only.
+    if (!cardsState.sent[`${p.date}:am:ops`]){
+      let od;
+      try { od = await gatherOpsData(); }
+      catch (e){ od = { log: { readable: false, error: 'ops gather failed: ' + String(e.message || e).slice(0, 60) } }; }
+      od.dateLabel = `${niceDate(p.date)} 09:15`;
+      await cardsDeliver('ops', `${p.date}:am:ops`, cards.opsCard(od));
+    }
+  }
+
+  if (midday && !cardsState.sent[`${p.date}:pm2:sales`]){
+    // Second SALES card: covers THIS MORNING, and is labelled so — "yesterday" twice in one day
+    // would read as a stuck report.
+    let sum;
+    try { sum = await buildLeadSummary(p.date, true); }
+    catch (e){ sum = { summary: { read_error: String(e.message || e).slice(0, 80) }, cross: {} }; }
+    let stuck = [], stuckUnavailable = null;
+    try { stuck = (await gatherCardData(p.date)).stuck; }
+    catch (e){ stuckUnavailable = String(e.message || e).slice(0, 80); }
+    const orph = orphanNeedsHuman();
+    const text = cards.salesCard({ dateLabel: `${niceDate(p.date)} (up to ${CARDS_SALES_HR2}:00)`,
+      periodLabel: 'Today so far', s: sum.summary, cross: sum.cross, stuck, stuckUnavailable,
+      orphans: orph.map(o => ({ phone: '', want: 'Lark row ' + o.recordId })) });
+    await cardsDeliver('sales', `${p.date}:pm2:sales`, text);
+  }
+
+  if (evening && !cardsState.sent[`${p.date}:pm:boss`]){
+    // Boss card: same data logic as before, now delivery-confirmed like the others.
+    let d = null;
+    try { d = await gatherCardData(p.date); }
+    catch (e){ log('cards: Lark read failed', String(e.message || e)); }
+    const base = d || { total: null, assigned: null, sources: [], breached: 0, breachByRep: [], stuck: [] };
+    let backlog = [];
+    try { backlog = await gatherBacklog(); } catch (e){ log('cards: backlog read failed', String(e.message || e)); }
+    const tk = base.sources.filter(s => /tiktok/i.test(s.label)).reduce((n, s) => n + s.count, 0);
+    await cardsDeliver('boss', `${p.date}:pm:boss`,
+      cards.bossCard({ dateLabel: niceDate(p.date), total: base.total, assigned: base.assigned,
         breached: base.breached, breachByRep: base.breachByRep,
         neverContacted: backlog.length, oldestDays: backlog.length ? backlog[0].days : 0,
         neverContactedModels: backlog.slice(0, 3).map(b => String(b.want || '').slice(0, 24)),
         missingBikes: 0,
         topSourceLabel: 'TikTok', topSourcePct: base.total && tk ? Math.round(100 * tk / base.total) : 0 }));
-    } catch (e){ log('cards: boss card failed', String(e.message || e)); }
   }
 }
 
@@ -1594,14 +1775,16 @@ setInterval(() => { firstresponse.gateSweep().catch(e => log('FR gate sweep err'
   // CLIENT's report too. That is exactly the "9 unregistered reports" failure class. buildDigest
   // gates the SLA half per-kind instead, so an SLA-off bot still sends the lead summary.
   setInterval(() => { digestTick().catch(e => log('digest tick err', String(e.message || e))); }, 5 * 60 * 1000);
+  // 📋 THE CARDS — its own interval and its own try/catch so it can never take down the existing
+  // reporting running beside it. ⚠️ Moved OUTSIDE the SLA_ON gate (2026-08-18) for the same
+  // reason digestTick was: the cards are reports, and toggling the SLA engine off must not
+  // silently kill them — the "9 unregistered reports" failure class again.
+  if (CARDS_ON){
+    setInterval(() => { cardsTick().catch(e => log('cards tick err', String(e.message||e))); }, 5 * 60 * 1000);
+    log(`📋 Cards ON — sales+marketing+ops ${CARDS_SALES_HR}:15, sales again ${CARDS_SALES_HR2}:00, boss ${CARDS_BOSS_HR}:00 → ${CARDS_GROUP_JID}`);
+  } else log('📋 Cards OFF (set CARDS_ON=1 to arm them)');
   if (SLA_ON){   // these belong to the SLA engine — keep them gated exactly as before the FR wiring
     // SLA SWEEP — enrol every new Lark lead (any source) into SLA. OFF unless SLA_SWEEP=1 + SLA_SWEEP_FROM set.
-    // 📋 THE FOUR CARDS — its own interval and its own try/catch so it can never take down the
-    // existing 10:00/12:00/16:00/18:00 reporting running beside it.
-    if (CARDS_ON){
-      setInterval(() => { cardsTick().catch(e => log('cards tick err', String(e.message||e))); }, 5 * 60 * 1000);
-      log(`📋 Cards ON — sales+marketing ${CARDS_SALES_HR}:15, boss ${CARDS_BOSS_HR}:00 → ${CARDS_GROUP_JID}`);
-    } else log('📋 Cards OFF (set CARDS_ON=1 to arm them)');
     // 🩹 ORPHAN SWEEP — the opposite shape to slaSweep: a phone with NO salesperson. Shares the
     // 3-minute cadence deliberately; a second timer is a second thing that can silently stop.
     if (ORPHAN_FROM){
@@ -2020,6 +2203,10 @@ http.createServer((req, res) => {
       forwardToInbox(body, req.headers);   // fan-out to console inbox (fire-and-forget)
       forwardToWoo(body);                  // fan-out #2 to website-upload service (fire-and-forget)
       let p; try { p = JSON.parse(body); } catch { p = { raw: body.slice(0, 1500) }; }
+      // Durable last-inbound marker (heartbeat.js): the ONE signal that separates a quiet day
+      // from a dead WaSender session. Throttled + best-effort by contract — cannot throw, and a
+      // failed write costs a marker, never a message.
+      hb.noteInbound(Date.now(), p);
       remember({ event: p.event, summary: JSON.stringify(p).slice(0, 800) });
       log('CAPTURE', p.event || '(no event)');
       res.writeHead(200, { 'Content-Type': 'application/json' }); res.end('{"ok":true}');
@@ -2027,6 +2214,23 @@ http.createServer((req, res) => {
     });
   } else if (req.url === '/health') {
     res.writeHead(200, { 'Content-Type': 'text/plain' }); res.end('ok');
+  } else if (req.url.startsWith('/ops')) {
+    // Read-only. The ops card's raw inputs, inspectable without waiting for 09:15: boot time, the
+    // durable last-inbound marker (quiet day vs dead WaSender session), and both sets of sent-
+    // markers. `lastInbound.at: null` means NO MARKER EXISTS — unknown, not "long ago".
+    const st = hb.status(Date.now());
+    const quiet = st.at ? heartbeat.businessMinutesBetween(st.at, Date.now(), BIZ_DAYS, 9, 18, MYT_OFF) : null;
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({
+      bootAt: BOOT_AT, bootAtMYT: leadsummary.fmtMyt(BOOT_AT),
+      lastInbound: { at: st.at, minutesAgo: st.minutesAgo,
+        quietBusinessHours: quiet ? Math.round(quiet.minutes / 6) / 10 : null,
+        quietCapped: quiet ? quiet.capped : false,
+        alarmBusinessHours: OPS_QUIET_ALARM_H,
+        file: st.file, fileError: st.fileError, writeError: st.writeError },
+      legacyReports: LEGACY_REPORTS_ON, cardsOn: CARDS_ON,
+      digestSent: digest.sent, cardsSent: cardsState.sent,
+    }, null, 1));
   } else if (req.url.startsWith('/gate-status')) {
     // Same shape as the Python bots' /gate-status so one reporting tool covers all four.
     // Read-only.
