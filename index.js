@@ -2275,9 +2275,16 @@ http.createServer((req, res) => {
         alarmBusinessHours: OPS_QUIET_ALARM_H,
         file: st.file, fileError: st.fileError, writeError: st.writeError },
       legacyReports: LEGACY_REPORTS_ON, cardsOn: CARDS_ON,
-      // Kept so /ops still answers "who publishes which card" — the question that stopped two
-      // duplicate cards a day going out. marketing/operations now answer "box-66", not a boolean.
-      cardsOwned: { sales: 'render', ops: 'render', marketing: 'box-66', operations: 'box-66', boss: 'removed 2026-08-21' },
+      // 🚨 `cardsOwned` IS A CONTRACT WITH jobhealth/sentinel.py, WHICH READS IT FOR TRUTHINESS
+      // (`if not owned.get(owner, True): continue`). It gates whether the sentinel asserts a
+      // sent-marker for that card. The values MUST stay booleans: `false` = another machine sends
+      // this card, so the bot writing no marker is CORRECT. Making them descriptive strings on
+      // 2026-08-21 briefly turned every value truthy, which would have asserted a marketing marker
+      // this process will never write — a guaranteed daily false alarm, and a muted alarm group is
+      // how a real gap goes unseen. `boss` is gone entirely; its slot is removed from the sentinel.
+      cardsOwned: { sales: true, ops: true, marketing: false, operations: false },
+      // The human-readable half, kept separate so it can never break the machine-readable half.
+      cardsBuiltOn: { sales: 'render', ops: 'render', marketing: 'box-66', operations: 'box-66', boss: 'removed 2026-08-21' },
       digestSent: digest.sent, cardsSent: cardsState.sent,
     }, null, 1));
   } else if (req.url.startsWith('/gate-status')) {
