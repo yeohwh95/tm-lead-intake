@@ -354,6 +354,15 @@ const LIDD = '206218996011144';
     ['jalan2 dulu \n 0193456789', '60193456789', 'jalan2 = jalan-jalan, across the message join'],
     ['ada2 je 60123456789',       '60123456789', 'already in 60 form'],
     ['nak 2 0137939637',          '60137939637', 'a LONE leading digit is a quantity, not the number'],
+    // Not only Malay. ANY token ending in digits welds: a username, a model name, a nickname.
+    // 253858337034457@lid, 18 Aug 12:47 — the real one — sent his handle and then his number.
+    ['@Khalidiey86 \n 0172861226', '60172861226', 'THE 18 Aug case: a username ending in 86'],
+    ['nama saya Ali99 0177778888', '60177778888', 'a nickname ending in digits'],
+    // 🚨 The opposite failure, and the nastier one: the candidate started mid-token, ate the real
+    // number's opening digits, failed every length rule, and `match` had already consumed them —
+    // so NOTHING was captured and the bot kept asking for a number the customer had just given.
+    ['Z900 0123456789',           '60123456789', 'model + number captured NOTHING before'],
+    ['MT25 0123456789',           '60123456789', 'same shape, different model'],
   ]) ok(`\u{1F6A8} "${input.replace(/\n/g, '\\n')}" -> ${expect}  (${why})`,
         fr._gateParsePhone(input) === expect);
   // …and the formats that must keep working, because the fix trims a leading group.

@@ -497,7 +497,12 @@ function gateParsePhone(text, knownLid){
   // A digit welded to a word is never the start of a phone number — hence the lookbehind. This is
   // NOT TM-specific: every Malay-language bot buffers messages and joins them, so every one of
   // them can weld a reduplication marker onto the next number.
-  const cands = t.match(/(?<![A-Za-z])\+?\d[\d\s\-().]{7,20}\d/g) || [];
+  // ⚠️ The lookbehind bars a LETTER **and a DIGIT** before the candidate, so a match can only begin
+  // at a real token boundary. Letter-only was not enough: `Z900 0123456789` skipped the `9` (letter
+  // before it) but then happily started at the `0` of `900`, swallowed `00 0123456789`, failed
+  // every length rule — and because `match` had already consumed those characters the REAL number
+  // was never even looked at. The customer had given their number and the bot kept asking for it.
+  const cands = t.match(/(?<![A-Za-z0-9])\+?\d[\d\s\-().]{7,20}\d/g) || [];
   for (const raw0 of cands){
     // No real number opens with a LONE digit followed by a separator ("nak 2 0137939637"). The
     // shortest legitimate opening group is two digits (`60 12-345 6789`) or three (`012 345 6789`),

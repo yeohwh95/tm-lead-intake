@@ -23,14 +23,33 @@ join — so the reduplication marker welded itself onto the number in the next m
   *"Hi. Xde org contact sy pon."*
 - `+60172861226` · 18 Aug 12:47 · "Moda Sporter S V2" → stored `860172861226` (an `8` welded on),
   same 422, same silence.
-- 🟠 2 more look malformed and predate log retention, cause unproven: `1924279574737` (2 Aug),
-  `6713117831235` (2 Aug). Every other non-`60` number since 1 Jul is a genuine foreign one
-  (SG 65 ×6, TH 66, BD 880, CN 86, PL 48) — do not "fix" those.
+- ✅ **`1924279574737` and `6713117831235` (both 2 Aug) are NOT this bug — CLOSED.** The parser can
+  never emit 13 digits (every branch caps at 12; verified). Both are the **already-documented @lid
+  incident of the same day**, fixed by `8362bc2` "never fabricate a phone, address the @lid" — the
+  comment above `onMessage` describes these exact rows: *"the Lark row carried a fake 13-digit phone
+  no salesperson could ever call."* No recurrence since. **Do not re-investigate.**
+- Every other non-`60` number since 1 Jul is a genuine foreign one (SG 65 ×6, TH 66, BD 880,
+  CN 86 — a real 13-digit Chinese mobile, so `length > 13` must stay `> 13` — PL 48). Do not "fix" those.
+- 📏 **Blast radius is bounded: exactly 4 permanent send failures in the 7-day log window**, all
+  `HTTP 422 "The provided JID does not exist on WhatsApp"`, two per victim. No others.
 
-**Fix:** `(?<![A-Za-z])` on the leading digit — a digit welded to a word can never open a phone
-number. Plus: a **lone** leading digit followed by a separator is a quantity, not a number
-(`nak 2 0137939637`), so it is trimmed. Two digits are NOT trimmed, because `60 12-345 6789` is real.
-Tests: gate **70 → 81**, suite **942 → 953**.
+**⚠️ IT IS NOT ONLY MALAY — the 18 Aug victim was a USERNAME.** Reconstructed from the gate log:
+`253858337034457@lid` sent `@Khalidiey86` and then `0172861226`. The `86` on the end of his handle
+welded on exactly as `dekat2` did. **Any token ending in digits does this** — a username, a nickname,
+a model name (`MT25 0123456789` parsed as `250123456789`). Malay reduplication is the most COMMON
+trigger, not the only one.
+
+**🚨 And the opposite failure, which is worse because it is silent.** `Z900 0123456789` captured
+**NOTHING** — not a wrong number, no number at all. The candidate started at the `0` of `900`,
+swallowed `00 0123456789`, failed every length rule, and `match` had already consumed those
+characters so the real number was never looked at. The customer gave their number and **the bot kept
+asking for it** — the same complaint, from a different cause.
+
+**Fix:** `(?<![A-Za-z0-9])` on the leading digit, so a candidate can only begin at a real token
+boundary. Letter-only was NOT enough — that is what left `Z900` broken. Plus: a **lone** leading
+digit followed by a separator is a quantity, not a number (`nak 2 0137939637`), so it is trimmed.
+Exactly one, never two, because `60 12-345 6789` is a real way to write it.
+Tests: gate **70 → 85**, suite **942 → 957**.
 
 🚨 **THIS IS NOT TM-SPECIFIC.** Every Malay-language bot buffers inbound messages and joins them
 before parsing. U Fresh, SFF, KoonKen, Metal Age and FSS all take phone numbers out of free text.
