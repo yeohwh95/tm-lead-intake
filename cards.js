@@ -39,177 +39,203 @@ function fit(head, body){
 }
 
 // ---------------------------------------------------------------------------------------------
-// 1. SALES — the client's three agreed questions (contract locked 2026-08-14, `3d8b44b`):
-//    how many leads · how many assigned · WHY not the rest. Then the action list.
+// 1. SALES — ONE FUNNEL, three stages, 100% the target at each (Benjamin, 2026-08-21).
 // ---------------------------------------------------------------------------------------------
+// 🚨 THE GOAL THIS CARD SERVES, in the client's words: "capture all leads → assign all leads to a
+// salesperson → make sure the leads are responded to promptly." Three stages, one direction, and
+// the only interesting thing on any given day is WHERE IT LEAKS.
+//
+// This replaces a card that answered the same question four different ways. The old shape opened
+// with counts and a *Why* list, then named waiting customers under one clock ("Escalated"), while
+// the Boss card separately named a second clock ("no reply within 75 minutes") and a third
+// ("never contacted at all"), and the orphan sweep a fourth. Four labels, four ages, two cards,
+// one underlying event — a customer nobody replied to — and NO single number a reader could act
+// on. Benjamin, 2026-08-21: "I cannot tell immediately what to do."
+//
+// So: three lines, each `have/target` with a percent bar, then ONLY the leak. The three stages
+// come from the client's own contract (locked 08-14 `3d8b44b`: how many leads · how many assigned ·
+// why not the rest), with the response stage added as stage 3.
+//
+// 🚨 THE TWO STAGES COME FROM DIFFERENT SOURCES AND THAT IS DELIBERATE.
+//   Captured + Assigned + the WHY buckets → the decision log (`leadsummary`), the counting path
+//     the client's contract is written against. Unchanged.
+//   Replied → Lark's per-lead SLA fields (`SLA Response Time (min)`, `SLA Within SLA?`), which the
+//     SLA engine has been writing durably since 2026-07. NOTHING NEW IS MEASURED HERE — this is
+//     aggregation of a number that already existed per row and was never put on a card.
+//   When the two sources disagree on the assigned count, BOTH numbers print (standing rule 2).
+//
+// ⚠️ WHAT "REPLIED" HONESTLY MEANS. `SLA Response Time (min)` is stamped when the rep replies to
+// the BOT ("YES"), not when the rep messages the customer. A rep who acknowledges and then does
+// nothing scores fast. The card therefore says "Acknowledged", never "Replied to customer" —
+// naming a weaker fact is the honest move; renaming it would be the lie. Measuring the real reply
+// needs the rep's outbound message to that customer, which this process cannot see (flagged to
+// Benjamin 2026-08-21, not built).
+//
 // d = {
-//   dateLabel,                       // 'Sat 16 Aug'
-//   periodLabel,                     // 'Yesterday' | 'Today so far' (the 14:00 card covers TODAY)
-//   s,                               // leadsummary.summarize() output — counts + WHY buckets.
-//                                    //   Deliberately the SAME counting path as the client's own
-//                                    //   summary card: two sources for "how many leads" is exactly
-//                                    //   the confusion these cards remove.
-//   cross,                           // { lark: {rows, capped, error} } — source #2; when the two
-//                                    //   disagree BOTH numbers print (standing rule)
-//   stuck:[{rep,phone,want}],        // Lark `SLA Status`=Escalated: reassigned once, STILL no reply.
-//                                    //   ~23% of leads measured — this list is the whole point.
-//   stuckUnavailable,                // string when the Lark read failed. 🚨 "couldn't read" must
-//                                    //   never render as an empty list — an unknown is not a zero.
-//   orphans:[{phone,want}],          // ONLY leads the orphan sweep failed 3× on. Usually empty.
+//   dateLabel, periodLabel,          // 'Thu 21 Aug' · 'Yesterday' | 'Today so far'
+//   s,                               // leadsummary.summarize() — total, buckets, sumOk, read_error,
+//                                    //   no_data, partialFrom. THE CONTRACT'S counting path.
+//   cross,                           // { lark: {rows, capped, error} } — source #2
+//   resp: {                          // stage 3, aggregated from Lark SLA fields
+//     measured,                      //   rows that carry an SLA response time at all
+//     onTime,                        //   of those, within `thresholdMin`
+//     thresholdMin,                  //   75 (the reassign mark the client already knows)
+//     byRep: [{rep, leads, avgMin, onTime}],
+//     error,                         //   🚨 unreadable ⇒ the stage prints "could not read", never 0
+//   },
+//   lateBy: [{rep, n}],              // reps with customers past the threshold — NAME + COUNT ONLY.
+//                                    //   Benjamin 08-21 simplified this deliberately: the reps get
+//                                    //   the customer itself by DM, so the group card is a
+//                                    //   scoreboard, not a worklist. ⚠️ Consequence, stated out
+//                                    //   loud: an admin can no longer chase on a rep's behalf from
+//                                    //   this card.
+//   stuckUnavailable,                // string when the Lark read failed — an unknown is not a zero
+//   notLeads,                        // chats that were not sales leads (context, never in the funnel)
 // }
-// The WHY strings come from leadsummary.WHY — the same map the client's summary prints. Never a
-// second copy (two sources of truth for one fact always drift).
 const LS = require('./leadsummary');
+
+const BAR_N = 10;
+function bar(p){ const f = Math.max(0, Math.min(BAR_N, Math.round(p / (100 / BAR_N))));
+  return '▓'.repeat(f) + '░'.repeat(BAR_N - f); }
+const share = (a, b) => (b ? Math.round(100 * a / b) : 0);
+function mins(m){ if (m == null) return '—';
+  return m < 60 ? `${m}m` : `${Math.floor(m / 60)}h ${m % 60}m`; }
+
 function salesCard(d){
-  const o = d.orphans || [], st = d.stuck || [];
   const s = d.s || {};
+  const resp = d.resp || {};
   const period = d.periodLabel || 'Yesterday';
   const head = [`🏍️ *TM SALES* — ${d.dateLabel}`, ''];
   const body = [];
 
-  // 🚨 Rule 3 shape, both halves: an unreadable log says "could not read", and a date before the
-  // log begins says "cannot see" — NEVER a confident zero in either case.
+  // 🚨 Rule 3, both halves: an unreadable log says "could not read", and a date before the log
+  // begins says "cannot see" — NEVER a confident zero in either case. The funnel cannot be drawn
+  // at all without stage 1, so these return early rather than render a 0/0 that looks measured.
   if (s.read_error){
     body.push(`⚠️ Could not read the decision log, so there are no lead counts: ${clip(s.read_error, 80)}`,
       '👉 The leads themselves are unaffected. This is a reporting failure.');
-  } else if (s.no_data){
+    return fit(head, body);
+  }
+  if (s.no_data){
     body.push('ℹ️ We have no lead records for this period, so there are no counts.',
       '👉 Lead logging began later. This is NOT a quiet day.');
+    return fit(head, body);
+  }
+
+  const captured = s.total || 0;
+  const assigned = (s.buckets && s.buckets.assigned) || 0;
+  const pA = share(assigned, captured);
+
+  // ---- THE FUNNEL. Three lines, in the client's own order. ----
+  // Labels are padded to a common width so the numbers line up. WhatsApp renders proportionally so
+  // this is never pixel-perfect, but a ragged left edge reads as three unrelated facts rather than
+  // one funnel — and the funnel is the whole point of the card.
+  const stage = (icon, label) => `${icon} *${label}*${' '.repeat(Math.max(1, 15 - label.length))}`;
+  body.push(`${stage('📥', 'Captured')}${captured}`);
+  body.push(`${stage('👤', 'Assigned')}${assigned}/${captured}   ${pA}%  ${bar(pA)}`);
+  if (resp.error){
+    body.push(`${stage('⚡', 'Acknowledged')}could not read (${clip(resp.error, 40)})`);
+  } else if (!resp.measured){
+    // Nobody has acknowledged anything yet in this window. That is a real 0%, not a failed read —
+    // but say WHY it is empty so it cannot be mistaken for the unreadable case above.
+    body.push(`${stage('⚡', 'Acknowledged')}0/${assigned}   0%  ${bar(0)}`,
+      '   (no salesperson has confirmed a lead in this window yet)');
   } else {
-    const assigned = (s.buckets && s.buckets.assigned) || 0;
-    // Q1 + Q2 in one line.
-    if (assigned >= s.total) body.push(`${period}: ${s.total} lead${s.total === 1 ? '' : 's'} → all ${s.total} assigned ✅`);
-    else body.push(`${period}: ${s.total} lead${s.total === 1 ? '' : 's'} → ${assigned} assigned`);
-    if (s.partialFrom) body.push('⚠️ counts cover only part of this period (lead logging began mid-window)');
-    // 🚨 If the numbers do not add up, SAY SO rather than printing a tidy lie.
-    if (s.sumOk === false) body.push(`⚠️ buckets don't sum to the total (${s.bucketSum} vs ${s.total}), treat these numbers as suspect`);
-    // Q3: WHY the rest were not assigned — the buckets leadsummary already computed.
-    if (assigned < s.total){
-      body.push('', `*Why the other ${s.total - assigned} ${s.total - assigned === 1 ? 'was' : 'were'} not assigned:*`);
-      for (const k of LS.LEAD_BUCKETS.concat(['other']))
-        if (k !== 'assigned' && s.buckets && s.buckets[k]) body.push(`   • ${s.buckets[k]} ${LS.WHY[k] || k}`);
-    }
-    // 🚨 Two sources. When they disagree, BOTH numbers go on the card.
-    const lk = (d.cross || {}).lark;
-    if (lk){
-      if (lk.error) body.push('', `⚠️ couldn't read Lark for the cross-check: ${clip(lk.error, 60)}`);
-      else {
-        const expect = ((s.buckets && s.buckets.assigned) || 0) + ((s.buckets && s.buckets.parked) || 0);
-        if (lk.rows !== expect)
-          body.push('', `⚠️ decision log says ${expect} assigned+parked · Lark shows ${lk.rows} row(s). Both printed because they disagree.`);
-        if (lk.capped) body.push('⚠️ Lark cross-check read only the newest 100 rows — older rows may be uncounted');
-      }
+    const pR = share(resp.onTime, resp.measured);
+    body.push(`${stage('⚡', `Answered ≤${resp.thresholdMin || 75}min`)}${resp.onTime}/${resp.measured}   ${pR}%  ${bar(pR)}`);
+    // 🚨 The response stage is measured on Lark rows, the first two on the decision log. If Lark
+    // has SLA data for fewer rows than the log says were assigned, the denominator is NOT the same
+    // population — say so rather than letting the percentages read as one clean funnel.
+    if (resp.measured < assigned)
+      body.push(`   (${assigned - resp.measured} assigned lead(s) have no response record yet)`);
+  }
+
+  if (s.partialFrom) body.push('⚠️ counts cover only part of this period (lead logging began mid-window)');
+  // 🚨 If the numbers do not add up, SAY SO rather than printing a tidy lie.
+  if (s.sumOk === false) body.push(`⚠️ buckets don't sum to the total (${s.bucketSum} vs ${captured}), treat these numbers as suspect`);
+
+  // ---- LEAK 1: not assigned, and why. The buckets leadsummary already computed. ----
+  if (assigned < captured){
+    const gap = captured - assigned;
+    body.push('', `⚠️ *${gap} not assigned yet — why:*`);
+    for (const k of LS.LEAD_BUCKETS.concat(['other']))
+      if (k !== 'assigned' && s.buckets && s.buckets[k]) body.push(`   ${s.buckets[k]}  ${LS.WHY[k] || k}`);
+  }
+
+  // 🚨 Two sources. When they disagree, BOTH numbers go on the card.
+  const lk = (d.cross || {}).lark;
+  if (lk){
+    if (lk.error) body.push('', `⚠️ couldn't read Lark for the cross-check: ${clip(lk.error, 60)}`);
+    else {
+      const expect = assigned + ((s.buckets && s.buckets.parked) || 0);
+      if (lk.rows !== expect)
+        body.push('', `⚠️ decision log says ${expect} assigned+parked · Lark shows ${lk.rows} row(s). Both printed because they disagree.`);
+      if (lk.capped) body.push('⚠️ Lark cross-check read only the newest 100 rows — older rows may be uncounted');
     }
   }
 
-  // 🚨 THE MAIN EVENT: customers a salesperson has ignored TWICE. Measured at ~23% of leads, so
-  // this list is usually non-empty and is what the client actually acts on.
+  // ---- LEAK 2: assigned but nobody acknowledged in time. NAME + COUNT ONLY (Benjamin 08-21). ----
+  const late = d.lateBy || [];
   if (d.stuckUnavailable){
-    body.push('', `⚠️ Could not read Lark, so the "customers still waiting" list is UNKNOWN, not empty: ${clip(d.stuckUnavailable, 60)}`);
-  } else if (st.length){
-    body.push('', `🚨 *${st.length} CUSTOMER${st.length > 1 ? 'S' : ''} STILL WAITING — nobody replied.*`,
-      '   Reassigned once, still nothing. Please chase these by hand:');
-    for (const x of st){
-      const dg = digits(x.phone);
-      body.push(`   • ${pad(x.rep || '?', 9)} ${dg ? '+' + dg : 'no number'} "${clip(x.want, 38)}"`);
-      if (dg) body.push(`     👉 https://wa.me/${dg}`);
-    }
+    body.push('', `⚠️ Could not read Lark, so the "waited too long" list is UNKNOWN, not empty: ${clip(d.stuckUnavailable, 60)}`);
+  } else if (late.length){
+    const n = late.reduce((t, x) => t + x.n, 0);
+    body.push('', `🔴 *${n} customer${n > 1 ? 's' : ''} waited over ${resp.thresholdMin || 75} min:*`);
+    for (const x of late.slice().sort((a, b) => b.n - a.n))
+      body.push(`   ${pad(x.rep || '?', 9)} ${x.n}`);
   }
 
-  if (o.length){
-    body.push('', `🚨 *${o.length} LEAD${o.length > 1 ? 'S' : ''} WITH NO SALESPERSON*`,
-      '   The bot tried 3 times and could not assign. Please do it by hand.');
-    for (const x of o){
-      const dg = digits(x.phone);
-      body.push(`   • ${dg ? '+' + dg : 'no number'} "${clip(x.want, 46)}"`);
-      if (dg) body.push(`     👉 https://wa.me/${dg}`);
-    }
-  }
-  // 🚨 Say "nothing to do" OUT LOUD — but ONLY when both lists were actually readable. A card that
+  // 🚨 Say "nothing to do" OUT LOUD — but ONLY when every input was actually readable. A card that
   // is silent when all is well is indistinguishable from a card that failed to send, and an
   // all-clear over an unreadable source is the confident-zero lie.
-  if (!o.length && !st.length && !d.stuckUnavailable && !s.read_error && !s.no_data)
-    body.push('', `✅ Everyone got a reply ${period === 'Yesterday' ? 'yesterday' : 'so far today'}.`);
+  if (assigned >= captured && !late.length && !d.stuckUnavailable && !resp.error && captured > 0)
+    body.push('', '✅ *100% at every step. Nothing to chase.*');
+
+  // ---- THE SCOREBOARD: how fast each rep acknowledges. Stage 3's whole point. ----
+  const byRep = (resp.byRep || []).slice().sort((a, b) => a.avgMin - b.avgMin);
+  if (byRep.length){
+    body.push('', `⏱️ *Response speed ${period === 'Yesterday' ? 'yesterday' : 'today'}*`);
+    for (const r of byRep){
+      const p = share(r.onTime, r.leads);
+      const flag = p === 100 ? ' ✅' : (p < 70 ? ' 🔴' : '');
+      body.push(`   ${pad(r.rep, 9)} ${String(r.leads).padStart(2)} leads · avg ${String(mins(r.avgMin)).padStart(6)} · ${String(p).padStart(3)}%${flag}`);
+    }
+    // 🚨 This card exists because ONE event was being counted on four different clocks under four
+    // different names. It now uses two — deliberately, because they answer two different questions —
+    // so it must say so in one line rather than let a reader discover it as a contradiction:
+    // a rep can show a fast average AND appear in the late list above, when a lead was handed to
+    // them after someone else had already sat on it.
+    body.push('   (each salesperson\'s own clock — it restarts when a lead is passed on)');
+  }
+
+  // Context, never part of the funnel — a repeat customer is not a lead we failed to capture.
+  if (d.notLeads) body.push('', `ℹ️ ${d.notLeads} other chats were not sales leads (repeat customers, staff, spam).`);
   return fit(head, body);
 }
 
 // ---------------------------------------------------------------------------------------------
-// 2. MARKETING — where the leads came from
+// 2. MARKETING · 3. OPERATIONS · 4. BOSS — REMOVED FROM THIS FILE, 2026-08-21.
 // ---------------------------------------------------------------------------------------------
-// d = { dateLabel, total, sources: [{label, count}] }
-const SRC_ICON = { 'Tiktok DM': '💬', 'WhatsApp Direct': '📥', 'Tiktok Get Leads': '📋', 'Ads Tiktok': '🎯' };
-const SRC_NAME = { 'Tiktok DM': 'TikTok DM', 'WhatsApp Direct': 'WhatsApp direct',
-  'Tiktok Get Leads': 'TikTok forms', 'Ads Tiktok': 'TikTok ads' };
-function marketingCard(d){
-  const head = [`📣 *TM MARKETING* — ${d.dateLabel}`, ''];
-  if (d.total == null) return fit(head, ['⚠️ Could not read yesterday\'s leads, so there are no counts.']);
-  const src = (d.sources || []).slice().sort((a, b) => b.count - a.count);
-  const body = [`Yesterday: ${d.total} leads`, ''];
-  for (const s of src)
-    body.push(`  ${SRC_ICON[s.label] || '•'} ${dots(SRC_NAME[s.label] || s.label, 18)}${s.count}`);
-  // One derived line, because a share is a decision and a count is not.
-  const tk = src.filter(s => /tiktok/i.test(s.label)).reduce((n, s) => n + s.count, 0);
-  if (d.total > 0 && tk) body.push('', `TikTok is ${Math.round(100 * tk / d.total)}% of all leads.`);
-  return fit(head, body);
-}
-
-// ---------------------------------------------------------------------------------------------
-// 3. OPERATIONS — what is broken in the listing pipeline
-// ---------------------------------------------------------------------------------------------
-// d = { dateLabel, missing:[{title,plate}], attention:[{title,why}], posted, live, draft, waitingOn }
-function operationsCard(d){
-  const head = [`🔧 *TM OPERATIONS* — ${d.dateLabel}`, ''];
-  const body = [];
-  const miss = d.missing || [], att = d.attention || [];
-  if (miss.length){
-    body.push(`❌ *${miss.length} BIKE${miss.length > 1 ? 'S' : ''} POSTED BUT NOT ON THE WEBSITE*`,
-      '   Buyers cannot find these:');
-    for (const m of miss) body.push(`   • ${clip(m.title, 34)}${m.plate ? ' — ' + m.plate : ''}`);
-  }
-  if (att.length){
-    body.push('', `⛔ *${att.length} BIKE${att.length > 1 ? 'S' : ''} CANNOT BE LISTED*`);
-    for (const a of att) body.push(`   • ${clip(a.title, 32)}${a.why ? ' — ' + clip(a.why, 34) : ''}`);
-  }
-  if (d.posted != null)
-    body.push('', `📊 This week: ${d.posted} posted · ${d.live} live${d.draft != null ? ' · ' + d.draft + ' draft' : ''}`);
-  if (!miss.length && !att.length) body.push('', '✅ Nothing broken in the listing pipeline.');
-  if (d.waitingOn) body.push('', `⏳ ${d.waitingOn}`);
-  return fit(head, body);
-}
-
-// ---------------------------------------------------------------------------------------------
-// 4. BOSS — what is costing money, worst first
-// ---------------------------------------------------------------------------------------------
-// d = { dateLabel, total, assigned, breached, breachByRep:[{rep,n}], neverContacted, oldestDays,
-//       neverContactedModels:[..], missingBikes, topSourceLabel, topSourcePct }
-// 🚨 Issues FIRST, counts last. A boss card that opens with a total is a card he stops opening,
-// and then he misses the line that says leads are being lost.
-function bossCard(d){
-  const head = [`🏍️ *TM MOTOWORLD — Day End* (${d.dateLabel})`, ''];
-  const body = [];
-  if (d.breached){
-    const share = d.total ? ` (1 in ${Math.max(2, Math.round(d.total / d.breached))} customers waited)` : '';
-    body.push(`🔴 *${d.breached} of ${d.total} leads got no reply within 75 minutes*${share}`);
-    const by = (d.breachByRep || []).slice().sort((a, b) => b.n - a.n);
-    if (by.length) body.push('   ' + by.map(x => `${x.rep} ${x.n}`).join(' · '));
-  }
-  if (d.neverContacted){
-    body.push('', `🔴 *${d.neverContacted} older leads never contacted at all*`);
-    body.push(`   Oldest ${d.oldestDays} days.` +
-      ((d.neverContactedModels || []).length ? ' ' + d.neverContactedModels.slice(0, 3).join(', ') + '.' : ''));
-  }
-  if (d.missingBikes){
-    body.push('', `🟠 *${d.missingBikes} bikes posted but not live on the website*`,
-      '   Buyers cannot find them.');
-  }
-  if (!body.length) body.push('✅ Nothing to flag today.');
-  if (d.total != null){
-    body.push('', `✅ ${d.total} leads yesterday` +
-      (d.topSourcePct ? ` · ${d.topSourceLabel} brought ${d.topSourcePct}%` : ''));
-  }
-  return fit(head, body);
-}
-
+// BOSS is gone entirely (Benjamin, 2026-08-21: "remove boss report, left only 3 reports — sales,
+// marketing and ops"). Its content was a restatement of the other three in different words and
+// different units, which is how one event — a customer nobody replied to — came to be counted four
+// separate ways. Deleting it is the point, not a simplification of it.
+//
+// MARKETING and OPERATIONS still exist, but they are built on **box-66** in
+// `/opt/apps/tm-daily-report/daily_report.py`, because both need the Mudah group ledger, the Relay
+// DB and `pending_review.json` — files that physically live on that box. This process cannot read
+// them, and a JS copy here could only ever be a second, drifting source of truth for numbers the
+// Python already computes correctly.
+//
+// 🚨 That is not a hypothetical. Fork drift — the same fix landing on one copy and not the other —
+// is the named root cause of the 2026-08-21 bot-fleet review. Two renderers for one card is the
+// same mistake in miniature, so the JS versions are deleted rather than left dark behind an env
+// flag: an unused copy is exactly the copy nobody remembers to update.
+//
+// Where each one now lives:
+//   📣 MARKETING  → daily_report.py, `MKT_CARD=1`,  09:10 MYT → AI Agent Project TM Motoworld group
+//   🔧 OPERATIONS → daily_report.py, `OPS_CARD=1`,  09:10 MYT → Benjamin's QA group
+//
 // ---------------------------------------------------------------------------------------------
 // 5. OPS — Benjamin's card, QA group ONLY. "Everything is in order — or exactly what is broken."
 // ---------------------------------------------------------------------------------------------
@@ -285,4 +311,4 @@ function opsCard(d){
   return fit(head, body);
 }
 
-module.exports = { salesCard, marketingCard, operationsCard, bossCard, opsCard, MAX };
+module.exports = { salesCard, opsCard, MAX };

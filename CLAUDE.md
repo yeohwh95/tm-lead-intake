@@ -2,6 +2,85 @@
 
 WhatsApp lead → AI extract → Lark CRM + notify the assigned salesperson. **LIVE.**
 
+## 📊 THE REPORTS BECAME ONE FUNNEL — and using the rep's clock would have halved the problem — 2026-08-21
+
+Benjamin: *"I cannot understand what it says and cannot tell immediately what to do."* He then gave
+the goal the sales report exists to serve, in his own words: **"capture all leads → assign all leads
+to a salesperson → make sure the leads are responded to promptly. That is the final goal."**
+
+**Root cause of the unreadability, named:** ONE event — *a customer nobody replied to* — was counted
+**four times, on four clocks, under four names, across two cards**:
+
+| Clock | Name it got | Card |
+|---|---|---|
+| 75 minutes | "no reply within 75 minutes" | Boss |
+| reassigned once, still nothing | "STILL WAITING" | Sales |
+| 3 failed auto-assign tries | "NO SALESPERSON" | Sales (dead — `orphans` was `armed:false`) |
+| 11 days | "never contacted at all" | Boss |
+
+No card could open with *"N customers are waiting"*, which is the only line that tells anyone what
+to do. **Four reports → three** (`sales` · `marketing` · `operations`); the BOSS card is DELETED, not
+simplified — it was a restatement of the other three in different words and different units, and
+that restatement is what created two of the four clocks.
+
+### 🚨 THE MEASUREMENT THAT CHANGED THE BUILD: two clocks, and the wrong one is half the truth
+Stage 3 was first built on `SLA Response Time (min)`. Probed against 100 live Lark rows before
+shipping:
+
+| | count |
+|---|---|
+| leads late by the **rep** clock | **14** |
+| leads late by the **customer** clock | **28** |
+
+**Exactly double.** 17 of 63 leads had been reassigned, and `SLA Response Time (min)` **restarts at
+the reassign**. A real row: *Roy answered in 2 minutes* — of a wait the customer had already spent
+**78 minutes** in. True about Roy, false about the customer. Shipping that would have produced a card
+that flatters the team and misses the stated goal.
+
+So each field now answers only its own question, and the card says which is which:
+- **`SLA Customer Wait (min)`** → the funnel's stage 3 + the late list. Time from the **first**
+  assignment, across every reassignment. **This is the goal.**
+- **`SLA Response Time (min)`** → the per-rep scoreboard only. A rep must not wear the silence of
+  the rep before them.
+- Lateness is attributed via **`SLA Reassigned From`** when set — a reassign only fires at T+75, so
+  that rep is by definition the one who let it pass. Blaming the rescuer would invert the scoreboard.
+
+🚨 **Nothing new is measured.** Both fields have been stamped on every row by `sla.js` since 2026-07
+and were simply never read back. `SLA Within SLA?` is IGNORED — it is written against 60 min while
+the engine acts on 75; the threshold now lives in ONE place (`SLA_CARD_THRESHOLD_MIN`, default 75)
+so the card and the engine cannot drift.
+
+⚠️ **What "Answered" honestly means.** The stamp lands when the rep replies **YES to the bot**, not
+when they message the customer. A rep who acknowledges and does nothing scores fast. The card
+therefore never says "replied to the customer". Measuring the real reply needs the rep's outbound
+message, which this process cannot see. **Flagged to Benjamin, not built.**
+
+### The card
+Three stages, `have/target` + a percent bar, then ONLY the leak. Clean day = `✅ 100% at every step.`
+The late block is **name + count only** (Benjamin, 08-21) — ⚠️ *stated consequence:* with the customer
+and the `wa.me` link gone, an admin can no longer chase on a rep's behalf **from this card**; reps
+still get the customer itself by DM.
+
+### Where each report now lives — and why the JS copies were DELETED, not left dark
+`cards.js` exported five renderers; three are gone. `marketingCard` / `operationsCard` were dead code
+behind env flags while **box-66 actually sends those cards** from `daily_report.py`, which is the only
+machine that can read the Mudah group ledger, the Relay DB and `pending_review.json`.
+
+🚨 **Two renderers for one card is fork drift in miniature** — the named root cause of the 08-21
+fleet review — and an unused copy is exactly the copy nobody remembers to update. So:
+
+| Report | Built on | Fires | Goes to |
+|---|---|---|---|
+| 🏍️ SALES | Render (`cards.js`) | 09:15 + 14:00 | AI Agent Project TM Motoworld |
+| 📣 MARKETING | box-66 `daily_report.py` `MKT_CARD=1` | 09:10 | AI Agent Project TM Motoworld |
+| 🔧 OPERATIONS | box-66 `daily_report.py` `OPS_CARD=1` | 09:10 | **Benjamin's QA group** |
+| 📈 BOSS | — | — | **DELETED 2026-08-21** |
+
+`GET /ops` `cardsOwned` now answers *which machine*, not a boolean — it is the check that stopped two
+duplicate cards a day going out.
+
+Tests: cards **81 → 70** (marketing/operations/boss tests left with their renderers), suite **945**.
+
 ## 🚨 MALAY `2` IS A WORD SUFFIX, NOT A DIGIT — the phone parser ate it — 2026-08-21
 ⚠️ **COMMITTED.** Benjamin, confirming the convention: **`ok2` means `okok`.** Malay marks
 reduplication with a trailing `2` — `ok2` = okok, `dekat2` = dekat-dekat, `jalan2` = jalan-jalan,

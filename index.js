@@ -1233,14 +1233,17 @@ const CARDS_ON = process.env.CARDS_ON === '1';
 const CARDS_GROUP_JID = process.env.CARDS_GROUP_JID || '120363409827976250@g.us';   // Benjamin QA group
 const CARDS_SALES_HR  = parseInt(process.env.CARDS_SALES_HR  || '9', 10);   // fires :15–:29 → 09:15
 const CARDS_SALES_HR2 = parseInt(process.env.CARDS_SALES_HR2 || '14', 10);  // 2nd sales card, covers TODAY so far
+// The one place the sales card's "acknowledged in time" mark is defined. 75 = the reassign mark the
+// SLA engine already acts on and the client already knows, NOT the 60 in `SLA Within SLA?`.
+const SLA_CARD_THRESHOLD_MIN = parseInt(process.env.SLA_CARD_THRESHOLD_MIN || '75', 10);
 // 🚨 CARD OWNERSHIP (2026-08-18). Marketing and Boss are built on BOX 66, not here: the Marketing
 // card is the LISTING backlog (group_ledger x Woo x the Mudah relay) and the Boss card needs the
 // same listing figures. Those files live on box 66 and this process genuinely cannot read them.
 // Leaving these on would put TWO marketing cards and TWO boss cards in the group every day.
 // Retired, not deleted (standing rule) — set to 1 only if ownership ever moves back here.
-const CARDS_MARKETING_ON = process.env.CARDS_MARKETING === '1';
-const CARDS_BOSS_ON      = process.env.CARDS_BOSS === '1';
-const CARDS_BOSS_HR   = parseInt(process.env.CARDS_BOSS_HR   || '18', 10);
+// MARKETING lives on box-66 (it needs the Mudah ledger); BOSS was deleted 2026-08-21. Their env
+// flags are gone with them — a dark flag for a card that no longer exists is a trap for the next
+// reader, who will set it and see nothing happen.
 // 🚨 PERSISTENT DISK (2026-08-18), same defect the digest markers had: `cardsSent` was RAM-only,
 // so a redeploy inside the send window double-fired every card. Same derivation as the other
 // /data files — beside FR_STATE_FILE, no new env var needed in prod.
@@ -1328,6 +1331,29 @@ async function gatherCardData(dateStr){
   const bySource = {};
   let assigned = 0;
   const breachByRep = {}; let breached = 0; const stuck = [];
+  // ---- STAGE 3 of the sales funnel (2026-08-21) ----
+  // 🚨 NOTHING NEW IS MEASURED HERE. sla.js has stamped these onto every Lark row since 2026-07
+  // (see its `slaWrite` on ack). They were simply never read back. This aggregates them.
+  //
+  // 🚨 TWO CLOCKS, AND USING THE WRONG ONE HALVES THE PROBLEM. Measured on 100 live rows, 21 Aug:
+  //     late by the REP clock       14
+  //     late by the CUSTOMER clock  28   ← exactly double
+  //   17 of 63 leads had been reassigned, and `SLA Response Time (min)` RESTARTS at the reassign.
+  //   A real row: Roy answered in 2 minutes — of a wait the customer had already spent 78 minutes
+  //   in. Reporting that lead as "2 min" is true about Roy and false about the customer.
+  //
+  //   So each number answers only its own question:
+  //     `SLA Customer Wait (min)`   → THE FUNNEL + the late list. Time from the FIRST assignment,
+  //                                   across every reassignment. This is the client's stated goal:
+  //                                   "make sure the leads are responded to promptly."
+  //     `SLA Response Time (min)`   → THE PER-REP SCOREBOARD. Each rep's own clock. A rep must not
+  //                                   wear the silence of the rep before them.
+  //
+  // ⚠️ `SLA Within SLA?` is written against 60 min, but the client's known mark — and the one the
+  // reassign engine acts on — is 75. The boolean is IGNORED and the threshold re-applied to the raw
+  // minutes, so the card and the engine cannot drift when either is tuned.
+  const respByRep = {}; let respMeasured = 0, respOnTime = 0;
+  const lateByRep = {};
   for (const it of rows){
     const f = it.fields || {};
     const src = slaFieldText(f['Origin']).trim() || '(unknown)';
@@ -1335,6 +1361,37 @@ async function gatherCardData(dateStr){
     const sm = f['Salesman'];
     const repName = Array.isArray(sm) && sm[0] ? (sm[0].name || '') : '';
     if (repName) assigned++;
+    const shortRep = (repName.split(/\s+/)[0] || repName || '?').replace(/^(\w)(\w*)$/, (m, a, b) => a.toUpperCase() + b);
+    // A row counts toward stage 3 only if it carries a real response time. A missing stamp is
+    // "not measured", never a zero — a lead that was never acknowledged must not score 0 minutes
+    // and flatter the average. It is absent from the numerator AND the denominator, and the card
+    // prints how many assigned leads that leaves unaccounted for.
+    const num = (v) => { const t = slaFieldText(v).trim(); if (t === '') return null;
+      const n = Number(t); return Number.isFinite(n) && n >= 0 ? n : null; };
+    const rt = num(f['SLA Response Time (min)']);      // this rep's clock
+    const cw = num(f['SLA Customer Wait (min)']);      // the customer's clock, across reassigns
+
+    // THE FUNNEL + THE LATE LIST — the customer's clock.
+    if (repName && cw != null){
+      respMeasured++;
+      if (cw <= SLA_CARD_THRESHOLD_MIN) respOnTime++;
+      else {
+        // 🚨 Attribute the lateness to whoever OWNED the lead when the clock ran out, not to
+        // whoever eventually answered. A reassign only fires at T+75, so `SLA Reassigned From` is
+        // by definition the rep who let it pass — blaming the rescuer would invert the scoreboard.
+        const from = slaFieldText(f['SLA Reassigned From']).trim();
+        const blame = from ? (from.split(/\s+/)[0] || from).replace(/^(\w)(\w*)$/, (m, a, b) => a.toUpperCase() + b)
+                           : shortRep;
+        lateByRep[blame] = (lateByRep[blame] || 0) + 1;
+      }
+    }
+    // THE PER-REP SCOREBOARD — this rep's own clock. A missing stamp is "not measured", never a
+    // zero: a lead nobody acknowledged must not score 0 minutes and flatter the average.
+    if (repName && rt != null){
+      const r = respByRep[shortRep] || (respByRep[shortRep] = { rep: shortRep, leads: 0, total: 0, onTime: 0 });
+      r.leads++; r.total += rt;
+      if (rt <= SLA_CARD_THRESHOLD_MIN) r.onTime++;
+    }
     const st = slaFieldText(f['SLA Status']).trim();
     // "Breached" = the desk did not respond in time. Reassigned rows are EXCLUDED: the system
     // already rescued those, and by the reporting contract a rescue never reaches a card.
@@ -1350,6 +1407,11 @@ async function gatherCardData(dateStr){
   }
   return { dateStr, capped, total: rows.length, assigned,
     sources: Object.entries(bySource).map(([label, count]) => ({ label, count })),
+    // Stage 3, ready for the card. `avgMin` is rounded once, here, so the card never re-derives it.
+    resp: { measured: respMeasured, onTime: respOnTime, thresholdMin: SLA_CARD_THRESHOLD_MIN,
+      byRep: Object.values(respByRep).map(r => ({ rep: r.rep, leads: r.leads,
+        avgMin: Math.round(r.total / r.leads), onTime: r.onTime })) },
+    lateBy: Object.entries(lateByRep).map(([rep, n]) => ({ rep, n })),
     breached, breachByRep: Object.entries(breachByRep).map(([rep, n]) => ({ rep, n })),
     // No cap here (2026-08-18): the card's own fit() trims to one WhatsApp message AND SAYS SO,
     // whereas a silent slice made "12 waiting" out of a worse day — a silent cap by another name.
@@ -1452,8 +1514,7 @@ async function cardsTick(){
   if (isSunday) return;                               // TM operates Mon-Sat, same as the other reports
   const morning = p.h === CARDS_SALES_HR && p.m >= 15 && p.m < 30;   // 09:15
   const midday  = p.h === CARDS_SALES_HR2 && p.m < 15;               // 14:00 — covers TODAY so far
-  const evening = p.h === CARDS_BOSS_HR && p.m < 15;                 // 18:00 boss, unchanged
-  if (!morning && !midday && !evening) return;
+  if (!morning && !midday) return;
   // Slots are claimed per-card inside cardsDeliver, on a CONFIRMED outcome only, and the markers
   // live on the persistent disk — a redeploy inside the window no longer double-fires, and a
   // transient HTTP failure no longer burns the slot with nothing delivered.
@@ -1476,20 +1537,14 @@ async function cardsTick(){
       let sum;
       try { sum = await buildLeadSummary(wdate, true); }
       catch (e){ sum = { summary: { read_error: String(e.message || e).slice(0, 80) }, cross: {} }; }
-      const orph = orphanNeedsHuman();
-      // The orphan state holds record ids, not customer detail, so the card names the count and
-      // points at Lark rather than inventing a phone number it does not have.
       const text = cards.salesCard({ dateLabel: label, periodLabel: 'Yesterday',
-        s: sum.summary, cross: sum.cross,
-        stuck: d ? d.stuck : [], stuckUnavailable: d ? null : (larkErr || 'Lark read failed'),
-        orphans: orph.map(o => ({ phone: '', want: 'Lark row ' + o.recordId })) });
+        s: sum.summary, cross: sum.cross, notLeads: sum.summary && sum.summary.notLeads,
+        // Stage 3 and the late list both come from Lark. If that read failed, they are UNKNOWN —
+        // `resp.error` and `stuckUnavailable` make the card say so instead of printing 0%.
+        resp: d ? d.resp : { error: larkErr || 'Lark read failed', thresholdMin: SLA_CARD_THRESHOLD_MIN },
+        lateBy: d ? d.lateBy : [],
+        stuckUnavailable: d ? null : (larkErr || 'Lark read failed') });
       await cardsDeliver('sales', `${p.date}:am:sales`, text);
-    }
-    // MARKETING — unchanged shape; rides the same working-day + confirmed-delivery mechanics.
-    if (CARDS_MARKETING_ON && !cardsState.sent[`${p.date}:am:marketing`]){
-      const base = d || { total: null, sources: [] };
-      await cardsDeliver('marketing', `${p.date}:am:marketing`,
-        cards.marketingCard({ dateLabel: label, total: base.total, sources: base.sources }));
     }
     // OPS — Benjamin's health card, QA group only.
     if (!cardsState.sent[`${p.date}:am:ops`]){
@@ -1507,33 +1562,17 @@ async function cardsTick(){
     let sum;
     try { sum = await buildLeadSummary(p.date, true); }
     catch (e){ sum = { summary: { read_error: String(e.message || e).slice(0, 80) }, cross: {} }; }
-    let stuck = [], stuckUnavailable = null;
-    try { stuck = (await gatherCardData(p.date)).stuck; }
+    let cd = null, stuckUnavailable = null;
+    try { cd = await gatherCardData(p.date); }
     catch (e){ stuckUnavailable = String(e.message || e).slice(0, 80); }
-    const orph = orphanNeedsHuman();
     const text = cards.salesCard({ dateLabel: `${niceDate(p.date)} (up to ${CARDS_SALES_HR2}:00)`,
-      periodLabel: 'Today so far', s: sum.summary, cross: sum.cross, stuck, stuckUnavailable,
-      orphans: orph.map(o => ({ phone: '', want: 'Lark row ' + o.recordId })) });
+      periodLabel: 'Today so far', s: sum.summary, cross: sum.cross,
+      notLeads: sum.summary && sum.summary.notLeads,
+      resp: cd ? cd.resp : { error: stuckUnavailable, thresholdMin: SLA_CARD_THRESHOLD_MIN },
+      lateBy: cd ? cd.lateBy : [], stuckUnavailable });
     await cardsDeliver('sales', `${p.date}:pm2:sales`, text);
   }
 
-  if (evening && CARDS_BOSS_ON && !cardsState.sent[`${p.date}:pm:boss`]){
-    // Boss card: same data logic as before, now delivery-confirmed like the others.
-    let d = null;
-    try { d = await gatherCardData(p.date); }
-    catch (e){ log('cards: Lark read failed', String(e.message || e)); }
-    const base = d || { total: null, assigned: null, sources: [], breached: 0, breachByRep: [], stuck: [] };
-    let backlog = [];
-    try { backlog = await gatherBacklog(); } catch (e){ log('cards: backlog read failed', String(e.message || e)); }
-    const tk = base.sources.filter(s => /tiktok/i.test(s.label)).reduce((n, s) => n + s.count, 0);
-    await cardsDeliver('boss', `${p.date}:pm:boss`,
-      cards.bossCard({ dateLabel: niceDate(p.date), total: base.total, assigned: base.assigned,
-        breached: base.breached, breachByRep: base.breachByRep,
-        neverContacted: backlog.length, oldestDays: backlog.length ? backlog[0].days : 0,
-        neverContactedModels: backlog.slice(0, 3).map(b => String(b.want || '').slice(0, 24)),
-        missingBikes: 0,
-        topSourceLabel: 'TikTok', topSourcePct: base.total && tk ? Math.round(100 * tk / base.total) : 0 }));
-  }
 }
 
 // ---- Rehydrate-from-Lark on boot (2026-07-24, Benjamin approved): Render deploys wipe the
@@ -1788,7 +1827,7 @@ setInterval(() => { firstresponse.gateSweep().catch(e => log('FR gate sweep err'
   // silently kill them — the "9 unregistered reports" failure class again.
   if (CARDS_ON){
     setInterval(() => { cardsTick().catch(e => log('cards tick err', String(e.message||e))); }, 5 * 60 * 1000);
-    log(`📋 Cards ON — sales+marketing+ops ${CARDS_SALES_HR}:15, sales again ${CARDS_SALES_HR2}:00, boss ${CARDS_BOSS_HR}:00 → ${CARDS_GROUP_JID}`);
+    log(`📋 Cards ON — sales+ops ${CARDS_SALES_HR}:15, sales again ${CARDS_SALES_HR2}:00 → ${CARDS_GROUP_JID} (marketing+operations run on box-66)`);
   } else log('📋 Cards OFF (set CARDS_ON=1 to arm them)');
   if (SLA_ON){   // these belong to the SLA engine — keep them gated exactly as before the FR wiring
     // SLA SWEEP — enrol every new Lark lead (any source) into SLA. OFF unless SLA_SWEEP=1 + SLA_SWEEP_FROM set.
@@ -2236,7 +2275,9 @@ http.createServer((req, res) => {
         alarmBusinessHours: OPS_QUIET_ALARM_H,
         file: st.file, fileError: st.fileError, writeError: st.writeError },
       legacyReports: LEGACY_REPORTS_ON, cardsOn: CARDS_ON,
-      cardsOwned: { sales: true, ops: true, marketing: CARDS_MARKETING_ON, boss: CARDS_BOSS_ON },
+      // Kept so /ops still answers "who publishes which card" — the question that stopped two
+      // duplicate cards a day going out. marketing/operations now answer "box-66", not a boolean.
+      cardsOwned: { sales: 'render', ops: 'render', marketing: 'box-66', operations: 'box-66', boss: 'removed 2026-08-21' },
       digestSent: digest.sent, cardsSent: cardsState.sent,
     }, null, 1));
   } else if (req.url.startsWith('/gate-status')) {
