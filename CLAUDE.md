@@ -2,6 +2,44 @@
 
 WhatsApp lead → AI extract → Lark CRM + notify the assigned salesperson. **LIVE.**
 
+## 🚨 MALAY `2` IS A WORD SUFFIX, NOT A DIGIT — the phone parser ate it — 2026-08-21
+⚠️ **COMMITTED.** Benjamin, confirming the convention: **`ok2` means `okok`.** Malay marks
+reduplication with a trailing `2` — `ok2` = okok, `dekat2` = dekat-dekat, `jalan2` = jalan-jalan,
+`ada2` = ada-ada. It is orthography, not arithmetic.
+
+`gateParsePhone` matched `/\+?\d[\d\s\-().]{7,20}\d/`, which could **start a candidate at any
+digit**. The debounce buffer joins a customer's messages with ` \n `, and `[\d\s...]` spans that
+join — so the reduplication marker welded itself onto the number in the next message:
+
+| Customer typed | Stored | Dialable? |
+|---|---|---|
+| `…tgk dekat2` ⏎ `0137939637` | `20137939637` | ❌ does not exist |
+| `ok2` `0126064797` | `20126064797` | ❌ |
+| `0137939637` | `60137939637` | ✅ |
+
+**Confirmed damage, 2 leads (both raised as SEV1 on the Ops card and both ignored):**
+- `+60137939637` · 20 Aug 10:06 · "Nk tanya moda sportster s v2 bila masuk kedai?" → stored
+  `20137939637`, DM to Adib **HTTP 422, given up after 1 attempt**. He chased us **32h later**:
+  *"Hi. Xde org contact sy pon."*
+- `+60172861226` · 18 Aug 12:47 · "Moda Sporter S V2" → stored `860172861226` (an `8` welded on),
+  same 422, same silence.
+- 🟠 2 more look malformed and predate log retention, cause unproven: `1924279574737` (2 Aug),
+  `6713117831235` (2 Aug). Every other non-`60` number since 1 Jul is a genuine foreign one
+  (SG 65 ×6, TH 66, BD 880, CN 86, PL 48) — do not "fix" those.
+
+**Fix:** `(?<![A-Za-z])` on the leading digit — a digit welded to a word can never open a phone
+number. Plus: a **lone** leading digit followed by a separator is a quantity, not a number
+(`nak 2 0137939637`), so it is trimmed. Two digits are NOT trimmed, because `60 12-345 6789` is real.
+Tests: gate **70 → 81**, suite **942 → 953**.
+
+🚨 **THIS IS NOT TM-SPECIFIC.** Every Malay-language bot buffers inbound messages and joins them
+before parsing. U Fresh, SFF, KoonKen, Metal Age and FSS all take phone numbers out of free text.
+Same class of bug, same one-line lookbehind. **Not yet checked on those bots.**
+
+⚠️ **A permanent send failure still only produces an Ops line.** Both victims were reported as SEV1
+and neither was recovered — the customer chased us instead. A 422 is not transient; retrying cannot
+help. The lead needs to reach a human, not a health card. Flagged, not built.
+
 ## 🐛 "AUTO BOT KEEP TANYA SOALAN SAMA" — the qualify flow could not hear the answer — 2026-08-21
 ⚠️ **COMMITTED, NOT DEPLOYED.** Client reported it twice in the project group (19 Aug 09:54, 21 Aug
 09:36). Root cause, measured on live traffic, not inferred:

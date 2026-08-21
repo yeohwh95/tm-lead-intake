@@ -488,8 +488,21 @@ const GATE_MAX_ASKS = 2;
 // a privacy customer. Both failures happened in the same week (2026-08-02).
 function gateParsePhone(text, knownLid){
   const t = String(text || '');
-  const cands = t.match(/\+?\d[\d\s\-().]{7,20}\d/g) || [];
-  for (const raw of cands){
+  // 🚨 MALAY REDUPLICATION: a trailing `2` is a SUFFIX, not a digit. `ok2` = okok, `dekat2` =
+  // dekat-dekat, `jalan2` = jalan-jalan, `ada2` = ada-ada. The old pattern could START a candidate
+  // at ANY digit, so the reduplication marker welded itself onto the number that followed it:
+  //   "V1 ada dekat kedai? Nk dtg tgk dekat2 \n 0137939637"  ->  20137939637
+  // A number that does not exist. The rep DM failed HTTP 422, was given up after one attempt, and
+  // the customer chased us 32h later: "Hi. Xde org contact sy pon" (166013404463117@lid, 20 Aug).
+  // A digit welded to a word is never the start of a phone number — hence the lookbehind. This is
+  // NOT TM-specific: every Malay-language bot buffers messages and joins them, so every one of
+  // them can weld a reduplication marker onto the next number.
+  const cands = t.match(/(?<![A-Za-z])\+?\d[\d\s\-().]{7,20}\d/g) || [];
+  for (const raw0 of cands){
+    // No real number opens with a LONE digit followed by a separator ("nak 2 0137939637"). The
+    // shortest legitimate opening group is two digits (`60 12-345 6789`) or three (`012 345 6789`),
+    // so a single digit standing by itself is somebody's quantity, not part of the number.
+    const raw = raw0.replace(/^\+?\d(?=[\s\-().]+\d)/, '');
     const d = raw.replace(/\D/g, '');
     if (!d) continue;
     if (knownLid && (d === knownLid || knownLid.includes(d) || d.includes(knownLid))) continue;

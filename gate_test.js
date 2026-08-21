@@ -341,6 +341,29 @@ const LIDD = '206218996011144';
   ok('a timed-out hold resolves to assigned with no phone (never stuck in gate_held)',
      to.length === 2 && to[1].outcome === 'assigned' && to[1].has_phone === false);
 
+  // ── 🚨 MALAY REDUPLICATION vs the phone parser (2026-08-21) ────────────────────────────────
+  // `2` is a word SUFFIX in Malay, not a digit: ok2 = okok, dekat2 = dekat-dekat, jalan2 =
+  // jalan-jalan. The parser could start a candidate at any digit, so the marker welded itself to
+  // the number that followed and produced a number that does not exist. Real loss, not theory:
+  // 166013404463117@lid gave 0137939637 on 20 Aug, it was stored as 20137939637, the rep DM failed
+  // HTTP 422, and he chased us 32h later — "Hi. Xde org contact sy pon".
+  console.log('\n11b. Malay reduplication must not be eaten as a digit');
+  for (const [input, expect, why] of [
+    ['V1 ada dekat kedai? Nk dtg tgk dekat2 \n 0137939637', '60137939637', 'THE live case, verbatim'],
+    ['ok2 0126064797',            '60126064797', 'ok2 = okok'],
+    ['jalan2 dulu \n 0193456789', '60193456789', 'jalan2 = jalan-jalan, across the message join'],
+    ['ada2 je 60123456789',       '60123456789', 'already in 60 form'],
+    ['nak 2 0137939637',          '60137939637', 'a LONE leading digit is a quantity, not the number'],
+  ]) ok(`\u{1F6A8} "${input.replace(/\n/g, '\\n')}" -> ${expect}  (${why})`,
+        fr._gateParsePhone(input) === expect);
+  // …and the formats that must keep working, because the fix trims a leading group.
+  for (const [input, expect] of [
+    ['0137939637', '60137939637'], ['012-345 6789', '60123456789'],
+    ['+60 12-345 6789', '60123456789'], ['no saya 011-1234 5678 ya', '601112345678'],
+    ['6586579369', '6586579369'],
+  ]) ok(`   still parses ${input} -> ${expect}`, fr._gateParsePhone(input) === expect);
+  ok('a bare quantity is still not a phone number', fr._gateParsePhone('saya nak 2 unit ya') === '');
+
   // ⚠️ SUITE-WIDE DASH REGRESSION (2026-08-14). This file drives gateAsk / gateWhy /
   // gateUsername / gateGot / gateGotUser through REAL flows in both the ask and release paths —
   // exactly the copy the hand-written sweep inventory had missed two lines of.
