@@ -150,7 +150,10 @@ const initWith = (o) => fr.init({ ...BASE, ...(o || {}) });
   ok(`🚨 at most 3 ask-type messages in the whole episode (got ${asks})`, asks <= 3);
   ok('and the lead is still not lost', fr.gateStatus().length === 1 || larkRows.length >= 1);
 
-  // ── 7. A vague answer gets ONE re-ask, then quiet — queue untouched ────────────────────────
+  // ── 7. A vague answer is NOT re-asked — the lead just drains ───────────────────────────────
+  // 🚨 CHANGED 2026-08-21. This used to assert ONE re-ask, and that re-ask was a byte-identical
+  // repeat of the first question. That is precisely what the client reported twice ("auto bot keep
+  // tanya soalan sama"). Asking again buys nothing — the row is already in Lark and already queued.
   console.log('\n7. Vague answer');
   reset();
   fr.onMessage({ jid: 'q5@s.whatsapp.net', phone: '60111000005', kind: 'text', text: 'aveta nova ada?' });
@@ -159,14 +162,54 @@ const initWith = (o) => fr.init({ ...BASE, ...(o || {}) });
   sent = [];
   fr.onMessage({ jid: 'q5@s.whatsapp.net', phone: '60111000005', kind: 'text', text: 'ok' });
   await wait(80);
-  ok('a vague reply gets ONE re-ask', sent.length === 1 && /Nak cash atau loan ya bos/.test(texts()));
-  ok('🚨 the re-ask remembers the model was already named (short form, not the full ask)',
-     !/minat model yang mana/.test(texts()));
+  ok('🚨 a vague reply is NEVER answered with the same question again', sent.length === 0);
   sent = [];
   fr.onMessage({ jid: 'q5@s.whatsapp.net', phone: '60111000005', kind: 'text', text: 'hmm' });
   await wait(80);
-  ok('🚨 then the bot goes quiet rather than nagging', sent.length === 0);
+  ok('🚨 and it stays quiet rather than nagging', sent.length === 0);
   ok('🚨 and the queue entry is UNTOUCHED — they still get a rep', deferred.length === 1);
+
+  // ── 7b. THE REGRESSION THIS RELEASE EXISTS FOR: "Cash" is an ANSWER, not silence ───────────
+  // Live 21 Aug 07:46 (+60133664090): "Morning.. mt25 hitam 2nd" → bot asks "Nak cash atau loan?"
+  // → customer says "Cash.." → bot asked the IDENTICAL question again → customer said "Cash" →
+  // silence, and a human had to step in at 09:45. classify() has a `loan` rule and no `cash` rule,
+  // so the reply scored as `greeting` = said nothing.
+  console.log('\n7b. The answers that used to read as silence');
+  for (const [answer, why] of [['Cash..', 'cash with punctuation'], ['Cash', 'bare cash'],
+                               ['saya nak cash saja boss', 'cash in a sentence'],
+                               ['Trk502', 'a model RE_BIKE has never heard of'],
+                               ['X250gp', 'a Lambretta model code'],
+                               ['703F', 'a bare digit model code']]){
+    reset();
+    const J = `q7b${answer.replace(/[^a-z0-9]/gi, '')}@s.whatsapp.net`;
+    fr.onMessage({ jid: J, phone: '60111000007', kind: 'text', text: 'aveta nova ada?' });
+    await wait(80);
+    sent = [];
+    fr.onMessage({ jid: J, phone: '60111000007', kind: 'text', text: answer });
+    await wait(80);
+    ok(`🚨 "${answer}" (${why}) is treated as a real answer, never re-asked`,
+       !/minat model yang mana|Nak cash atau loan ya bos/.test(texts()));
+    ok(`   …and "${answer}" is carried onto the lead for the rep`,
+       JSON.stringify(patchedWant).includes(answer));
+  }
+
+  // ── 7c. The stock line ALREADY asks cash-or-loan — never ask it twice in one bubble ───────
+  // Live 20 Aug 22:08 (+58420178767892@lid), one message, verbatim:
+  //   "…Salesman kami akan confirm dengan tuan ya. Bos nak cash atau loan?
+  //    Nak cash atau loan ya bos? 😊 Saya pass semua detail…"
+  // A NEW-unit stock line ends with the same question the qualifying ask then appends.
+  console.log('\n7c. The cash-or-loan question, asked twice in one bubble');
+  initWith({ wooCheckStock: async () => ({ matches: [{ isNew: true, name: 'NEW MODA MOCA 110', mileage: 0 }], booking: [] }) });
+  reset();
+  fr.onMessage({ jid: 'q7c@s.whatsapp.net', phone: '60111000008', kind: 'text',
+                 text: 'saya nak tanya ada jual motor moda moca tak?' });
+  await wait(80);
+  ok('still exactly ONE message back', sent.length === 1);
+  const payAsks = (texts().match(/cash atau loan/gi) || []).length;
+  ok(`🚨 the cash-or-loan question appears exactly ONCE (got ${payAsks})`, payAsks === 1);
+  ok('   …and the stock line itself is still there', /Untuk unit baru/.test(texts()));
+  ok('   …and the lead is still parked on message 1', larkRows.length === 1 && deferred.length === 1);
+  initWith();
 
   // ── 8. Both settings of the still-open Saturday question, end to end ──────────────────────
   console.log('\n8. The unresolved Saturday question is env-only, end to end');

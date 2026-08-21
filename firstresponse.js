@@ -17,7 +17,13 @@ const PENDING_MODEL_MS = 72 * 3600 * 1000;
 // Kill switch. OFF restores the pre-qualification flow EXCEPT the closed-hours sentence, which the
 // client banned outright — the fallback is the plain handoff line plus the computed closing day.
 const QUALIFY_ON = () => process.env.FR_QUALIFY !== '0';
-const QUALIFY_MAX_ASKS = 2;
+// 1, not 2 (2026-08-21). The second ask was a BYTE-IDENTICAL repeat of the first, which is exactly
+// what the client reported twice ("auto bot keep tanya soalan sama"). With qualifyVague now
+// recognising real answers, what remains at ask #2 is a genuine non-answer ("ok", "."), and the
+// right move there is to stop asking: the lead is already in Lark and already queued, so the rep
+// still gets it at the next window with whatever we have. A repeated question buys nothing and
+// costs the conversation — three of the six repeat victims stopped replying.
+const QUALIFY_MAX_ASKS = 1;
 // Env-configurable so it can live on a Render disk. Without one this file is wiped on every
 // deploy — which is why rehydrateGreeted() exists, and why a phone-gate hold would otherwise
 // be lost mid-flight (the customer would then never be assigned to anyone).
@@ -81,6 +87,22 @@ const RE_BIKE = /vstrom|v-?strom|tracer|\bz\s?\d{3}|\bmt-?\s?\d{2}\b|cbr|ninja|\
 // lookahead drops the adverbial uses. A false positive here is cheap (the customer still gets
 // assigned, just via the qualify line); a false miss re-creates the RM 20,800 quote we just killed.
 const RE_WANTS_NEW = /\bbrand[\s-]*new\b|\bnew\s+(?:unit|bike|motor|stock|one)\b|\bbaru\b(?!\s+(?:nak|nk|je|sahaja|saja|beli|dapat|dpt|tanya|tny|lepas|balik|masuk|sampai))/i;
+// ---------- answering OUR question (2026-08-21) ----------
+// 🚨 The bot asks "Nak cash atau loan?" and then scored the reply with the generic VAGUE() test,
+// which runs classify(). classify() has a `loan` rule and NO `cash` rule, so "Cash" / "Cash.." /
+// "saya nak cash" all resolved to `greeting` = "said nothing", and the IDENTICAL question fired
+// again. Measured on live traffic 18–21 Aug: 6 of the 36 qualified customers were asked the same
+// thing twice; three stopped replying, and Harith reported it twice in the client group.
+// This is the ONE thing the qualify ask is for, so it gets its own explicit rule — never inferred
+// from a category classifier that was written for a different question.
+const RE_PAYMODE = /\b(cash|tunai|loan|lon|ansuran|instal?lment|epp|kredit|credit\s?card|kad\s+kredit|aeon|chailease|jcl|parkson|bsnc|full\s+payment|bayar\s+penuh|depo|deposit|downpayment|dp)\b/i;
+// A model name the RE_BIKE list has never heard of still LOOKS like a model: letters glued to
+// digits (trk502, x250gp, zx1000r, r15) or a bare digit-code (703f, 552). RE_BIKE is a catalogue
+// of models TM sells today and will always lag the ones customers ask about — treating everything
+// missing from it as "the customer said nothing" is what re-asked "which model?" to a customer who
+// had just typed TRK502. Deliberately NOT added to RE_BIKE: routing must stay conservative, only
+// the did-they-answer-us test gets the benefit of the doubt.
+const RE_MODELISH = /\b(?=[a-z0-9-]*[a-z])(?=[a-z0-9-]*\d)[a-z0-9-]{3,10}\b/i;
 const RE_VENDOR_AUTO = /thank you for contacting|welcome to .* (service|customer)|terima kasih kerana menghubungi|saya akan reply|confirmation code|verification code/i;
 // A price / monthly-instalment question asked INSIDE a product enquiry. Deliberately NOT a category:
 // it only flavours the closing sentence of the stock line, because the salesperson owns price
@@ -128,13 +150,24 @@ const CS_PRICE_EN = `For the price & monthly plan I'm customer service only, I d
 // only the thing we still genuinely need.
 //   modelKnown = false → the full ask (unchanged, byte for byte)
 //   modelKnown = true  → cash-or-loan only
-const qualifyAsk = (lang, modelKnown) => lang === 'en'
+//   payAsked   = the stock line ALREADY ended with "Bos nak cash atau loan?" — appending the ask
+//                below then put the same question in the same bubble twice (live, 20 Aug 22:08:
+//                "…Bos nak cash atau loan? | Nak cash atau loan ya bos?"). Detected from the text
+//                we are about to send, not from a flag, so it cannot drift from the stock copy.
+// modelKnown && payAsked ⇒ nothing left to ask: the ask is empty and the stock line stands alone.
+const qualifyAsk = (lang, modelKnown, payAsked) => lang === 'en'
   ? (modelKnown
-      ? `Cash or loan ya? 😊 I'll pass all the details to our salesman so he can help you straight away.`
-      : `Can I get a bit more detail, which model are you interested in? Cash or loan? 😊 I'll pass all the details to our salesman so he can help you straight away.`)
+      ? (payAsked ? '' : `Cash or loan ya? 😊 I'll pass all the details to our salesman so he can help you straight away.`)
+      : (payAsked
+          ? `Can I get a bit more detail, which model are you interested in? 😊 I'll pass all the details to our salesman so he can help you straight away.`
+          : `Can I get a bit more detail, which model are you interested in? Cash or loan? 😊 I'll pass all the details to our salesman so he can help you straight away.`))
   : (modelKnown
-      ? `Nak cash atau loan ya bos? 😊 Saya pass semua detail kat salesman supaya dia terus boleh bantu tuan.`
-      : `Boleh saya tahu sikit, tuan minat model yang mana ya? Nak cash atau loan? 😊 Saya pass semua detail kat salesman supaya dia terus boleh bantu tuan.`);
+      ? (payAsked ? '' : `Nak cash atau loan ya bos? 😊 Saya pass semua detail kat salesman supaya dia terus boleh bantu tuan.`)
+      : (payAsked
+          ? `Boleh saya tahu sikit, tuan minat model yang mana ya? 😊 Saya pass semua detail kat salesman supaya dia terus boleh bantu tuan.`
+          : `Boleh saya tahu sikit, tuan minat model yang mana ya? Nak cash atau loan? 😊 Saya pass semua detail kat salesman supaya dia terus boleh bantu tuan.`));
+// Does a line we are about to send already put the cash-or-loan question to the customer?
+const RE_ASKS_PAY = /cash\s+atau\s+loan|cash\s+or\s+loan/i;
 // 🚨 THE DAY IS COMPUTED (D.nextWindowLabel), NEVER HARDCODED. Writing "Isnin" into this string is
 // exactly the 2026-07-30 hours-drift incident: a customer-facing fact that also exists as config
 // will drift from it. `label` comes from the real FR_DIST_* window.
@@ -682,6 +715,14 @@ async function gateSweep(){
 
 const sendTarget = (jid, phone) => (jid && jid.includes('@lid') && phone) ? (phone + '@s.whatsapp.net') : jid;
 const VAGUE = t => !t || t.trim().length < 4 || classify(t, false).cat === 'greeting';
+// ⚠️ VAGUE() answers "is this a lead we can route?" — a DIFFERENT question from "did they answer
+// the thing we just asked?". Using it for the second is the 2026-08-21 defect: it has no `cash`
+// rule and no model outside RE_BIKE, so "Cash" and "Trk502" both read as silence and the identical
+// question went out again. Inside the qualify flow the customer is replying TO US, so a payment
+// mode, a model-shaped token, or a photo all count as a real answer.
+const qualifyVague = (t, hasImage) =>
+  !hasImage && !RE_PAYMODE.test(String(t || '')) && !RE_BIKE.test(String(t || ''))
+  && !RE_MODELISH.test(String(t || '')) && VAGUE(t);
 async function flush(jid){
   const b = buffers[jid]; delete buffers[jid];
   if (!b) return;
@@ -709,12 +750,15 @@ async function flush(jid){
     if (q.phase === 'detail'){
       // 🚨 The lead is already in Lark and already queued for the drain. NOTHING here may create a
       // second row or a second queue entry — the answer only ENRICHES what exists.
-      if (vague && (q.asks || 1) < QUALIFY_MAX_ASKS){
+      // The customer is answering OUR question here, so the reply is scored by qualifyVague, not
+      // by the routing-grade VAGUE. See the comment on qualifyVague.
+      const qVague = qualifyVague(text, b.hasImage);
+      if (qVague && (q.asks || 1) < QUALIFY_MAX_ASKS){
         q.asks = (q.asks || 1) + 1; q.ts = now; state.qualify[jid] = q; persist();
-        await D.waSend(sendTarget(jid, b.phone), qualifyAsk(q.lang || lang, !!q.modelKnown));
+        await D.waSend(sendTarget(jid, b.phone), qualifyAsk(q.lang || lang, !!q.modelKnown, false));
         return;
       }
-      if (vague){ delete state.qualify[jid]; persist(); return; }   // asked twice, go quiet. Queue untouched.
+      if (qVague){ delete state.qualify[jid]; persist(); return; }   // asked twice, go quiet. Queue untouched.
       const qualified = `${q.want || ''} | qualified: ${text}`.slice(0, 200);
       try { if (D.larkPatchWant && q.recordId) await D.larkPatchWant(q.recordId, qualified); }
       catch(e){ D.log('FR lark patch-want err:', String(e.message||e).slice(0,60)); }
@@ -790,7 +834,7 @@ async function flush(jid){
     frLogEvent('awaiting_model', jid, { has_phone: !!b.phone, cat: 'greeting', phone: b.phone || '',
       want: String(text).slice(0, 120), recordId: null });
     // `false` by definition: a bare "Hi" or an ad click has named no model, so the full ask stands.
-    await D.waSend(sendTarget(jid, b.phone), offWindow ? qualifyAsk(lang, false) : tpl('greeting', lang));
+    await D.waSend(sendTarget(jid, b.phone), offWindow ? qualifyAsk(lang, false, false) : tpl('greeting', lang));
     return;
   }
   persist();
@@ -830,7 +874,9 @@ async function flush(jid){
     persist();
     // ONE message: the stock answer (if any) plus the qualifying ask. No closing line yet, no
     // salesman card, and NO phone ask — that comes last, and only after they answer.
-    await D.waSend(sendTarget(jid, b.phone), (stockLine ? stockLine + '\n\n' : '') + qualifyAsk(lang, modelKnown));
+    const ask = qualifyAsk(lang, modelKnown, RE_ASKS_PAY.test(stockLine || ''));
+    await D.waSend(sendTarget(jid, b.phone),
+      (stockLine ? stockLine + (ask ? '\n\n' : '') : '') + ask);
     return;
   }
 

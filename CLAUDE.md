@@ -2,6 +2,60 @@
 
 WhatsApp lead → AI extract → Lark CRM + notify the assigned salesperson. **LIVE.**
 
+## 🐛 "AUTO BOT KEEP TANYA SOALAN SAMA" — the qualify flow could not hear the answer — 2026-08-21
+⚠️ **COMMITTED, NOT DEPLOYED.** Client reported it twice in the project group (19 Aug 09:54, 21 Aug
+09:36). Root cause, measured on live traffic, not inferred:
+
+**`VAGUE()` was the wrong instrument for "did they answer us?".** It runs `classify()`, which has a
+`loan` rule and **no `cash` rule at all**, and knows only the models in `RE_BIKE`. So the bot asked
+*"Nak cash atau loan?"*, the customer replied *"Cash"*, and that reply scored as `greeting` = said
+nothing — and the **byte-identical question went out again**.
+
+| Live case | Customer said | Bot heard | Bot did |
+|---|---|---|---|
+| 21 Aug 07:46 · +60133664090 | `Cash..` then `Cash` | nothing, twice | asked the same question again, then went silent. A human answered at 09:45 |
+| 19 Aug 07:33 · +60185776768 | `Trk502` then `Trk502` | nothing, twice | same question twice. Human stepped in 09:55 |
+| 18 Aug 18:49 · +60104181295 | `Cash bpe otr` | nothing | same question again → customer replied `.` and left |
+| 20 Aug 22:08 · …767892@lid | `saya nak cash` | nothing | **had already asked cash-or-loan TWICE IN ONE BUBBLE** |
+
+**6 of the 36 customers** who got a qualify ask 18–21 Aug were asked the same thing twice; three
+stopped replying. Console inbox is the source, not the log.
+
+### The three defects, and the three fixes
+1. **`qualifyVague(text, hasImage)`** replaces `VAGUE` inside the qualify flow. A payment mode
+   (`RE_PAYMODE` — cash/tunai/loan/EPP/aeon/depo…), a model-shaped token (`RE_MODELISH` — letters
+   glued to digits: `trk502`, `x250gp`, `703f`, `zx1000r`), or a photo all count as a real answer.
+   🚨 `RE_MODELISH` is deliberately **NOT** merged into `RE_BIKE`: routing stays conservative, only
+   the did-they-answer-us test gets the benefit of the doubt.
+2. **`QUALIFY_MAX_ASKS` 2 → 1.** The second ask was a byte-identical repeat, which is the complaint
+   verbatim. What reaches ask #2 now is a genuine non-answer (`ok`, `.`) — and the lead is already
+   in Lark and already queued, so the rep still gets it at the next drain. Asking again buys nothing.
+3. **`qualifyAsk(lang, modelKnown, payAsked)`.** A NEW-unit stock line already ends with *"Bos nak
+   cash atau loan?"*; the ask then appended the same question. `payAsked` is detected from the text
+   about to be sent (`RE_ASKS_PAY`), never from a flag, so it cannot drift from the stock copy.
+   `modelKnown && payAsked` ⇒ the ask is empty and the stock line stands alone.
+
+Suite **927 → 942** (qualify 78 → 93, incl. 7b replaying every answer that used to read as silence,
+and 7c the double-ask bubble). All four live conversations replayed clean against the fix.
+
+### What this is NOT
+- 🅿️ **The "no assignment" half is CONFIG, not this bug.** `FR_DIST_*` defaults to **Mon–Fri
+  09:00–17:00** while TM operates **Mon–Sat 09:00–18:00**. So 17:00–18:00 on weekdays and ALL of
+  Saturday the shop is staffed but the bot assigns nobody — the lead parks for the next 09:00 drain.
+  `FR_DIST_DAYS=1,2,3,4,5,6` / `FR_DIST_END=18` is a one-env change and `qualify_test` §8 already
+  covers both settings. **Benjamin's call, not ours.**
+- ✅ **The Moda "belum release lagi" complaint (19 Aug) is already gone** — it came from the Woo
+  product literally titled `NEW MODA SPORTER S V2 OPEN FOR BOOKING`. That title has been changed
+  (now `NEW MODA SPORTER S SK II SK2 V2`); last booking-line hit was 20 Aug 10:07. Only
+  `OPEN FOR BOOKING NEW ZONTES 175X` still carries it, correctly.
+- 🚨 **Nothing was deployed 19 or 20 Aug.** Render has been live on `669235d` since **18 Aug 12:40**
+  (`/ops` bootAt). The "yesterday's fix" mentioned in the group on 21 Aug never went out.
+
+### Rollback
+Two levels. `FR_QUALIFY=0` + **restart** disables the whole qualification flow with no code change
+(kill switch, `qualify_test` §14) — ⚠️ a Render single-var PUT does NOT restart. Or revert this
+commit; it touches `firstresponse.js` only.
+
 ## 📋 SALES + OPS CARDS, HEARTBEAT, LEGACY SWITCH — 2026-08-18
 ⚠️ **COMMITTED, NOT DEPLOYED.** Everything is flag-off or legacy-preserving by default: `CARDS_ON`
 unset ⇒ no cards, `LEGACY_REPORTS` unset ⇒ the four scheduled client sends are byte-identical.
