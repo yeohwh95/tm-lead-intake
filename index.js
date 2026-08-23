@@ -762,12 +762,15 @@ const roster = require('./roster');
 const orphan = require('./orphan');
 const cards = require('./cards');
 const cardsched = require('./cardsched');
+const repname = require('./repname');
 const heartbeat = require('./heartbeat');
 // The one heartbeat instance: durable last-inbound-message marker on /data. Best-effort by
 // contract — nothing in it can throw into the webhook path.
 const hb = heartbeat.create({});
 const OPS_QUIET_ALARM_H = Number(process.env.OPS_QUIET_ALARM_H || 3);
 const STAFF_BY_LAST9 = identity.byLast9(STAFF);
+// The one list of real people every card resolves a name against (see repname.js).
+const STAFF_KEYS = Object.keys(STAFF);
 function staffNameByPhone(phone){ return identity.nameByPhone(STAFF_BY_LAST9, phone); }
 function fileOverrides(name){
   const f = (name || '');
@@ -1236,6 +1239,9 @@ const CARDS_SALES_HR2 = parseInt(process.env.CARDS_SALES_HR2 || '14', 10);  // 2
 // The one place the sales card's "acknowledged in time" mark is defined. 75 = the reassign mark the
 // SLA engine already acts on and the client already knows, NOT the 60 in `SLA Within SLA?`.
 const SLA_CARD_THRESHOLD_MIN = parseInt(process.env.SLA_CARD_THRESHOLD_MIN || '75', 10);
+// Fewest leads a salesperson needs before the card scores them individually. Below this their
+// average is statistical noise and a red flag is a smear (2026-08-23).
+const SCOREBOARD_MIN_LEADS = parseInt(process.env.SCOREBOARD_MIN_LEADS || '3', 10);
 // 🚨 CARD OWNERSHIP (2026-08-18). Marketing and Boss are built on BOX 66, not here: the Marketing
 // card is the LISTING backlog (group_ledger x Woo x the Mudah relay) and the Boss card needs the
 // same listing figures. Those files live on box 66 and this process genuinely cannot read them.
@@ -1331,29 +1337,44 @@ async function gatherCardData(dateStr){
   const bySource = {};
   let assigned = 0;
   const breachByRep = {}; let breached = 0; const stuck = [];
-  // ---- STAGE 3 of the sales funnel (2026-08-21) ----
-  // 🚨 NOTHING NEW IS MEASURED HERE. sla.js has stamped these onto every Lark row since 2026-07
-  // (see its `slaWrite` on ack). They were simply never read back. This aggregates them.
+  // ---- THE FUNNEL + STAGE 3, all from Lark (2026-08-21, corrected 2026-08-23) ----
+  //
+  // 🚨 THE FUNNEL USED TO MIX TWO POPULATIONS AND DID NOT ADD UP. Stages 1-2 came from the decision
+  // log — which only records chats the FIRST-RESPONSE BOT handled — while stage 3 came from Lark,
+  // which holds EVERY lead including the TikTok ones `sync.py` writes. Measured on Fri 21 Aug:
+  //     decision log  21 leads          Lark  53 leads
+  //                                          (30 WhatsApp Direct · 13 Ads Tiktok ·
+  //                                            6 Tiktok DM · 3 Tiktok Get Leads · 1 Whatsapp)
+  // The card printed `Assigned 15/21` then `Answered 16/30` — more people answered than were ever
+  // captured, and more answered than were assigned. It also reported **71% assigned when the true
+  // figure was 87%**, i.e. it made the team look worse than they are.
+  // 🔑 That was not a data discrepancy to warn about, it was two different things being counted.
+  // ALL THREE STAGES NOW COME FROM LARK, so the funnel is monotonic by construction.
+  // The decision log still supplies the WHY buckets — it is the only source that knows them — and
+  // the card says out loud that they explain a SUBSET.
   //
   // 🚨 TWO CLOCKS, AND USING THE WRONG ONE HALVES THE PROBLEM. Measured on 100 live rows, 21 Aug:
-  //     late by the REP clock       14
-  //     late by the CUSTOMER clock  28   ← exactly double
-  //   17 of 63 leads had been reassigned, and `SLA Response Time (min)` RESTARTS at the reassign.
-  //   A real row: Roy answered in 2 minutes — of a wait the customer had already spent 78 minutes
-  //   in. Reporting that lead as "2 min" is true about Roy and false about the customer.
+  //     late by the REP clock 14 · late by the CUSTOMER clock 28  ← exactly double.
+  //   17 of 63 leads had been reassigned, and the rep's clock RESTARTS at the reassign. A real row:
+  //   Roy answered in 2 minutes — of a wait the customer had already spent 78 minutes in.
+  //     customer clock → the funnel + the late list (the client's stated goal)
+  //     rep clock      → the per-rep scoreboard only (nobody wears the previous rep's silence)
   //
-  //   So each number answers only its own question:
-  //     `SLA Customer Wait (min)`   → THE FUNNEL + the late list. Time from the FIRST assignment,
-  //                                   across every reassignment. This is the client's stated goal:
-  //                                   "make sure the leads are responded to promptly."
-  //     `SLA Response Time (min)`   → THE PER-REP SCOREBOARD. Each rep's own clock. A rep must not
-  //                                   wear the silence of the rep before them.
-  //
-  // ⚠️ `SLA Within SLA?` is written against 60 min, but the client's known mark — and the one the
-  // reassign engine acts on — is 75. The boolean is IGNORED and the threshold re-applied to the raw
-  // minutes, so the card and the engine cannot drift when either is tuned.
+  // 🚨 AND BOTH CLOCKS ARE NOW BUSINESS-HOURS, NOT WALL-CLOCK. The shipped card showed
+  // `Adib 1 leads · avg 16h 29m 🔴`. His lead arrived Fri 15:36 and he replied the next morning:
+  // the clock ran all night through a CLOSED SHOP. The SLA engine itself pauses outside hours
+  // (SLA-SPEC: "Outside hours / weekends → NO timer"), so a metric that does not is measuring the
+  // calendar, not the salesperson. Timestamps make this exact, and both fields already exist:
+  //     customer clock = SLA Assigned At                      → SLA First Response At
+  //     rep clock      = SLA Reassigned At || SLA Assigned At → SLA First Response At
+  // 🔑 The rep clock MUST start at the reassign where there was one, or a rescuer inherits the
+  // whole original wait — which is how the first attempt at this made Roy look SLOWER (49m) than
+  // his own wall-clock response (11m).
+  // Fallback to the stored minute-counts when a timestamp is missing, so a partial row still counts.
   const respByRep = {}; let respMeasured = 0, respOnTime = 0;
-  const lateByRep = {};
+  const lateByRep = {}; const unresolvedReps = new Set();
+  const bizMin = (from, to) => (from && to && to > from)
+    ? heartbeat.businessMinutesBetween(from, to, BIZ_DAYS, 9, 18, MYT_OFF).minutes : null;
   for (const it of rows){
     const f = it.fields || {};
     const src = slaFieldText(f['Origin']).trim() || '(unknown)';
@@ -1361,36 +1382,43 @@ async function gatherCardData(dateStr){
     const sm = f['Salesman'];
     const repName = Array.isArray(sm) && sm[0] ? (sm[0].name || '') : '';
     if (repName) assigned++;
-    const shortRep = (repName.split(/\s+/)[0] || repName || '?').replace(/^(\w)(\w*)$/, (m, a, b) => a.toUpperCase() + b);
-    // A row counts toward stage 3 only if it carries a real response time. A missing stamp is
-    // "not measured", never a zero — a lead that was never acknowledged must not score 0 minutes
-    // and flatter the average. It is absent from the numerator AND the denominator, and the card
-    // prints how many assigned leads that leaves unaccounted for.
+    // 🚨 ONE NAME PER PERSON. `Salesman` holds what a human typed ('shahrinjamaluddin',
+    // 'MUHAMAD AMIRUL BIN KAMARULZAMAN') and `SLA Reassigned From` holds a roster key ('Shahrin').
+    // The 22 Aug card rendered those two through different rules and listed ONE PERSON TWICE.
+    // Both now go through repname against the same roster. See repname.js for why the first token
+    // of a Malay name is the least identifying part of it.
+    const rc = repname.canonical(repName, STAFF_KEYS);
+    const shortRep = rc.name;
+    if (repName && !rc.resolved) unresolvedReps.add(shortRep);
+
     const num = (v) => { const t = slaFieldText(v).trim(); if (t === '') return null;
       const n = Number(t); return Number.isFinite(n) && n >= 0 ? n : null; };
-    const rt = num(f['SLA Response Time (min)']);      // this rep's clock
-    const cw = num(f['SLA Customer Wait (min)']);      // the customer's clock, across reassigns
+    const tAssigned   = num(f['SLA Assigned At']);
+    const tReassigned = num(f['SLA Reassigned At']);
+    const tResponded  = num(f['SLA First Response At']);
 
-    // THE FUNNEL + THE LATE LIST — the customer's clock.
-    if (repName && cw != null){
+    // THE FUNNEL + THE LATE LIST — the customer's clock, in business minutes.
+    const cw = bizMin(tAssigned, tResponded);
+    const cwEff = cw != null ? cw : num(f['SLA Customer Wait (min)']);
+    if (repName && cwEff != null){
       respMeasured++;
-      if (cw <= SLA_CARD_THRESHOLD_MIN) respOnTime++;
+      if (cwEff <= SLA_CARD_THRESHOLD_MIN) respOnTime++;
       else {
-        // 🚨 Attribute the lateness to whoever OWNED the lead when the clock ran out, not to
-        // whoever eventually answered. A reassign only fires at T+75, so `SLA Reassigned From` is
-        // by definition the rep who let it pass — blaming the rescuer would invert the scoreboard.
+        // 🚨 Blame whoever OWNED the lead when the clock ran out, not whoever eventually answered.
+        // A reassign only fires at T+75, so `SLA Reassigned From` IS the rep who let it pass;
+        // blaming the rescuer would invert the scoreboard.
         const from = slaFieldText(f['SLA Reassigned From']).trim();
-        const blame = from ? (from.split(/\s+/)[0] || from).replace(/^(\w)(\w*)$/, (m, a, b) => a.toUpperCase() + b)
-                           : shortRep;
+        const blame = from ? repname.nameOf(from, STAFF_KEYS) : shortRep;
         lateByRep[blame] = (lateByRep[blame] || 0) + 1;
       }
     }
-    // THE PER-REP SCOREBOARD — this rep's own clock. A missing stamp is "not measured", never a
-    // zero: a lead nobody acknowledged must not score 0 minutes and flatter the average.
-    if (repName && rt != null){
+    // THE PER-REP SCOREBOARD — this rep's own clock, in business minutes.
+    const rt = bizMin(tReassigned || tAssigned, tResponded);
+    const rtEff = rt != null ? rt : num(f['SLA Response Time (min)']);
+    if (repName && rtEff != null){
       const r = respByRep[shortRep] || (respByRep[shortRep] = { rep: shortRep, leads: 0, total: 0, onTime: 0 });
-      r.leads++; r.total += rt;
-      if (rt <= SLA_CARD_THRESHOLD_MIN) r.onTime++;
+      r.leads++; r.total += rtEff;
+      if (rtEff <= SLA_CARD_THRESHOLD_MIN) r.onTime++;
     }
     const st = slaFieldText(f['SLA Status']).trim();
     // "Breached" = the desk did not respond in time. Reassigned rows are EXCLUDED: the system
@@ -1408,10 +1436,31 @@ async function gatherCardData(dateStr){
   return { dateStr, capped, total: rows.length, assigned,
     sources: Object.entries(bySource).map(([label, count]) => ({ label, count })),
     // Stage 3, ready for the card. `avgMin` is rounded once, here, so the card never re-derives it.
-    resp: { measured: respMeasured, onTime: respOnTime, thresholdMin: SLA_CARD_THRESHOLD_MIN,
-      byRep: Object.values(respByRep).map(r => ({ rep: r.rep, leads: r.leads,
-        avgMin: Math.round(r.total / r.leads), onTime: r.onTime })) },
+    //
+    // 🚨 A REP WITH ONE LEAD HAS NO SCORE, ONLY A DATA POINT. The shipped card printed
+    // `Jue  1 leads · avg 1h 24m ·  0% 🔴` — a red flag on a single message — inside a 14-row table
+    // that nobody would read to the bottom. Reps below SCOREBOARD_MIN_LEADS are folded into one
+    // honest summary line instead of being scored on noise.
+    // 🔑 They are FOLDED, NOT DROPPED: their leads and their late customers still appear in the
+    // funnel and the late list. Only the per-rep *average* is withheld, because that is the number
+    // one lead cannot support.
+    resp: (() => {
+      const all = Object.values(respByRep).map(r => ({ rep: r.rep, leads: r.leads,
+        avgMin: Math.round(r.total / r.leads), onTime: r.onTime, total: r.total }));
+      const named = all.filter(r => r.leads >= SCOREBOARD_MIN_LEADS);
+      const rest  = all.filter(r => r.leads <  SCOREBOARD_MIN_LEADS);
+      const restLeads = rest.reduce((n, r) => n + r.leads, 0);
+      return { measured: respMeasured, onTime: respOnTime, thresholdMin: SLA_CARD_THRESHOLD_MIN,
+        minLeads: SCOREBOARD_MIN_LEADS,
+        byRep: named.map(({ rep, leads, avgMin, onTime }) => ({ rep, leads, avgMin, onTime })),
+        rest: rest.length ? { reps: rest.length, leads: restLeads,
+          avgMin: Math.round(rest.reduce((n, r) => n + r.total, 0) / restLeads),
+          onTime: rest.reduce((n, r) => n + r.onTime, 0) } : null };
+    })(),
     lateBy: Object.entries(lateByRep).map(([rep, n]) => ({ rep, n })),
+    // 🚨 A salesperson the roster does not know is NAMED, not bucketed — otherwise a whole person's
+    // misses hide behind a label nobody investigates. The card prints this as a one-line warning.
+    unresolvedReps: [...unresolvedReps],
     breached, breachByRep: Object.entries(breachByRep).map(([rep, n]) => ({ rep, n })),
     // No cap here (2026-08-18): the card's own fit() trims to one WhatsApp message AND SAYS SO,
     // whereas a silent slice made "12 waiting" out of a worse day — a silent cap by another name.
@@ -1539,10 +1588,12 @@ async function cardsTick(){
       catch (e){ sum = { summary: { read_error: String(e.message || e).slice(0, 80) }, cross: {} }; }
       const text = cards.salesCard({ dateLabel: label, periodLabel: 'Yesterday',
         s: sum.summary, cross: sum.cross, notLeads: sum.summary && sum.summary.notLeads,
-        // Stage 3 and the late list both come from Lark. If that read failed, they are UNKNOWN —
-        // `resp.error` and `stuckUnavailable` make the card say so instead of printing 0%.
+        // 🚨 ALL THREE FUNNEL STAGES COME FROM LARK (`d`). The decision log (`s`) supplies only the
+        // WHY buckets and its own honesty flags. If Lark could not be read, captured/assigned fall
+        // back to the log inside the card and stage 3 renders as "could not read" — never as 0%.
+        captured: d ? d.total : null, assigned: d ? d.assigned : null,
         resp: d ? d.resp : { error: larkErr || 'Lark read failed', thresholdMin: SLA_CARD_THRESHOLD_MIN },
-        lateBy: d ? d.lateBy : [],
+        lateBy: d ? d.lateBy : [], unresolvedReps: d ? d.unresolvedReps : [],
         stuckUnavailable: d ? null : (larkErr || 'Lark read failed') });
       await cardsDeliver('sales', `${p.date}:am:sales`, text);
     }
@@ -1568,8 +1619,9 @@ async function cardsTick(){
     const text = cards.salesCard({ dateLabel: `${niceDate(p.date)} (up to ${CARDS_SALES_HR2}:00)`,
       periodLabel: 'Today so far', s: sum.summary, cross: sum.cross,
       notLeads: sum.summary && sum.summary.notLeads,
+      captured: cd ? cd.total : null, assigned: cd ? cd.assigned : null,
       resp: cd ? cd.resp : { error: stuckUnavailable, thresholdMin: SLA_CARD_THRESHOLD_MIN },
-      lateBy: cd ? cd.lateBy : [], stuckUnavailable });
+      lateBy: cd ? cd.lateBy : [], unresolvedReps: cd ? cd.unresolvedReps : [], stuckUnavailable });
     await cardsDeliver('sales', `${p.date}:pm2:sales`, text);
   }
 

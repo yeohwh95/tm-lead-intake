@@ -2,6 +2,83 @@
 
 WhatsApp lead → AI extract → Lark CRM + notify the assigned salesperson. **LIVE.**
 
+## 🔧 THE FUNNEL DID NOT ADD UP, AND THE CARD LISTED ONE PERSON TWICE — fixed 2026-08-23
+
+The 08-21 rebuild shipped and ran for two days. Reviewing what it actually sent found four defects,
+all measured against live data, not inferred.
+
+### 1. 🚨 The funnel mixed two populations, so it could not add up
+It printed `Assigned 15/21` above `Answered 16/30` — **more people answered than were ever
+captured**. Stages 1-2 came from the decision log (only chats the FR bot handled); stage 3 from
+Lark (every lead, incl. the TikTok ones `sync.py` writes). Fri 21 Aug: **log 21 · Lark 53**
+(30 WhatsApp Direct · 13 Ads Tiktok · 6 Tiktok DM · 3 Tiktok Get Leads · 1 Whatsapp).
+🔑 It also reported **71% assigned when the truth was 87%** — the card was making the team look
+worse than they are. **All three stages now come from Lark**, so the funnel is monotonic by
+construction. The log still supplies the WHY buckets (nothing else knows them) and the card states
+how much of the gap they *cannot* explain.
+⚪ **The daily cross-check warning is DELETED.** It fired every day comparing those two populations —
+reporting my own design error as a data fault. A warning that fires daily teaches the reader to
+ignore warnings.
+
+### 2. 🚨 One person rendered as two — AND three people rendered as one
+```
+🔴 waited over 75 min:          ⏱️ Response speed:
+   Shahrin            1            Shahrinjamaluddin  4 leads
+   Shahrinjamaluddin  1
+```
+The late list was built from `SLA Reassigned From` (a roster KEY) and the scoreboard from `Salesman`
+(whatever a human typed). Two vocabularies, one person, one message — his misses split across two
+rows, understating both.
+
+**And the opposite, which is worse.** The card shortened every name to its first word:
+`MUHAMAD AMIRUL BIN KAMARULZAMAN`→Muhamad · `Muhammad Fazwan Bin Zabidi`→Muhammad ·
+`Mohamad Amir`→Mohamad. **Three different people (Amirul, Fazwan, Amir) as three lookalike labels.**
+🚨 Benjamin read that as one person spelled three ways and **approved merging them** — merging would
+have erased three real salespeople. Raised and corrected before building.
+🔑 **A Malay name begins with a shared honorific far more often than it ends with one: the first
+token is the LEAST identifying part of the name.**
+New `repname.js` (39 tests) resolves every name against `STAFF`. Tier order matters: whole-token
+equality **before** prefix, because `Amir` is a key AND a prefix of `AMIRUL` — prefix-first deletes
+a person. `shahrinjamaluddin → Syahrin` is an explicit **human-confirmed** alias (roster spells it
+Sy-, Lark spells it Sh-; no rule can bridge that). An unknown name is printed BY NAME with a
+warning, never bucketed.
+
+### 3. 🚨 Both clocks are now BUSINESS HOURS
+Shipped card: `Adib 1 leads · avg 16h 29m 🔴`. His lead arrived **Fri 15:36** and he replied next
+morning — the clock ran all night through a **closed shop**. SLA-SPEC says *"Outside hours /
+weekends → NO timer"*; a metric that ignores that measures the calendar, not the salesperson.
+Both clocks now use `heartbeat.businessMinutesBetween` over real timestamps:
+- customer clock = `SLA Assigned At` → `SLA First Response At`
+- rep clock = **`SLA Reassigned At` || `SLA Assigned At`** → `SLA First Response At`
+
+🔑 **The rep clock MUST start at the reassign where there was one.** The first attempt used the
+original assign time and made Roy look SLOWER (49m) than his own wall-clock response (11m) — a
+rescuer inheriting the whole original wait.
+
+### 4. A rep with one lead has no score
+`Jue 1 leads · avg 1h 24m · 0% 🔴` — a red flag on a single message, inside a 14-row table nobody
+reads to the bottom. Reps under `SCOREBOARD_MIN_LEADS` (3) fold into one summary line. **Folded, not
+dropped:** their leads stay in the funnel and their misses in the late list; only the per-rep
+*average* is withheld, because one lead cannot support one. Card: **35 lines → 21**.
+
+### 5. box-66: the marketing card had NEVER been delivered
+`OPS CARD WaSender: True` then `⚠️ marketing card failed: HTTP Error 429: Too Many Requests` — on
+**22 AND 23 Aug**. Adding the OPS send on 08-21 put two sends in one run; WaSender rate-limited the
+second and `_card_emit` had no retry, so the card silently ceased to exist.
+Fixed with **spacing** (`CARD_SEND_GAP_S`, default 8s) **and retry** (3 attempts, backoff) — the
+Render bot has had exactly this since 08-18 (`cardsched.sendWithRetry`); box-66 never got it. Same
+class of bug on two machines. A give-up now prints a **loud** line naming the attempts; the old code
+raised into a bare `except` and the log line simply vanished, which is why it ran broken for 2 days.
+✅ **Proven live**: both cards sent, attempt 1, to the QA group.
+
+### 6. Operations ran on a closed Sunday
+The Render bot skips Sundays; the box-66 job had no guard, so 23 Aug sent a card about a shut shop —
+the same list as Saturday. `CARD_SUNDAY=1` overrides for testing.
+
+**Deployed:** Render (this commit) · box-66 `daily_report.py` (backup
+`daily_report.py.bak-pre-retry-20260823`).
+Tests: repname **39** (new) · cards **70 → 77** · suite **945 → 992**.
+
 ## 📊 THE REPORTS BECAME ONE FUNNEL — and using the rep's clock would have halved the problem — 2026-08-21
 
 Benjamin: *"I cannot understand what it says and cannot tell immediately what to do."* He then gave

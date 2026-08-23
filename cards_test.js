@@ -71,7 +71,17 @@ const R = (over) => Object.assign({ measured: 69, onTime: 69, thresholdMin: 75,
   ok(/Shahrin +10 leads · avg +2h 10m · +50% 🔴/.test(speed),
      '🚨 sales: minutes over an hour render as h+m, and under 70% is flagged 🔴');
   ok(!/ 🔴/.test(speed.match(/Raja.*/)[0]), 'sales: 86% is neither flagged good nor bad');
-  ok(/each salesperson's own clock — it restarts when a lead is passed on/.test(speed),
+
+  // ---- 🚨 ONE LEAD IS NOT A SCORE. The shipped card printed `Jue 1 leads · avg 1h 24m · 0% 🔴`. ----
+  const folded = C.salesCard({ dateLabel: 'x', s: S(), lateBy: [], captured: 69, assigned: 69,
+    resp: R({ minLeads: 3,
+      byRep: [{ rep: 'Jebat', leads: 6, avgMin: 77, onTime: 1 }, { rep: 'Nabil', leads: 5, avgMin: 50, onTime: 4 }],
+      rest: { reps: 10, leads: 14, avgMin: 62, onTime: 6 } }) });
+  ok(/⏱️ \*Response speed yesterday\*  \(3\+ leads\)/.test(folded), 'sales: the scoreboard states its cutoff');
+  ok(/Everyone else 14 leads across 10 people · avg 1h 2m/.test(folded),
+     '🚨 sales: reps below the cutoff are FOLDED into one honest line, not scored on noise');
+  ok(!/Jue/.test(folded), 'sales: and are not individually flagged');
+  ok(/business hours only · each salesperson's own clock, which restarts when a lead is passed on/.test(speed),
      '🚨 sales: the scoreboard NAMES its clock — the funnel counts the customer\'s wait, this counts the rep\'s, and a reader must not have to discover that as a contradiction');
 
   // ---- 🚨 NEVER A CONFIDENT ZERO, in every direction this card can be blind. ----
@@ -103,15 +113,35 @@ const R = (over) => Object.assign({ measured: 69, onTime: 69, thresholdMin: 75,
   const partial = C.salesCard({ dateLabel: 'x', s: S({ partialFrom: 1 }), resp: R(), lateBy: [] });
   ok(/counts cover only part of this period/.test(partial), 'sales: a partial window is declared');
 
-  // ---- Two sources, and when they disagree BOTH numbers print. ----
-  const cross = C.salesCard({ dateLabel: 'x', resp: R(), lateBy: [],
-    s: S({ buckets: { assigned: 60, parked: 5, qualified: 0, gate_held: 0, no_rep: 0, awaiting_model: 0, other: 0 } }),
-    cross: { lark: { rows: 51 } } });
-  ok(/decision log says 65 assigned\+parked · Lark shows 51 row\(s\)\. Both printed/.test(cross),
-     '🚨 sales: two sources disagreeing prints BOTH, never silently prefers one');
-  ok(/Lark cross-check read only the newest 100 rows/.test(
-      C.salesCard({ dateLabel: 'x', s: S(), resp: R(), lateBy: [], cross: { lark: { rows: 69, capped: true } } })),
-     'sales: a capped cross-check says how it was capped');
+  // ---- 🚨 THE DAILY FALSE WARNING IS GONE (2026-08-23). ----
+  // The old card compared the decision log's assigned+parked against Lark's row count and printed
+  // "Both printed because they disagree" — every single day, because those two count DIFFERENT
+  // POPULATIONS (the log never sees a TikTok lead). It reported a design error as a data fault, and
+  // a warning that fires daily teaches the reader to ignore warnings.
+  const cross = C.salesCard({ dateLabel: 'x', resp: R(), lateBy: [], captured: 53, assigned: 46,
+    s: S({ buckets: { assigned: 15, parked: 2, qualified: 0, gate_held: 0, no_rep: 0, awaiting_model: 0, other: 0 } }),
+    cross: { lark: { rows: 53 } } });
+  ok(!/Both printed because they disagree/.test(cross),
+     '🚨 sales: no daily cross-check warning — one source means there is nothing to disagree with');
+  ok(/📥 \*Captured\* +53/.test(cross) && /👤 \*Assigned\* +46\/53/.test(cross),
+     '🚨 sales: the funnel takes BOTH stages from Lark, so it can never report more answered than captured');
+  ok(/Lark read only the newest 100 rows/.test(
+      C.salesCard({ dateLabel: 'x', s: S(), resp: R(), lateBy: [], captured: 69, assigned: 69,
+        cross: { lark: { rows: 69, capped: true } } })),
+     'sales: a capped Lark read still says how it was capped');
+
+  // ---- The WHY list explains a SUBSET, and says how much it could not explain. ----
+  const subset = C.salesCard({ dateLabel: 'x', resp: R(), lateBy: [], captured: 53, assigned: 46,
+    s: S({ buckets: { assigned: 15, parked: 2, qualified: 2, gate_held: 1, no_rep: 0, awaiting_model: 1, other: 0 } }) });
+  ok(/⚠️ \*7 not assigned yet — why:\*/.test(subset), 'sales: the gap is counted from the Lark funnel');
+  ok(/1  no reason recorded \(came in from TikTok, not through the bot\)/.test(subset),
+     '🚨 sales: reasons come from a log that never sees TikTok leads — the shortfall is NAMED, never left to read as complete');
+
+  // ---- A rep the roster does not know is NAMED, not bucketed. ----
+  const unk = C.salesCard({ dateLabel: 'x', s: S(), resp: R(), lateBy: [], captured: 69, assigned: 69,
+    unresolvedReps: ['Farhan'] });
+  ok(/Not in the staff list, so their name may be wrong: Farhan/.test(unk),
+     '🚨 sales: an unknown salesperson is named — otherwise a whole person hides behind a bucket');
 
   // ---- Context that is NOT part of the funnel. ----
   const nl = C.salesCard({ dateLabel: 'x', s: S(), resp: R(), lateBy: [], notLeads: 11 });

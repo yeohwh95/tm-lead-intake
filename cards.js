@@ -122,8 +122,14 @@ function salesCard(d){
     return fit(head, body);
   }
 
-  const captured = s.total || 0;
-  const assigned = (s.buckets && s.buckets.assigned) || 0;
+  // 🚨 THE FUNNEL COMES FROM LARK, NOT THE DECISION LOG (corrected 2026-08-23). The log records
+  // only chats the first-response bot handled; Lark holds EVERY lead, including the TikTok ones
+  // `sync.py` writes. Sourcing stages 1-2 from the log and stage 3 from Lark produced
+  // `Assigned 15/21` above `Answered 16/30` — more answered than captured — and understated the
+  // team at 71% when the truth was 87%. One source ⇒ the funnel is monotonic by construction.
+  // `d.captured`/`d.assigned` fall back to the log only if Lark could not be read at all.
+  const captured = d.captured != null ? d.captured : (s.total || 0);
+  const assigned = d.assigned != null ? d.assigned : ((s.buckets && s.buckets.assigned) || 0);
   const pA = share(assigned, captured);
 
   // ---- THE FUNNEL. Three lines, in the client's own order. ----
@@ -158,21 +164,28 @@ function salesCard(d){
   if (assigned < captured){
     const gap = captured - assigned;
     body.push('', `⚠️ *${gap} not assigned yet — why:*`);
+    let explained = 0;
     for (const k of LS.LEAD_BUCKETS.concat(['other']))
-      if (k !== 'assigned' && s.buckets && s.buckets[k]) body.push(`   ${s.buckets[k]}  ${LS.WHY[k] || k}`);
+      if (k !== 'assigned' && s.buckets && s.buckets[k]){
+        explained += s.buckets[k];
+        body.push(`   ${s.buckets[k]}  ${LS.WHY[k] || k}`);
+      }
+    // 🚨 The reasons come from the decision log, which never sees a TikTok lead — so it can explain
+    // only part of a gap counted from Lark. Say how many are unexplained rather than let the list
+    // read as complete; a reason list that silently covers 6 of 7 is the "silent cap" failure again.
+    if (explained < gap)
+      body.push(`   ${gap - explained}  no reason recorded (came in from TikTok, not through the bot)`);
   }
 
-  // 🚨 Two sources. When they disagree, BOTH numbers go on the card.
-  const lk = (d.cross || {}).lark;
-  if (lk){
-    if (lk.error) body.push('', `⚠️ couldn't read Lark for the cross-check: ${clip(lk.error, 60)}`);
-    else {
-      const expect = assigned + ((s.buckets && s.buckets.parked) || 0);
-      if (lk.rows !== expect)
-        body.push('', `⚠️ decision log says ${expect} assigned+parked · Lark shows ${lk.rows} row(s). Both printed because they disagree.`);
-      if (lk.capped) body.push('⚠️ Lark cross-check read only the newest 100 rows — older rows may be uncounted');
-    }
-  }
+  // 🚨 THE OLD CROSS-CHECK LINE IS GONE (2026-08-23). It printed
+  //   "decision log says 17 assigned+parked · Lark shows 53 row(s). Both printed because they disagree."
+  // every single day — because those two numbers COUNT DIFFERENT POPULATIONS and always will. It
+  // was reporting my own design error as if it were a data fault, and a warning that fires every
+  // day teaches the reader to ignore warnings. The funnel now has ONE source, so there is nothing
+  // left to cross-check here. What the log still uniquely knows — the WHY buckets — is printed
+  // above, with its own coverage stated.
+  if ((d.cross || {}).lark && d.cross.lark.capped)
+    body.push('', '⚠️ Lark read only the newest 100 rows — older rows may be uncounted');
 
   // ---- LEAK 2: assigned but nobody acknowledged in time. NAME + COUNT ONLY (Benjamin 08-21). ----
   const late = d.lateBy || [];
@@ -194,7 +207,8 @@ function salesCard(d){
   // ---- THE SCOREBOARD: how fast each rep acknowledges. Stage 3's whole point. ----
   const byRep = (resp.byRep || []).slice().sort((a, b) => a.avgMin - b.avgMin);
   if (byRep.length){
-    body.push('', `⏱️ *Response speed ${period === 'Yesterday' ? 'yesterday' : 'today'}*`);
+    body.push('', `⏱️ *Response speed ${period === 'Yesterday' ? 'yesterday' : 'today'}*` +
+      (resp.minLeads > 1 ? `  (${resp.minLeads}+ leads)` : ''));
     for (const r of byRep){
       const p = share(r.onTime, r.leads);
       const flag = p === 100 ? ' ✅' : (p < 70 ? ' 🔴' : '');
@@ -205,8 +219,18 @@ function salesCard(d){
     // so it must say so in one line rather than let a reader discover it as a contradiction:
     // a rep can show a fast average AND appear in the late list above, when a lead was handed to
     // them after someone else had already sat on it.
-    body.push('   (each salesperson\'s own clock — it restarts when a lead is passed on)');
+    // Folded, not dropped — their leads are still in the funnel and their misses still in the late
+    // list. Only the per-rep average is withheld, because one lead cannot support one.
+    if (resp.rest)
+      body.push(`   ${pad('Everyone else', 9)} ${String(resp.rest.leads).padStart(2)} leads across ${resp.rest.reps} people · avg ${mins(resp.rest.avgMin)}`);
+    body.push('   (business hours only · each salesperson\'s own clock, which restarts when a lead is passed on)');
   }
+
+  // 🚨 A salesperson the roster does not know is NAMED here, never bucketed. If a real person is
+  // missing from STAFF, their leads and their misses are still counted — but under a name nobody
+  // recognises, so this line is what makes that visible instead of quietly wrong.
+  if ((d.unresolvedReps || []).length)
+    body.push('', `⚠️ Not in the staff list, so their name may be wrong: ${d.unresolvedReps.join(', ')}`);
 
   // Context, never part of the funnel — a repeat customer is not a lead we failed to capture.
   if (d.notLeads) body.push('', `ℹ️ ${d.notLeads} other chats were not sales leads (repeat customers, staff, spam).`);
