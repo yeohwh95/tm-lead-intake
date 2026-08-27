@@ -374,7 +374,7 @@ async function assign(cat, jid, phone, wantText, ctx){
 // error/timeout/garbage output, and still fully handles image-only messages (nothing for the LLM
 // to read) + vendor auto-replies (cheap and certain). An image WITH a short caption keeps the
 // regex verdict when the LLM says greeting/skip — the image carries intent the LLM can't see.
-const AI_CATS = new Set(['sell', 'loan', 'testride', 'product', 'greeting', 'skip']);
+const AI_CATS = new Set(['sell', 'loan', 'testride', 'product', 'admin', 'greeting', 'skip']);
 async function classifySmart(text, hasImage){
   const rx = classify(text, hasImage);
   const t = String(text || '').trim();
@@ -731,6 +731,52 @@ async function gateSweep(){
   }
 }
 
+// ---------- ADMIN hand-off (2026-08-28) ----------------------------------------------------------
+// Agreed with TM in the project group on 27 Aug, in their words:
+//   "kalau insurance tukar nama all admin" · "if parts and labour costs workshop"
+//   "Takut if the bot answer it will be wrong"
+// So the bot NEVER answers these — it hands over and says so. Benjamin 2026-08-28: no Lark row and
+// no SLA clock for admin (it is not a sales lead), and the customer is told BOTH that admin will
+// contact them AND the number they can use themselves.
+//
+// 🚨 `workshop` is deliberately NOT a category yet. TM named it but never sent a contact, and routing
+// to a destination that does not exist is worse than leaving those enquiries where they are. Add the
+// category and the number in the SAME change, never one without the other.
+//
+// WHY THIS EXISTS AT ALL (2026-08-21, +601127171062): "Nk tnye berapa kos nk tukar nama motor sikal
+// ye tuan" — a plain, readable question. The regex had no rule for it and the LLM had no category to
+// put it in, so it landed in `skip`, which is the one branch that returns without a reply, without a
+// Lark row and without telling anybody. Measured before the fix: 7/12 skip, 5/12 product on the exact
+// same text at temperature 0 — a coin flip. After: admin 12/12. The customer waited 7 days.
+const ADMIN_PHONE   = (process.env.TM_ADMIN_PHONE   || '601116661324').replace(/\D/g, '');
+const ADMIN_DISPLAY = process.env.TM_ADMIN_DISPLAY  || '+60 11-1666 1324';
+// One hand-off per chat per day: the 10s debounce already merges a burst, this stops a customer who
+// comes back tomorrow from being answered twice while still letting a genuinely new question through
+// (the 7-day re-greet guard would otherwise swallow it — that guard is for SALES touches).
+const ADMIN_COOLDOWN_MS = Number(process.env.TM_ADMIN_COOLDOWN_MS || 24 * 3600 * 1000);
+
+const adminAck = (lang) => (lang === 'en'
+  ? `Thank you! \u{1F64F} Ownership transfer / insurance / roadtax is handled by our admin team. `
+    + `Admin will contact you.\n\nOr you can WhatsApp our admin directly:\n`
+    + `\u{1F4F1} ${ADMIN_DISPLAY}\n\u{1F517} https://wa.me/${ADMIN_PHONE}`
+  : `Terima kasih tuan! \u{1F64F} Untuk tukar nama / insurance / roadtax, admin kami yang uruskan ya. `
+    + `Admin akan contact tuan.\n\nAtau tuan boleh terus WhatsApp admin kami:\n`
+    + `\u{1F4F1} ${ADMIN_DISPLAY}\n\u{1F517} https://wa.me/${ADMIN_PHONE}`);
+
+// What admin receives. Verbatim question + an openable link, because a summary is not something a
+// human can act on. ⚠️ Obeys the same no-dash rule as every other bot send (see firstresponse_test).
+function adminNote(phone, text){
+  const who  = phone ? '+' + phone : '\u26a0\ufe0f number hidden by WhatsApp';
+  const link = phone ? `\n\u{1F517} https://wa.me/${phone}`
+                     : '\n_No number. Please reply inside the TM WhatsApp inbox._';
+  const myt  = new Date(Date.now() + 8 * 3600e3).toISOString().slice(11, 16);
+  return `\u{1F4CB} *Admin enquiry · TM Motoworld*\n\n`
+       + `\u{1F464} ${who}\n`
+       + `\u{1F4AC} "${String(text || '').replace(/\n/g, ' ').slice(0, 200)}"\n`
+       + `\u{1F550} ${myt} MYT${link}\n\n`
+       + `_The bot did NOT answer this. It only told the customer that admin will contact them, and gave them this number._`;
+}
+
 const sendTarget = (jid, phone) => (jid && jid.includes('@lid') && phone) ? (phone + '@s.whatsapp.net') : jid;
 const VAGUE = t => !t || t.trim().length < 4 || classify(t, false).cat === 'greeting';
 // ⚠️ VAGUE() answers "is this a lead we can route?" — a DIFFERENT question from "did they answer
@@ -814,6 +860,46 @@ async function flush(jid){
       assignee: ctx.assignee || '', phone: b.phone || '', want: String(want).slice(0, 120),
       recordId: ctx.recordId || null });
     await D.waSend(sendTarget(jid, b.phone), tpl(finalCat, lang, card, stockLine, nextLabel));
+    return;
+  }
+  // ── ADMIN hand-off — paperwork, not a sale. Sits BEFORE the skip branch (this is exactly what
+  // used to fall into skip) and BEFORE the 7-day re-greet guard, because a customer who was greeted
+  // about a bike last week and now asks about tukar nama is a NEW question that must still reach a
+  // human. Its own 24h cooldown replaces that guard rather than bypassing it.
+  if (cat === 'admin'){
+    state.adminNotified = state.adminNotified || {};
+    const last = state.adminNotified[jid] || 0;
+    if (now - last < ADMIN_COOLDOWN_MS){
+      frLogEvent('admin_handoff', jid, { has_phone: !!b.phone, cat: 'admin', phone: b.phone || '',
+        want: String(text).slice(0, 120), recordId: null, note: 'duplicate_within_24h' });
+      return;
+    }
+    state.adminNotified[jid] = now;
+    persist();
+
+    // 1) The customer. A hand-off line only — never an answer (TM: "takut if the bot answer it will be wrong").
+    try { await D.waSend(sendTarget(jid, b.phone), adminAck(lang)); }
+    catch(e){ D.log('FR admin ack send err:', String(e.message||e).slice(0, 60)); }
+
+    // 2) Admin. If THIS fails the customer has been promised a call nobody knows about, so it must be
+    //    loud — waSend already pages the review group after its retries, and we log the phone so the
+    //    hand-off can be redone by hand from the log alone.
+    let delivered = false;
+    if (ADMIN_PHONE){
+      try {
+        const mid = await D.waSend(ADMIN_PHONE + '@s.whatsapp.net', adminNote(b.phone, text));
+        delivered = !!mid;
+      } catch(e){ D.log('FR admin notify err:', String(e.message||e).slice(0, 60)); }
+    }
+    if (!delivered){
+      D.log(`FR 🚨 ADMIN HAND-OFF UNDELIVERED — customer ${b.phone ? '+' + b.phone : jid.slice(0,22)} `
+          + `was told admin will contact them and admin was NOT told: "${String(text).slice(0, 80)}"`);
+    }
+    D.log(`FR 📋 admin hand-off ${b.phone ? '+' + b.phone : jid.slice(0,22)} -> ${ADMIN_PHONE}`
+        + (delivered ? '' : ' (NOTIFY FAILED)'));
+    frLogEvent('admin_handoff', jid, { has_phone: !!b.phone, cat: 'admin', phone: b.phone || '',
+      want: String(text).slice(0, 120), recordId: null,
+      note: delivered ? 'admin_notified' : 'admin_notify_FAILED' });
     return;
   }
   if (cat === 'skip'){

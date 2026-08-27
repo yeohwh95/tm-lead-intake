@@ -587,6 +587,60 @@ ok(/ADIB : 017-8869542/.test(sent[sent.length-1].text), 'flow: reply carries ass
     ok(assigned.length > aBefore, '🚨 events: …and the lead is still written to Lark and assigned');
   }
 
+  // ---- ADMIN hand-off (2026-08-28) ------------------------------------------------------------
+  // The lead that created this branch: +601127171062, 21 Aug 12:05, "Nk tnye berapa kos nk tukar
+  // nama motor sikal ye tuan". It fell into `skip` and NOBODY was told for 7 days. TM's rule, from
+  // the project group: paperwork goes to admin, and the bot must never answer it itself
+  // ("Takut if the bot answer it will be wrong").
+  {
+    const nSent = sent.length, nAssigned = assigned.length, nDms = dms.length;
+    fr.init({ ...DEPS, aiClassify: async () => 'admin' });
+    fr.onMessage({ jid: 'custADM@s.whatsapp.net', phone: '60111271710', kind: 'text',
+                   text: 'Nk tnye berapa kos nk tukar nama motor sikal ye tuan' });
+    await wait(140);
+    const fresh = sent.slice(nSent);
+    const toCust  = fresh.find(x => x.to === 'custADM@s.whatsapp.net');
+    const toAdmin = fresh.find(x => String(x.to).startsWith('601116661324'));
+
+    ok(!!toCust, 'admin: the customer got a reply at all (the whole point — this used to be silence)');
+    ok(!!toAdmin, 'admin: admin was notified on 601116661324');
+    ok(!!toCust && /admin akan contact tuan/i.test(toCust.text),
+       'admin: customer is told admin will contact them (Benjamin 2026-08-28)');
+    ok(!!toCust && /wa\.me\/601116661324/.test(toCust.text),
+       'admin: customer is ALSO given the number to contact admin themselves');
+    ok(!!toCust && !/RM|harga|price|kos.*RM/i.test(toCust.text),
+       'admin: the bot does NOT attempt to answer the question (TM: takut kalau bot jawab salah)');
+    ok(!!toAdmin && /tukar nama motor sikal/.test(toAdmin.text),
+       'admin: admin gets the customer question VERBATIM, not a summary');
+    ok(!!toAdmin && /wa\.me\/60111271710/.test(toAdmin.text),
+       'admin: admin gets an openable link to the customer');
+    ok(assigned.length === nAssigned,
+       'admin: NO Lark row and NO SLA clock (Benjamin 2026-08-28 — not a sales lead)');
+    ok(dms.length === nDms, 'admin: no salesperson is assigned or DMed');
+
+    // Repeat inside the cooldown must not double-message the customer or re-page admin.
+    const nAfter = sent.length;
+    fr.onMessage({ jid: 'custADM@s.whatsapp.net', phone: '60111271710', kind: 'text',
+                   text: 'Berapa kos tukar nama?' });
+    await wait(140);
+    ok(sent.length === nAfter, 'admin: second admin question within 24h does not re-notify (cooldown)');
+
+    // A DIFFERENT customer still gets through — the cooldown is per chat, not global.
+    fr.onMessage({ jid: 'custADM2@s.whatsapp.net', phone: '60199887766', kind: 'text',
+                   text: 'Nak tanya pasal insurance motor' });
+    await wait(140);
+    ok(sent.some(x => x.to === 'custADM2@s.whatsapp.net'), 'admin: cooldown is per chat, not global');
+
+    // A @lid customer with no phone: admin must be told the number is hidden, not handed a fake one.
+    fr.onMessage({ jid: '9988776655@lid', phone: '', kind: 'text', text: 'roadtax boleh renew tak' });
+    await wait(140);
+    const lidNote = sent.filter(x => String(x.to).startsWith('601116661324')).pop();
+    ok(!!lidNote && /number hidden by WhatsApp/.test(lidNote.text),
+       'admin: @lid customer — admin is told the number is hidden rather than given a fabricated one');
+
+    fr.init(DEPS);   // restore for anything after this block
+  }
+
   // ---- 🚨 SUITE-WIDE DASH REGRESSION (2026-08-14) ----
   // Every message the bot actually SENT during this whole file, in both languages, across every
   // category, stock shape, off-hours state and @lid path. This is the assert that survives a future

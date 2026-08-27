@@ -39,7 +39,11 @@ const HOUR = 3600 * 1000;
 const LEAD_BUCKETS = ['assigned', 'parked', 'qualified', 'gate_held', 'no_rep', 'awaiting_model'];
 // Chats that are NOT sales leads. Reported on their own line so (a)(b)(c) reads on real leads —
 // never folded into the total, never hidden either.
-const NON_LEAD_BUCKETS = ['ai_skip', 'human_owned', 'repeat'];
+// `admin_handoff` added 2026-08-28 with the admin category. It is NOT a sales lead (Benjamin: no
+// Lark row, no SLA clock) but it IS a real customer who was served, so it belongs on the
+// not-a-sales-lead line and never in `other`. Same contract as the note above: the outcome and
+// this list are two halves of one change.
+const NON_LEAD_BUCKETS = ['ai_skip', 'human_owned', 'repeat', 'admin_handoff'];
 
 // Plain English for the "why wasn't it assigned" list. A reason a salesperson can act on.
 const WHY = {

@@ -660,12 +660,13 @@ Return JSON only.`;
 // never keep up. Regex classify() stays as the instant fallback (API error/timeout/garbage output
 // → exactly the old behavior). Kill switch: FR_AI_CLASSIFY=0 (no redeploy of code needed, env only).
 const CLASSIFY_PROMPT = `You classify the FIRST WhatsApp message a customer sends to TM Motoworld, a Malaysian motorcycle dealer. Messages are Malay (often short-forms: nk, sy, x, bleh, tnya), English, or mixed.
-Answer with EXACTLY one word from: sell, loan, testride, product, greeting, skip
+Answer with EXACTLY one word from: sell, loan, testride, product, admin, greeting, skip
 - sell = customer wants to SELL or TRADE-IN their OWN bike to the shop. Phrasings include jual, tolak, lepas, let go, trade in, tukar ("nak tolak moto", "moto nak let go"). If they mention their own bike still has a loan/hutang while selling ("mau tolak moto masih ada loan boleh kah?"), it is STILL sell.
 - loan = asking about financing to BUY from the shop: loan, ansuran, EPP, kad kredit, bulanan berapa, deposit, blacklist/CTOS/CCRIS.
 - testride = wants to test ride a bike.
 - product = wants to BUY / asks about a model, price, stock, availability, colours. NOTE: "kedai ada jual motor X?" asks whether the SHOP sells X — that is product, NOT sell.
 - greeting = LAST RESORT, only when the message states no interest AT ALL ("Hi", "salam", "pagi bos"). A message that opens with a greeting and then says something is NOT greeting — classify what comes after the greeting ("hi boss nk tnye moto masih ade loan lgi boleh trade in" = sell, not greeting).
+- admin = paperwork / ownership / insurance, NOT buying a bike and NOT workshop work: tukar nama (ownership transfer), geran, JPJ, roadtax, insurance, loan settlement letter, puspakom.
 - skip = automated vendor/OTP/verification messages, or long text unrelated to motorcycles.
 Priority for mixed messages: sell beats loan beats product beats greeting.
 Naming bike models does NOT make it product when the customer also wants to trade in or sell one — "Cbr650r / Mt25 / Trade in mt25 2024 mileage 25k" is sell, because they are handing us a bike.`;
@@ -1854,7 +1855,10 @@ setInterval(() => { drainFRDeferred().catch(e => log('FR drain tick err', String
 setInterval(() => { firstresponse.gateSweep().catch(e => log('FR gate sweep err', String(e.message||e))); }, 60 * 1000);
 
 {
-  const FR_EXTRA_INTERNAL = new Set(['60162393812','60108093259','60102304152','60123534271','60182907538','601143991899']);
+  // 601116661324 = TM MOTOWORLD (Kapar) ADMIN. Added 2026-08-28 with the admin hand-off: the bot now
+  // MESSAGES this number, so without it here admin's own replies would be classified as customer leads.
+  const FR_EXTRA_INTERNAL = new Set(['60162393812','60108093259','60102304152','60123534271','60182907538','601143991899',
+    (process.env.TM_ADMIN_PHONE || '601116661324').replace(/\D/g, '')]);
   // Derived LIVE from STAFF_BY_LAST9 (rebuilt on every roster swap) rather than a Set snapshotted at
   // boot: a snapshot would keep treating a departed rep as staff, and would treat a NEWLY added rep's
   // own messages as customer leads, until the next deploy.
