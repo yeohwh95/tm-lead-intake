@@ -269,6 +269,55 @@ Two levels. `FR_QUALIFY=0` + **restart** disables the whole qualification flow w
 (kill switch, `qualify_test` §14) — ⚠️ a Render single-var PUT does NOT restart. Or revert this
 commit; it touches `firstresponse.js` only.
 
+## 📋 ADMIN HAND-OFF — 2026-08-28 (`95c9fba`, LIVE 00:46 MYT)
+
+**The lead that caused it.** +601127171062, 21 Aug 12:05, one 26-second burst: a photo, then
+*"Nk tnye berapa kos nk tukar nama motor sikal ye tuan"*. Plain, readable Malay. The regex had no
+rule for ownership transfer and the LLM had no category to put it in, so `classifySmart` resolved to
+`skip` — the ONE branch that returns with no reply, no Lark row and no page to anybody. Measured on
+the exact text, live key, `gpt-4o`, temperature 0: **skip 7/12, product 5/12.** A coin flip. He
+waited 7 days and nobody knew.
+
+🔑 **The bot read every message.** The photo was never the problem — Render logs show
+`text='ceiling…'` and `text='how much per sqft'` both arriving and both classified. The AI ran too
+(15 overrides in the same 2.3 days). It simply agreed with the regex, and an agreement logs NOTHING,
+so "the AI said skip" and "the AI never ran" look identical in the logs. Worth fixing next time
+someone debugs this path.
+
+**What TM decided** (project group, 27 Aug — their words):
+`"kalau insurance tukar nama all admin"` · `"if parts and labour costs workshop"` ·
+`"Takut if the bot answer it will be wrong"`, then a contact card: **TM MOTOWORLD (Kapar) ADMIN,
++60 11-1666 1324**.
+
+**What ships.** `admin` is a real category (`admin 12/12` on the same text). On `admin` the bot:
+tells the customer admin will contact them **and** gives them the number to reach admin themselves
+(Benjamin, 28 Aug); sends admin the question verbatim + a `wa.me` link; and **never attempts an
+answer**. No Lark row, no SLA clock — Benjamin: it is not a sales lead.
+
+- `601116661324` joins `FR_EXTRA_INTERNAL`. The bot now MESSAGES that number, so without it admin's
+  own replies would be classified as customer leads.
+- 24h per-chat cooldown, deliberately **not** the 7-day re-greet guard: someone greeted about a bike
+  last week who asks about tukar nama today is a NEW question that must still reach a human.
+- An undelivered hand-off is LOUD. The customer has been promised a call nobody was told about.
+- `leadsummary.js` gains an `admin_handoff` NON_LEAD bucket. The integrity test caught its absence
+  exactly as designed (`ORPHANED: admin_handoff`) — the same contract `qualified` broke on 17 Aug.
+
+🚨 **`workshop` is deliberately NOT a category.** TM named it but never sent a contact. Routing to a
+destination that does not exist is worse than leaving those enquiries in `skip`. Add the category
+and the number in the SAME change, never one without the other. Until then *"harga service"* and
+*"tukar minyak"* still fall to `skip` and still go silent — that hole is open and known.
+
+**Proof.** 12 new tests, `firstresponse_test` 186/186, all 18 suites green. Deploy verified on the
+running service, not on the deploy list: `/ops bootAt` moved `Sun 23 Aug 10:53` → `Fri 28 Aug 00:46`,
+`firstresponse init — ON: true`, clean boot. ⚠️ **UNPROVEN on organic traffic** — a one-shot watcher
+on box 66 (`tm-admin-watch.timer`) reports the first real hand-off, success or failure, then disables
+itself.
+
+### Rollback
+`TM_ADMIN_PHONE=` (empty) leaves the category but stops the admin notify — the customer is still
+answered, so prefer a revert. Reverting `95c9fba` touches `index.js`, `firstresponse.js` and
+`leadsummary.js`; revert all three together or the card breaks on the orphaned bucket.
+
 ## 📋 SALES + OPS CARDS, HEARTBEAT, LEGACY SWITCH — 2026-08-18
 ⚠️ **COMMITTED, NOT DEPLOYED.** Everything is flag-off or legacy-preserving by default: `CARDS_ON`
 unset ⇒ no cards, `LEGACY_REPORTS` unset ⇒ the four scheduled client sends are byte-identical.
