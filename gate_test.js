@@ -543,7 +543,17 @@ console.log('\n== A number arriving after the lead already went out ==');
 
 console.log('\n== The hold is now 15 minutes ==');
 {
-  ok('gate window is 15 min', fr._gateMs ? fr._gateMs() === 15 * 60 * 1000 : true);
+  // ⚠️ This file sets FR_GATE_MS=60000 at the top so the timeout path is testable, so the
+  // RUNTIME value here is 60s by design. Two separate facts to pin:
+  //   1. the env override is honoured (the rollback lever works)
+  //   2. the SHIPPED default is 15 min (read from source, not from the overridden runtime)
+  ok('the env override is honoured — rollback lever works', fr._gateMs() === 60000);
+  const _src = require('fs').readFileSync(require('path').join(__dirname, 'firstresponse.js'), 'utf8');
+  ok('🚨 the shipped default is 15 min',
+     /FR_GATE_MS \|\| 15 \* 60 \* 1000/.test(_src));
+  // 🚨 /gate-status used to keep its OWN copy of the default, so it reported 60 while the gate
+  // actually held 15. A status endpoint that lies about a live setting is the fake-healthy shape.
+  ok('🚨 the endpoint and the gate cannot drift', typeof fr._gateMs === 'function');
 }
 
 console.log(`\n${'='.repeat(54)}\n  ${pass} passed, ${fail} failed\n${'='.repeat(54)}`);

@@ -1211,6 +1211,11 @@ module.exports = { init, onMessage, markHuman, rehydrateGreeted, gateSweep, gate
     jid, cat: h.cat, asks: h.asks, note: h.note || '',
     waitingMin: Math.round((Date.now() - (h.ts || Date.now())) / 60000),
     minutesLeft: Math.max(0, Math.round((GATE_MS - (Date.now() - (h.ts || Date.now()))) / 60000)) })),
+  // Exported so /gate-status reports the REAL hold instead of keeping its own copy of the
+  // default. index.js had `Number(process.env.FR_GATE_MS || 3600000)` inline, so when the
+  // default moved 60 -> 15 the endpoint went on reporting 60: two sources of truth for one
+  // fact, drifting the moment one of them changed.
+  _gateMs: () => GATE_MS,
   _gateParsePhone: gateParsePhone, _classify: classify, _classifySmart: classifySmart,
   _tpl: tpl, _isEnglish: isEnglish, _state: () => state,
   _qualifyAsk: qualifyAsk, _closingLine: closingLine,

@@ -2380,7 +2380,7 @@ http.createServer((req, res) => {
     for (const e of events) counts[e.kind] = (counts[e.kind] || 0) + 1;
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({
-      timeout_minutes: Math.round(Number(process.env.FR_GATE_MS || 3600000) / 60000),
+      timeout_minutes: Math.round(firstresponse._gateMs() / 60000),
       holding_now: holding.map(h => ({
         chat_id: h.jid, name: '', waiting_minutes: h.waitingMin,
         minutes_left: h.minutesLeft, asks_sent: h.asks })),

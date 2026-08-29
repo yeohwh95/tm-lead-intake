@@ -1580,3 +1580,13 @@ recognise. Comparisons still run in lower case.
 
 Tests: gate **106 → 120**, suite **1039**. Both directions verified — disabling the recorder turns
 9 assertions red.
+
+### 🐛 /gate-status was reporting 60 while the gate held 15
+`index.js` kept its **own copy** of the default — `Number(process.env.FR_GATE_MS || 3600000)` —
+instead of reading the real one. The moment the default moved 60 → 15 the endpoint went on
+reporting 60: two sources of truth for one fact, drifting as soon as either changed. Nothing
+consumed it, so the cost was only that a human checking "how long does the gate hold?" would have
+been told the wrong number — which is exactly how a status endpoint becomes fake-healthy.
+`firstresponse._gateMs()` is now the single source and the test pins both the env override
+(the rollback lever) and the shipped default (read from source, since the suite overrides the
+runtime value to 60s to make the timeout path testable).
