@@ -484,7 +484,15 @@ function readFrEvents(limit){
   }
 }
 
-const GATE_MS = Number(process.env.FR_GATE_MS || 60 * 60 * 1000);
+// 15 minutes, not 60 (2026-08-30). Measured across 227 real gated leads on all four bots:
+// median reply 1.0 min, 92% inside 5 min, 97.6% inside 15 min, and the curve is FLAT from 15 to
+// 45. The extra 45 minutes bought 2.4% of repliers while making the 102 leads who never reply at
+// all wait a full hour before a salesperson saw them. On TM specifically, ZERO of 59 repliers
+// took longer than 15 min. Env-overridable: FR_GATE_MS=3600000 restores the old hold.
+const GATE_MS = Number(process.env.FR_GATE_MS || 15 * 60 * 1000);
+// How long we keep listening for a number AFTER a lead went out with none. Matches the 7-day
+// re-greet window: past that the chat is a new conversation anyway.
+const LATE_CONTACT_MS = Number(process.env.FR_LATE_CONTACT_MS || 7 * 24 * 60 * 60 * 1000);
 const GATE_MAX_ASKS = 2;
 
 // A WhatsApp privacy id is 13-15 digits; a dialable number here is 10-12. Keeping the ranges
@@ -550,12 +558,19 @@ const NOT_A_USERNAME = new Set([
   'ada','apa','kenapa','later','nanti','wait','sekejap','none','moto','motor','harga','loan',
 ]);
 
+// Returns the handle with the customer's OWN CAPITALISATION intact (2026-08-30).
+// ⚠️ Not for link correctness: Benjamin verified that wa.me is CASE-INSENSITIVE — both
+// wa.me/ChuKM and wa.me/chukm open the chat. I had assumed otherwise and that assumption was
+// wrong. The reason to keep case is display: the card shows the rep `@ChuKM`, which is what the
+// customer would recognise as their own handle, and folding case throws that away for nothing.
+// Comparisons still happen in lower case; only the returned value keeps its shape.
 function cleanUsername(raw){
-  const u = String(raw || '').trim().replace(/^[.,!?;:]+|[.,!?;:]+$/g, '').toLowerCase();
+  const u = String(raw || '').trim().replace(/^[.,!?;:]+|[.,!?;:]+$/g, '');
+  const lc = u.toLowerCase();
   if (u.length < 3 || u.length > 30) return '';
-  if (NOT_A_USERNAME.has(u) || RE_DOMAINISH.test(u)) return '';
-  if (!/[a-z]/.test(u)) return '';                    // all digits = a phone, not a handle
-  if (!/^[a-z0-9._]+$/.test(u)) return '';
+  if (NOT_A_USERNAME.has(lc) || RE_DOMAINISH.test(lc)) return '';
+  if (!/[a-z]/i.test(u)) return '';                   // all digits = a phone, not a handle
+  if (!/^[A-Za-z0-9._]+$/.test(u)) return '';
   return u;
 }
 
@@ -653,6 +668,22 @@ async function gateRelease(jid, h, phone, reason){
   D.log(`FR ✅ gate released (${reason}) — ${h.cat} ${phone ? '+' + phone : 'NO PHONE'} (${jid.slice(0,22)})`
     + (ctx.outcome && ctx.outcome !== 'assigned' ? ` [${ctx.outcome}]` : ''));
   if (ctx.outcome === 'no_rep') D.log(`FR 🚨 NO SALESPERSON took the released lead (${jid.slice(0,22)}) — Lark row has no owner`);
+  // 🚨 A lead released with NO number is the one case where the customer can still rescue it.
+  // TM had nothing here: FSS and KoonKen both forward a late number to the assigned rep, TM never
+  // got that path, so a number arriving after release landed NOWHERE and nobody was told. With
+  // the hold now 15 min instead of 60 that window matters more, not less.
+  // Staff-facing only: this never sends the customer anything, so it cannot step on a human who
+  // has taken the chat over.
+  if (!phone){
+    state.awaitingLateContact = state.awaitingLateContact || {};
+    state.awaitingLateContact[jid] = {
+      ts: Date.now(),
+      staffName: (card && card.name) || ctx.assignee || '',
+      staffPhone: (card && (card.phone || card.digits)) || '',
+      name: '', want: String(h.want || '').slice(0, 60),
+      username: ctx.username || '' };
+    persist();
+  }
   // The lead's real outcome. Logged HERE and not inside assign(), so a gate release produces
   // exactly one decision event rather than one from each layer.
   frLogEvent(ctx.outcome || 'assigned', jid, {
@@ -676,6 +707,40 @@ async function gateRelease(jid, h, phone, reason){
 function gateLogParked(jid, fields){
   if (!jid) return;
   gateLogEvent('assigned_after_park', jid, fields || {});
+}
+
+// A customer whose lead went out with no number finally sends one. Push it to the rep who owns
+// them. Returns true if this message was consumed.
+//
+// 🚨 The rep is DMed, the customer is sent nothing. A late number is news for staff, not a reason
+// to message someone who is already mid-conversation with a human.
+// 🚨 A handle NEVER becomes a phone — it is labelled and linked, never dialled.
+async function lateContact(jid, e, text){
+  const lid = jid.includes('@lid') ? jid.split('@')[0] : '';
+  const phone = gateParsePhone(text, lid);
+  const uname = phone ? '' : gateParseUsername(text, false);
+  if (!phone && !uname) return false;
+
+  delete state.awaitingLateContact[jid]; persist();   // fire once, never nag
+
+  const who = e.staffName || '(unassigned)';
+  const body = phone
+    ? `📞 *Phone number now available*\n🎯 ${e.want || 'their enquiry'}\n📞 +${phone}\n👉 https://wa.me/${phone}\n\nThey sent it after the lead reached you. You can call them now.`
+    : `👤 *WhatsApp username now available*\n🎯 ${e.want || 'their enquiry'}\n👤 @${uname}\n👉 https://wa.me/${uname}\n\nThey sent it after the lead reached you. Not a phone number, so there is nothing to call.`;
+
+  // No rep on the entry means the lead was parked for the 9am drain. Losing the number because
+  // of that would be the exact silent drop this exists to stop, so it goes to the review group
+  // where a human will see it.
+  const target = e.staffPhone ? String(e.staffPhone).replace(/\D/g, '') : '';
+  try {
+    if (target) await D.waSend(target, body);
+    else if (D.alertReview) await D.alertReview(`⚠️ Late contact for a lead with no rep yet\n\n${body}`);
+  } catch(err){ D.log('FR late-contact send err:', String(err.message||err).slice(0,60)); }
+
+  D.log(`FR 📞 late ${phone ? 'phone +' + phone : 'handle @' + uname} → ${who} (${jid.slice(0,22)})`);
+  gateLogEvent(phone ? 'late_phone' : 'late_username', jid,
+    { phone: phone || '', username: uname || '', salesperson: who });
+  return true;
 }
 
 // Handle a reply from a held chat. Returns true if the gate consumed the message.
@@ -822,6 +887,17 @@ async function flush(jid){
   // re-greet guard below, which would otherwise return early and swallow their answer.
   const heldEntry = (state.awaitingPhone || {})[jid];
   if (heldEntry){ await gateOnReply(jid, heldEntry, text, b.phone); return; }
+
+  // A number arriving AFTER the lead already went out. Must also run before the re-greet guard,
+  // for the same reason the gate reply does: that guard would return early and swallow it.
+  const lateEntry = (state.awaitingLateContact || {})[jid];
+  if (lateEntry){
+    if (Date.now() - (lateEntry.ts || 0) > LATE_CONTACT_MS){
+      delete state.awaitingLateContact[jid]; persist();
+    } else if (await lateContact(jid, lateEntry, text)) {
+      return;
+    }
+  }
 
   const q = state.qualify[jid];
   let { cat, imageOnly } = await classifySmart(text, b.hasImage);
@@ -1052,7 +1128,8 @@ function onMessage(info){
     // without it, the bot's own qualifyAsk echoes back as fromMe, flags the chat human-owned, and
     // the customer's model/cash-or-loan answer is dropped before it is even buffered — precisely
     // the 2026-08-05 failure that binned 4 of 4 real phone numbers and reported 0% conversion.
-    const midFlow = state.qualify[info.jid] || (state.awaitingPhone || {})[info.jid];
+    const midFlow = state.qualify[info.jid] || (state.awaitingPhone || {})[info.jid]
+                 || (state.awaitingLateContact || {})[info.jid];
     if (humanTouched.has(info.jid) && !midFlow){
       // A human owns this chat. That is a legitimate ending (TM staff watch this inbox), but it
       // used to leave no trace at all, so the day's story had a hole exactly where the bot chose
@@ -1123,6 +1200,7 @@ function clearQualify(jid){
   let n = 0;
   if (state.qualify[jid]){ delete state.qualify[jid]; n++; }
   if ((state.awaitingPhone || {})[jid]){ delete state.awaitingPhone[jid]; n++; }
+  if ((state.awaitingLateContact || {})[jid]){ delete state.awaitingLateContact[jid]; n++; }
   if (n) persist();
   return n;
 }

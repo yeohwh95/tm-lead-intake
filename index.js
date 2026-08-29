@@ -1891,7 +1891,7 @@ setInterval(() => { firstresponse.gateSweep().catch(e => log('FR gate sweep err'
   // boot: a snapshot would keep treating a departed rep as staff, and would treat a NEWLY added rep's
   // own messages as customer leads, until the next deploy.
   const isStaffPhone = p => { const d = String(p || '').replace(/\D/g, ''); return !!d && (!!identity.nameByPhone(STAFF_BY_LAST9, d) || FR_EXTRA_INTERNAL.has(d)); };
-  firstresponse.init({ waSend, assignLeads, larkWriteLead, notifyStaff, sla, getUnavailable, log, isStaffPhone, wooCheckStock, aiClassify, fetchUsername, inDistHours: inFRDistHours, inOpenHours: inFROpenHours, deferStaffNotify, hoursLabel,
+  firstresponse.init({ waSend, assignLeads, larkWriteLead, notifyStaff, sla, getUnavailable, log, isStaffPhone, wooCheckStock, aiClassify, fetchUsername, alertReview, inDistHours: inFRDistHours, inOpenHours: inFROpenHours, deferStaffNotify, hoursLabel,
     // WHEN a rep will actually pick the lead up, derived from the DISTRIBUTION window — never the
     // operating hours, and never hardcoded (2026-07-30). Tests inject their own.
     nextWindowLabel: () => require('./hours').nextWindowLabel(Date.now(), FR_DIST_DAYS, FR_DIST_START, FR_DIST_END),

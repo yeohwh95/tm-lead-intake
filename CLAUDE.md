@@ -1534,3 +1534,49 @@ caught it**; `gate_test` pins it in both directions.
 
 Tests: gate **85 → 106**, suite **1004 → 1025**. Guards proven in both directions.
 ⚠️ **UNPROVEN on organic traffic** — the next no-phone lead is the test.
+
+## ⏱ The hold is 15 minutes, and a late number now reaches the rep — 2026-08-30
+
+**Measured before changing it**, across 227 real gated leads on all four bots:
+
+| replied within | 1 min | 5 min | **15 min** | 30 min | 60 min |
+|---|---|---|---|---|---|
+| | 51% | 92% | **97.6%** | 97.6% | 100% |
+
+Median reply **1.0 minute**. The curve is FLAT from 15 to 45. The extra 45 minutes was buying
+2.4% of repliers while making the **102 leads who never reply at all** wait a full hour before any
+salesperson saw them. On TM specifically, **zero of 59 repliers took longer than 15 minutes.**
+
+`FR_GATE_MS` default 60 min → **15 min**. Env-overridable; `FR_GATE_MS=3600000` restores the old
+hold with no code change.
+
+### 🆕 Late contact — the safety net TM never had
+FSS and KoonKen both forward a late number to the assigned rep. **TM had no such path**, so a
+number arriving after release landed nowhere and nobody was told. Cutting the hold to 15 min makes
+that window matter more, not less, so it ships in the same change.
+
+`state.awaitingLateContact[jid]` is recorded whenever a lead is released with **no** number,
+carrying the rep it went to. The next message from that chat is checked for a phone or a handle
+**before the 7-day re-greet guard**, which would otherwise swallow it.
+
+- 🚨 **Staff-facing only.** The rep is DMed; the customer is sent nothing. So it cannot step on a
+  human who has taken the chat over — which is also why it is safe to keep listening after
+  `humanTouched`.
+- 🚨 Added to **`midFlow`**, per this file's own standing rule that every "waiting on the customer"
+  state must be. Without it the guard would drop the very message we are waiting for — the exact
+  2026-08-05 failure that binned 4 of 4 real phone numbers.
+- **Fires once** (entry deleted on send), expires after 7 days (`FR_LATE_CONTACT_MS`), and clears
+  when a rep takes the chat over (`clearQualify`).
+- No rep on the entry (the lead was parked for the 9am drain) ⇒ it goes to the **review group**
+  rather than being dropped. `alertReview` had to be added to the FR dep bag for this — it existed
+  in `index.js` and was never injected.
+- A late **handle** is forwarded too, linked, and labelled as not a number.
+
+### Handle capitalisation is preserved
+`cleanUsername` no longer lower-cases. ⚠️ **Not for link correctness** — Benjamin verified wa.me is
+case-INSENSITIVE (`wa.me/ChuKM` and `wa.me/chukm` both open the chat); I had assumed otherwise and
+was wrong. It is kept because the card shows the rep `@ChuKM`, which is what the customer would
+recognise. Comparisons still run in lower case.
+
+Tests: gate **106 → 120**, suite **1039**. Both directions verified — disabling the recorder turns
+9 assertions red.

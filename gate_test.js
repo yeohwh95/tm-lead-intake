@@ -26,6 +26,7 @@ const reset = () => { sent = []; assigned = []; larkRows = []; logs = [];
 
 // ⚠️ `init()` REPLACES the dep bag, it does not merge. A test that wants one dep changed must
 // re-init with the whole set or the module loses waSend/log and dies on the next message.
+const reviewed = [];
 const BASE_DEPS = {
   waSend: async (to, text) => { sent.push({ to, text }); allSent.push({ to, text }); },
   assignLeads: (leads) => leads.map(l => ({ ...l, assignee: 'Nazrin',
@@ -43,6 +44,9 @@ const BASE_DEPS = {
   // does not break the suite, it quietly empties it. Default returns nothing; the tests that care
   // override it via initWith({ fetchUsername: ... }).
   fetchUsername: async () => '',
+  // Same reason as fetchUsername: the no-rep fallback in lateContact guards on `D.alertReview &&`,
+  // so a fake without it would leave that branch silently untested.
+  alertReview: async (t) => { reviewed.push(t); return true; },
   inDistHours: () => true,
   inOpenHours: () => true,
   deferStaffNotify: () => {},
@@ -467,6 +471,79 @@ console.log('\n== The card gives a tappable route either way ==');
   ok('🚨 case is preserved exactly as WhatsApp gave it', handle({ username: 'WinnieChong_68' }) === 'WinnieChong_68');
   ok('too short is not a handle', handle({ username: 'ab' }) === '');
   ok('empty is empty', handle({}) === '');
+}
+
+
+// ── Late contact: a number that arrives AFTER the lead went out (2026-08-30) ───
+// TM had NO path for this. FSS and KoonKen both forward a late number to the assigned rep;
+// on TM it landed nowhere and nobody was told. With the hold cut 60 -> 15 min it matters more.
+console.log('\n== A number arriving after the lead already went out ==');
+{
+  const JID = '444555666777888@lid';
+  const setup = async (fetchU) => {
+    reset();
+    initWith({ fetchUsername: fetchU || (async () => '') });
+    fr._state().awaitingPhone[JID] = { ts: Date.now() - (16 * 60 * 1000), asks: 2,
+                                       cat: 'product', want: 'Z900 price', lang: 'en' };
+    await fr.gateSweep();               // released with no number
+    sent.length = 0; allSent.length = 0;
+  };
+
+  await setup();
+  ok('the chat is being watched for a late number',
+     !!(fr._state().awaitingLateContact || {})[JID]);
+
+  fr.onMessage({ jid: JID, phone: '', kind: 'text', text: 'sorry my number 0123456789' });
+  await wait(150);
+  const dm = allSent.map(x => x.text).join('\n');
+  ok('the rep is told the number arrived', /Phone number now available/.test(dm));
+  ok('the number itself is in the DM', dm.includes('60123456789'));
+  ok('the rep gets a tappable link', dm.includes('https://wa.me/60123456789'));
+  ok('🚨 the CUSTOMER is sent nothing (staff-facing only)',
+     !allSent.some(x => String(x.to).includes('444555666777888')));
+  ok('🚨 fires once, then stops watching',
+     !(fr._state().awaitingLateContact || {})[JID]);
+
+  // a second number must not nag the rep again
+  const before = allSent.length;
+  fr.onMessage({ jid: JID, phone: '', kind: 'text', text: 'or try 0198887777' });
+  await wait(150);
+  ok('🚨 a second number does not send a SECOND late-contact DM',
+     allSent.slice(before).every(x => !/now available/.test(x.text || '')));
+
+  // a late HANDLE is forwarded too, and never as a phone
+  await setup();
+  fr.onMessage({ jid: JID, phone: '', kind: 'text', text: 'my username is @ChuKM' });
+  await wait(150);
+  const dm2 = allSent.map(x => x.text).join('\n');
+  ok('a late handle reaches the rep', /username now available/.test(dm2));
+  ok('the handle is linked', dm2.includes('https://wa.me/ChuKM'));
+  ok('🚨 a handle is never presented as a number to call',
+     /nothing to call/.test(dm2) && !/Phone number now available/.test(dm2));
+
+  // ordinary chatter must not trigger anything
+  await setup();
+  fr.onMessage({ jid: JID, phone: '', kind: 'text', text: 'ok thanks' });
+  await wait(150);
+  ok('ordinary chatter does not fire the late-contact DM',
+     !allSent.some(x => /now available/.test(x.text || '')));
+  ok('and the chat is still being watched',
+     !!(fr._state().awaitingLateContact || {})[JID]);
+
+  // a lead that DID give a number is not watched at all
+  reset(); initWith({});
+  const JID2 = '555666777888999@lid';
+  fr._state().awaitingPhone[JID2] = { ts: Date.now(), asks: 1, cat: 'product',
+                                      want: 'R15', lang: 'en' };
+  fr.onMessage({ jid: JID2, phone: '', kind: 'text', text: '0123456789' });
+  await wait(150);
+  ok('🚨 a lead released WITH a number is never watched',
+     !(fr._state().awaitingLateContact || {})[JID2]);
+}
+
+console.log('\n== The hold is now 15 minutes ==');
+{
+  ok('gate window is 15 min', fr._gateMs ? fr._gateMs() === 15 * 60 * 1000 : true);
 }
 
 console.log(`\n${'='.repeat(54)}\n  ${pass} passed, ${fail} failed\n${'='.repeat(54)}`);
