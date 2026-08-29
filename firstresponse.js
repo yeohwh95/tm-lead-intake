@@ -590,9 +590,15 @@ const gateGot = lang => lang === 'en'
   : `Ok, terima kasih bos! 🙏 Saya pass kat sales advisor kami sekarang.`;
 // Deliberately promises a follow-up IN THIS CHAT, never a call back — a handle is not dialable in
 // Malaysia until WhatsApp's rollout lands (~Sept 2026), and not at all if they set a username key.
+// ⚠️ This used to promise follow-up "right here in this chat" / "terus dalam chat ni". That was
+// true while the 93210 inbox was the only thing that could reach a privacy customer. Since
+// 2026-08-29 the rep taps wa.me/<handle> and messages from THEIR OWN number, which lands in a
+// different thread the customer has never seen — so the old wording promised one thing and did
+// another, and the real message would arrive looking like a stranger. Say where it will actually
+// come from instead of where it will not.
 const gateGotUser = lang => lang === 'en'
-  ? `Got it, thank you! 🙏 Passing your username to our sales advisor, they'll follow up with you right here in this chat.`
-  : `Ok, terima kasih bos! 🙏 Saya pass username tuan kat sales advisor, dia akan follow up terus dalam chat ni.`;
+  ? `Got it, thank you! 🙏 Passing your username to our sales advisor. They'll message you on WhatsApp shortly, it may come from their own number.`
+  : `Ok, terima kasih bos! 🙏 Saya pass username tuan kat sales advisor. Dia akan WhatsApp tuan sekejap lagi, mungkin dari nombor dia sendiri.`;
 
 // `opts.recordId` = this lead ALREADY has a Lark row (it was parked by the off-hours qualify flow).
 // `opts.fromQualify` clamps the re-ask budget so the evening total stays within the 3-message cap.
