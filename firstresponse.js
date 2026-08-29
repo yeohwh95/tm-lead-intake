@@ -342,6 +342,10 @@ async function assign(cat, jid, phone, wantText, ctx){
   const unavail = await D.getUnavailable();
   const enriched = D.assignLeads([{ phone, name: '', interest: prefix + want, brand: '' }], { origin: 'WhatsApp Direct', noAssign: defer }, unavail);
   const l = enriched[0];
+  // 🚨 The handle is contact info, NOT a phone. It rides on the lead as its own field so the DM
+  // can offer a tappable link; it must never reach `phone` — larkWriteLead would happily store it
+  // and a rep dialling a handle is the exact failure the gate exists to stop (2026-08-02).
+  if (ctx && ctx.username) l.username = ctx.username;
   try { l.recordId = await D.larkWriteLead(l); } catch(e){ D.log('FR lark err:', String(e.message||e).slice(0,60)); }
   if (ctx) ctx.recordId = l.recordId || null;   // null here = the Lark write FAILED; the report counts those
   if (defer){
@@ -610,6 +614,19 @@ function gateHold(jid, cat, want, lang, opts){
 async function gateRelease(jid, h, phone, reason){
   delete (state.awaitingPhone || {})[jid]; persist();
   const ctx = { gated: true };
+  // A handle the customer TYPED comes in on h.username. If they gave us nothing at all, ask
+  // WhatsApp for theirs — measured 2026-08-29 across the fleet, 68 of 69 leads released with no
+  // contact detail have one. Done HERE and not at hold time so it costs nothing on the message
+  // path and only ever fires for a lead that is genuinely about to go out uncontactable.
+  //
+  // 🚨 The lookup is the SAME WhatsApp call that resolves a number, so it can find no phone we
+  // have not already tried. It is not a second chance at a number; it is a different field.
+  ctx.username = h.username || '';
+  if (!phone && !ctx.username && D.fetchUsername){
+    try { ctx.username = (await D.fetchUsername(jid)) || ''; }
+    catch(e){ D.log('FR username lookup err:', String(e.message||e).slice(0,60)); }
+    if (ctx.username) D.log(`FR 👤 no phone — WhatsApp handle @${ctx.username} found by lookup (${jid.slice(0,22)})`);
+  }
   // 🚨 TWO SALESPEOPLE, ONE ENQUIRY — the defect this branch exists to prevent. The off-hours
   // qualify flow ALREADY wrote a Lark row and queued the staff half on the customer's first
   // message. Calling assign() again here would create a SECOND row for the same person, put it in
@@ -643,6 +660,7 @@ async function gateRelease(jid, h, phone, reason){
     // it at 9am · 'no_rep' = nobody took it, needs a human. An empty salesperson used to cover all
     // three, so a routine park and a total failure read identically in /gate-status.
     assign_state: ctx.outcome || 'assigned',
+    username: ctx.username || '',
     held_seconds: Math.round((Date.now() - (h.ts || Date.now())) / 1000) });
 }
 
@@ -671,7 +689,8 @@ async function gateOnReply(jid, h, text, bphone){
   const username = gateParseUsername(text, !!h.askedUsername);
   if (username){
     try { await D.waSend(sendTarget(jid, bphone), gateGotUser(h.lang)); } catch {}
-    await gateRelease(jid, { ...h, want: `@${username} (username, not dialable) · ${h.want}` },
+    await gateRelease(jid, { ...h, username,
+                             want: `@${username} (username, not dialable) · ${h.want}` },
                       '', 'customer gave username');
     return true;
   }

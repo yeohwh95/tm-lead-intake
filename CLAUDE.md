@@ -1490,3 +1490,47 @@ Tests: gate **60** (+8 — assigned/parked/no_rep marking, the parked entry carr
 drain writing the ending, and the loud log line). Full suite **383**.
 ⚠️ `init()` REPLACES the dep bag, it does not merge — `gate_test.js` now has `BASE_DEPS` + `initWith()`
 because a partial re-init leaves the module without `waSend`/`log`.
+
+## 👤 A hidden number is no longer a dead end — 2026-08-29
+
+TM has the fleet's **highest no-phone rate (14%)** and was the only one of the four bots that
+never asked WhatsApp for the customer's handle at all — it could only ask the customer. Measured
+across the fleet that day: of **69 leads released with no contact detail whatsoever, 68 have a
+WhatsApp username**.
+
+`fetchUsername(jid)` (in `index.js`, injected as a dep — `index.js` boots a server so no testable
+logic may live there) is called from `gateRelease` **only when the customer gave us nothing**:
+not at hold time, so it costs nothing on the message path, and never for a lead that shared a
+number. The handle rides on `ctx.username` → `l.username`, and `notify.js` renders it as a
+tappable `wa.me/<handle>` link.
+
+| Situation | Before | After |
+|---|---|---|
+| Lead with a phone | `wa.me/<number>` | unchanged, and **no lookup is made** |
+| No phone, customer typed a handle | buried in `want`, no link | `@handle` + tappable link |
+| No phone, customer said nothing | *"reply in the TM Marketing (93210) inbox"* | handle looked up + tappable link |
+| No phone, no handle anywhere | inbox line | inbox line (unchanged, and TM staff DO read it) |
+| **Multi-lead card, no phone** | 🔴 **no contact route at all** | link, or the inbox line |
+
+🚨 **The multi-lead gap is now closed.** `notifyText`'s multi branch was `d ? link : ''`, so a
+phone-less lead in a batch got *nothing* — not even the inbox line the single card offered. Flagged
+as a known gap on 2026-08-14 and left open; a handle closed it.
+
+🚨 **The handle must contain a LETTER.** My first shape check was `/^[A-Za-z0-9._]{3,30}$/`, which
+matches an all-digit string — and the one all-digit string that reaches this code is a **privacy
+id**, which would have rendered as `wa.me/111222333444555`: a link to a number that does not exist.
+That is precisely the failure this change exists to prevent, rebuilt inside the fix for it. The
+Python bots have carried the letter rule since 2026-08-04 and I dropped it porting to JS. **A test
+caught it**; `gate_test` pins it in both directions.
+
+- `wa.me/<handle>` verified against a real customer's **personal** account, 2026-08-29 — live now,
+  not waiting on any rollout. ⚠️ wa.me does NOT validate the handle, so only ever build the link
+  from WhatsApp's own lookup, never from a display name or typed text.
+- The lookup has a **12s AbortController timeout** and returns `''` on any error — a release must
+  never hang or fail because of it. Pinned by a test that throws from the dep.
+- 🚨 `fetchUsername` is in `gate_test.js` **BASE_DEPS**. `gateRelease` guards on `D.fetchUsername &&`,
+  so a fake that falls BEHIND the real dep bag would not break the suite — it would silently empty
+  it. Same class as FSS's stub that killed 83 tests on 27 Aug.
+
+Tests: gate **85 → 106**, suite **1004 → 1025**. Guards proven in both directions.
+⚠️ **UNPROVEN on organic traffic** — the next no-phone lead is the test.

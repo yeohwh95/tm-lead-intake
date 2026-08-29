@@ -481,6 +481,34 @@ function poolForBrand(brand){
 const SEND_GAP = 5200;
 let _sendChain = Promise.resolve();
 let _lastSend = 0;
+// The customer's WhatsApp username behind a @lid. '' when they have not set one, or on any
+// error — this must never be able to break a lead. Deliberately NOT on the message path: it is
+// called once, at gate release, for a lead that would otherwise go out with no contact at all.
+//
+// 🚨 Same underlying WhatsApp lookup that resolves a number, so it finds no phone we have not
+// already tried. What it returns that nothing else does is the handle.
+// 🚨 NOT a phone. It must never reach a phone field or a wa.me/<number> position.
+async function fetchUsername(jid){
+  const lid = String(jid || '').split('@')[0].replace(/\D/g, '');
+  if (!lid || !WASENDER_TOKEN) return '';
+  const ctl = new AbortController();
+  const t = setTimeout(() => ctl.abort(), 12000);   // never let this hang a release
+  try {
+    const r = await fetch(`${WASENDER_BASE}/fetch-username/${lid}%40lid`,
+      { headers: { 'Authorization': 'Bearer ' + WASENDER_TOKEN, 'User-Agent': UA }, signal: ctl.signal });
+    if (!r.ok) { log('fetchUsername http_' + r.status); return ''; }
+    const j = await r.json();
+    const u = String((j && j.data && j.data.username) || '').trim();
+    // Handles come back MIXED CASE from WhatsApp (ChuKM, WinnieChong_68) — do NOT fold case on a
+    // value from the source of truth. Validate the shape only.
+    // Must contain a letter: an all-digit value is a phone or a privacy id, never a handle.
+    return /^[A-Za-z0-9._]{3,30}$/.test(u) && /[A-Za-z]/.test(u) ? u : '';
+  } catch (e) {
+    log('fetchUsername err: ' + String(e.message || e).slice(0, 60));
+    return '';
+  } finally { clearTimeout(t); }
+}
+
 function waSend(to, text, imageUrl){
   _sendChain = _sendChain.then(async () => {
     if (!WASENDER_TOKEN) { log('waSend skipped — no token'); return null; }
@@ -1863,7 +1891,7 @@ setInterval(() => { firstresponse.gateSweep().catch(e => log('FR gate sweep err'
   // boot: a snapshot would keep treating a departed rep as staff, and would treat a NEWLY added rep's
   // own messages as customer leads, until the next deploy.
   const isStaffPhone = p => { const d = String(p || '').replace(/\D/g, ''); return !!d && (!!identity.nameByPhone(STAFF_BY_LAST9, d) || FR_EXTRA_INTERNAL.has(d)); };
-  firstresponse.init({ waSend, assignLeads, larkWriteLead, notifyStaff, sla, getUnavailable, log, isStaffPhone, wooCheckStock, aiClassify, inDistHours: inFRDistHours, inOpenHours: inFROpenHours, deferStaffNotify, hoursLabel,
+  firstresponse.init({ waSend, assignLeads, larkWriteLead, notifyStaff, sla, getUnavailable, log, isStaffPhone, wooCheckStock, aiClassify, fetchUsername, inDistHours: inFRDistHours, inOpenHours: inFROpenHours, deferStaffNotify, hoursLabel,
     // WHEN a rep will actually pick the lead up, derived from the DISTRIBUTION window — never the
     // operating hours, and never hardcoded (2026-07-30). Tests inject their own.
     nextWindowLabel: () => require('./hours').nextWindowLabel(Date.now(), FR_DIST_DAYS, FR_DIST_START, FR_DIST_END),

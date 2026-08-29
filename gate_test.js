@@ -38,6 +38,11 @@ const BASE_DEPS = {
   isStaffPhone: () => false,
   wooCheckStock: async () => null,
   aiClassify: async () => null,          // force the regex classifier — deterministic, offline
+  // 🚨 Must exist here or the whole username feature is a silent no-op in every test below:
+  // gateRelease guards on `D.fetchUsername &&`, so a fake that has fallen BEHIND the real dep bag
+  // does not break the suite, it quietly empties it. Default returns nothing; the tests that care
+  // override it via initWith({ fetchUsername: ... }).
+  fetchUsername: async () => '',
   inDistHours: () => true,
   inOpenHours: () => true,
   deferStaffNotify: () => {},
@@ -385,7 +390,86 @@ const LIDD = '206218996011144';
     ok('the username hand-off really was exercised', allSent.some(s => /pass username tuan|Passing your username/.test(s.text)));
   }
 
-  console.log(`\n${'='.repeat(54)}\n  ${pass} passed, ${fail} failed\n${'='.repeat(54)}`);
+  
+// ── The handle we look up ourselves (2026-08-29) ──────────────────────────────
+// TM never asked WhatsApp for a handle at all — it only ever asked the customer. Measured across
+// the fleet: 68 of 69 leads released with no contact detail have one.
+
+console.log('\n== Looking the handle up at release ==');
+{
+  // The real path: a privacy customer who never gives us anything, released at the 60-min timeout.
+  // Before today that lead reached a rep with no contact detail whatsoever.
+  const JID = '111222333444555@lid';
+  let asked = 0;
+  reset();
+  initWith({ fetchUsername: async (jid) => { asked += 1; return jid === JID ? 'Fish5201' : ''; } });
+  fr._state().awaitingPhone[JID] = { ts: Date.now() - 61000, asks: 2, cat: 'product',
+                                     want: 'Z900 price', lang: 'en' };
+  await fr.gateSweep();
+  ok('the handle was looked up for a lead with no contact detail', asked === 1);
+  const row = larkRows[larkRows.length - 1] || {};
+  ok('the handle reaches the lead', row.username === 'Fish5201');
+  ok('🚨 the handle NEVER lands in the phone field',
+     !String(row.phone || '').includes('Fish5201'));
+  ok('🚨 the privacy id NEVER lands in the phone field',
+     !String(row.phone || '').includes('111222333444555'));
+
+  // A customer who DID give a number must cost nothing — no lookup at all.
+  const JID2 = '222333444555666@lid';
+  asked = 0; reset();
+  initWith({ fetchUsername: async () => { asked += 1; return 'ShouldNotBeUsed'; } });
+  fr._state().awaitingPhone[JID2] = { ts: Date.now(), asks: 1, cat: 'product',
+                                      want: 'R15', lang: 'en' };
+  await fr.onMessage({ key: { remoteJid: JID2, id: 'm9' }, message: { conversation: '0123456789' } });
+  await new Promise(r => setTimeout(r, 60));
+  ok('🚨 no lookup is made when the customer gave a number', asked === 0);
+
+  // The lookup failing must change nothing.
+  const JID3 = '333444555666777@lid';
+  reset();
+  initWith({ fetchUsername: async () => { throw new Error('WhatsApp down'); } });
+  fr._state().awaitingPhone[JID3] = { ts: Date.now() - 61000, asks: 2, cat: 'product',
+                                      want: 'CBR', lang: 'en' };
+  let threw = false;
+  try { await fr.gateSweep(); } catch { threw = true; }
+  ok('🚨 fails open — a lookup error never breaks the release', !threw);
+  ok('the lead is still released to a rep', larkRows.length > 0);
+}
+
+console.log('\n== The card gives a tappable route either way ==');
+{
+  const { notifyText, handle } = require('./notify');
+  const one = notifyText([{ brand: 'Yamaha', name: 'Owen', want: 'MT-09',
+                            origin: 'WhatsApp Direct', phone: '', username: 'OwenZhun' }]);
+  ok('single card links the handle', one.includes('https://wa.me/OwenZhun'));
+  ok('single card shows the handle', one.includes('@OwenZhun'));
+  ok('🚨 single card does not send the rep to the inbox when it has a handle',
+     !one.includes('93210'));
+  ok('single card says there is nothing to call', one.includes('no number to call'));
+
+  const none = notifyText([{ brand: 'Yamaha', want: 'MT-09', origin: 'WA', phone: '' }]);
+  ok('no phone and no handle still names the inbox', none.includes('93210'));
+
+  const multi = notifyText([
+    { name: 'A', want: 'Z900', brand: 'K', origin: 'WA', phone: '60123456789' },
+    { name: 'B', want: 'R15',  brand: 'Y', origin: 'WA', phone: '', username: 'Fish5201' },
+    { name: 'C', want: 'CBR',  brand: 'H', origin: 'WA', phone: '' }]);
+  ok('multi card keeps the real number', multi.includes('https://wa.me/60123456789'));
+  ok('🚨 multi card now links a handle (was a KNOWN GAP, no route at all)',
+     multi.includes('https://wa.me/Fish5201'));
+  ok('🚨 multi card no longer leaves a phone-less lead with nothing',
+     multi.includes('93210'));
+
+  // 🚨 The handle lands in a URL. Anything that is not a WhatsApp handle must not be pasted in.
+  ok('a privacy id is never treated as a handle', handle({ username: '111222333444555' }) === '');
+  ok('an injected path is rejected', handle({ username: 'a/../../evil' }) === '');
+  ok('a leading @ is stripped, not doubled', handle({ username: '@ChuKM' }) === 'ChuKM');
+  ok('🚨 case is preserved exactly as WhatsApp gave it', handle({ username: 'WinnieChong_68' }) === 'WinnieChong_68');
+  ok('too short is not a handle', handle({ username: 'ab' }) === '');
+  ok('empty is empty', handle({}) === '');
+}
+
+console.log(`\n${'='.repeat(54)}\n  ${pass} passed, ${fail} failed\n${'='.repeat(54)}`);
   try { require('fs').unlinkSync(process.env.FR_STATE_FILE); } catch {}
   try { require('fs').unlinkSync(process.env.FR_EVENTS_FILE); } catch {}
   process.exit(fail ? 1 : 0);
