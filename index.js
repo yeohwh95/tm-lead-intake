@@ -509,7 +509,42 @@ async function fetchUsername(jid){
   } finally { clearTimeout(t); }
 }
 
+// ---- HUMAN PACING (2026-09-01, Benjamin) -----------------------------------------------------
+// TM's WhatsApp number was flagged and the session logged out on 01 Sep. Instant replies are one of
+// the signatures an unofficial session gets scored on — no human answers in 300ms, every time,
+// forever. A customer-facing reply now waits HUMAN_DELAY_MS before it is sent.
+//
+// 🚨 The wait happens BEFORE the shared send chain, never inside it. Inside, a 30s hold would stall
+// EVERY queued outbound behind it — rep DMs, SLA nudges, group cards — and a burst of 10 customers
+// would push the last reply 5 minutes late. Outside, the waits overlap and only the real sends stay
+// serialized by SEND_GAP.
+//
+// Internal traffic is NEVER delayed: group cards and staff DMs are not what WhatsApp scores, and
+// slowing an SLA nudge costs a lead.
+// ⚠️ A CONSTANT 30s is itself a machine signature. HUMAN_DELAY_JITTER_MS spreads it (30–45s at
+// 15000) and is the safer setting; it ships at 0 because 30 seconds is the value Benjamin asked for.
+const HUMAN_DELAY_MS        = Number(process.env.HUMAN_DELAY_MS        || 30000);
+const HUMAN_DELAY_JITTER_MS = Number(process.env.HUMAN_DELAY_JITTER_MS || 0);
+
+// A group JID or a number on the live staff roster is internal. STAFF_BY_LAST9 is rebuilt in place
+// on every roster swap, so this reads the CURRENT roster, never a boot-time snapshot.
+function isInternalTarget(to){
+  const raw = String(to || '');
+  if (raw.includes('@g.us')) return true;
+  const d = raw.replace(/\D/g, '');
+  try { return !!d && !!identity.nameByPhone(STAFF_BY_LAST9, d); } catch { return false; }
+}
+
 function waSend(to, text, imageUrl){
+  if (HUMAN_DELAY_MS > 0 && !isInternalTarget(to)){
+    const wait = HUMAN_DELAY_MS + (HUMAN_DELAY_JITTER_MS > 0 ? Math.floor(Math.random() * HUMAN_DELAY_JITTER_MS) : 0);
+    log(`waSend ⏳ human pacing ${Math.round(wait/1000)}s before replying to ${String(to).replace(/\D/g,'') || to}`);
+    return new Promise(res => setTimeout(() => res(waSendNow(to, text, imageUrl)), wait));
+  }
+  return waSendNow(to, text, imageUrl);
+}
+
+function waSendNow(to, text, imageUrl){
   _sendChain = _sendChain.then(async () => {
     if (!WASENDER_TOKEN) { log('waSend skipped — no token'); return null; }
     const wait = SEND_GAP - (Date.now() - _lastSend);

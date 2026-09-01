@@ -2,6 +2,31 @@
 
 WhatsApp lead → AI extract → Lark CRM + notify the assigned salesperson. **LIVE.**
 
+## ⏳ CUSTOMER REPLIES NOW WAIT 30 SECONDS — 2026-09-01
+
+TM's WhatsApp number was flagged and session 93210 logged out on 01 Sep 10:03 MYT. Harith's read:
+*"we think the system may have flagged the account since got new number"*, and TM chose a **1-week
+cooldown** before the AI messaging system runs again. Benjamin's instruction: slow the bot down,
+because an instant reply is one of the signatures an unofficial session is scored on.
+
+- `HUMAN_DELAY_MS` (default **30000**) — a customer-facing reply waits this long before it is sent.
+- `HUMAN_DELAY_JITTER_MS` (default **0**) — adds `0..N` ms on top. **A constant 30s is itself a
+  machine signature**; 15000 gives 30–45s and is the safer setting. It ships at 0 because 30 seconds
+  is the value that was asked for — change it deliberately, not by accident.
+
+🚨 **The wait happens BEFORE the shared send chain, never inside it.** All outbound is serialized
+through one chain spaced by `SEND_GAP`. A 30s hold *inside* it would stall every queued message
+behind it — rep DMs, SLA nudges, group cards — and a burst of 10 customers would push the last reply
+5 minutes late. Outside the chain the waits overlap and only the real sends stay serialized.
+
+**Internal traffic is never delayed.** `isInternalTarget()` returns true for any `@g.us` group and
+any number on the live staff roster (read from `STAFF_BY_LAST9`, which is swapped in place on every
+roster refresh — so it follows the current roster, not a boot-time snapshot). Group cards and staff
+DMs are not what WhatsApp scores, and slowing an SLA nudge costs a lead.
+
+⚠️ **Unproven.** Deployed while the number was still logged out, so no live customer has been through
+this path yet. The first organic reply after the cooldown is the test.
+
 ## 🔧 THE FUNNEL DID NOT ADD UP, AND THE CARD LISTED ONE PERSON TWICE — fixed 2026-08-23
 
 The 08-21 rebuild shipped and ran for two days. Reviewing what it actually sent found four defects,
