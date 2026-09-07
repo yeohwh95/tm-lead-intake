@@ -25,6 +25,32 @@ function persist() { try { fs.writeFileSync(STORE, JSON.stringify(state)); } cat
 // working-hours gate: is this timestamp inside Mon–Fri 9–6 MYT?
 function inHours(ms) { const d = new Date(ms + MYT); return HOURS.days.includes(d.getUTCDay()) && d.getUTCHours() >= HOURS.startH && d.getUTCHours() < HOURS.endH; }
 
+// ---------------------------------------------------------------------------------------------
+// RECONNECT / BACKLOG GUARD (Benjamin, 2026-09-07)
+// ---------------------------------------------------------------------------------------------
+// `SLA_SWEEP_FROM` is an ABSOLUTE timestamp, so it rots. Set 2 Jul and never touched again, by
+// 7 Sep it meant "enrol 67 days of leads" — and during a 6-minute accidental reconnect that day
+// the sweep DM'd 9 reps before the session dropped on its own. The absolute cutoff is not wrong,
+// but it only holds if a human remembers to bump it before every go-live, and a guard that
+// depends on someone remembering is not a guard.
+//
+// A RELATIVE age cap needs no maintenance and cannot rot. Same reasoning as BACKLOG_MAX_DAYS in
+// index.js, which already caps the backlog report for exactly this reason: "the age cap is what
+// keeps the number meaningful".
+//
+// 🔑 The decision this encodes: after a reconnect, the pre-gap leads were already worked by hand.
+// Notifying a rep about a lead they closed five days ago is noise, and noise trains people to
+// ignore the alert that matters. Those rows stay in Lark, assigned and visible — they are skipped,
+// not deleted.
+const SWEEP_MAX_AGE_H = Number(process.env.SLA_SWEEP_MAX_AGE_H || 24);
+const SWEEP_MAX_AGE_MS = SWEEP_MAX_AGE_H * 3600e3;
+// Unknown age is NEVER fresh: `slaRecCreated` returns 0 when Lark hands back a shape it cannot
+// read, and a row that silently aged to 1970 must not read as a brand-new lead.
+function sweepFresh(createdMs, nowMs) {
+  if (!createdMs) return false;
+  return (nowMs - createdMs) <= SWEEP_MAX_AGE_MS;
+}
+
 function init(injected, opts = {}) {
   deps = injected;
   if (opts.now) now = opts.now;
@@ -208,4 +234,4 @@ function stats() {
   }
   return { reassign: process.env.SLA_REASSIGN === '1' ? 'ON' : 'PAUSED', reps: Object.keys(state.reps).length, tracked, byStatus, pending: pendingLeads };
 }
-module.exports = { init, register, onReply, tick, scoreboard, stats, inHours, _state: () => state, NUDGE_MS, REASSIGN_MS };
+module.exports = { init, register, onReply, tick, scoreboard, stats, inHours, sweepFresh, _state: () => state, NUDGE_MS, REASSIGN_MS, SWEEP_MAX_AGE_H };

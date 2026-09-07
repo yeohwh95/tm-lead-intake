@@ -146,6 +146,25 @@ sla.init(deps, { now: () => clock });
   sla.register('Ali', '+60122223333', [{ recordId: 'rec9', summary: 'x', brand: '', custName: 'z', custPhone: '' }], 9009);
   ok('off-hours (Sunday) register skipped', !sla._state().reps.Ali);
 
+  // ---- sweepFresh: the reconnect / backlog guard (2026-09-07) ----
+  // Why these numbers: SLA_SWEEP_FROM sat at 2 Jul untouched for two months, so on 7 Sep the sweep
+  // considered 67 days of leads enrollable. During a 6-minute accidental reconnect that day it
+  // DM'd 9 reps before the session dropped. The age cap makes that impossible without anyone
+  // having to remember to bump a timestamp.
+  const H = 3600e3;
+  const T0 = Date.UTC(2026, 8, 7, 12, 0, 0);            // 7 Sep 2026 20:00 MYT
+  ok('sweepFresh: a lead from 1 minute ago is fresh', sla.sweepFresh(T0 - 60000, T0));
+  ok('sweepFresh: 23h old is still fresh', sla.sweepFresh(T0 - 23 * H, T0));
+  ok('sweepFresh: exactly 24h is fresh (boundary inclusive)', sla.sweepFresh(T0 - 24 * H, T0));
+  ok('sweepFresh: 24h + 1ms is STALE', !sla.sweepFresh(T0 - 24 * H - 1, T0));
+  ok('sweepFresh: the 6-day outage case is STALE', !sla.sweepFresh(T0 - 6 * 24 * H, T0));
+  ok('sweepFresh: the 67-day backlog case is STALE', !sla.sweepFresh(T0 - 67 * 24 * H, T0));
+  // slaRecCreated returns 0 when Lark hands back a shape it cannot read. A row that silently aged
+  // to 1970 must NEVER read as brand-new — that would make the guard enrol the oldest rows first.
+  ok('sweepFresh: unknown age (0) is never fresh', !sla.sweepFresh(0, T0));
+  ok('sweepFresh: undefined age is never fresh', !sla.sweepFresh(undefined, T0));
+  ok('sweepFresh: default cap is 24h', sla.SWEEP_MAX_AGE_H === 24);
+
   console.log(`\n${pass} passed, ${fail} failed`);
   process.exit(fail ? 1 : 0);
 })();

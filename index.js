@@ -1182,11 +1182,15 @@ async function slaSweep(){
     ]},
     sort: [{ field_name: 'date created', desc: true }],
   });
-  let done = 0, skipPre = 0, skipRep = 0;
+  let done = 0, skipPre = 0, skipRep = 0, skipOld = 0;
   for (const it of items){
     if (done >= SLA_SWEEP_CAP) break;
     const f = it.fields || {};
-    if (slaRecCreated(f) < SLA_SWEEP_FROM) { skipPre++; continue; }   // SAFETY: never enrol pre-cutoff (historical) leads
+    const created = slaRecCreated(f);
+    if (created < SLA_SWEEP_FROM) { skipPre++; continue; }   // SAFETY: never enrol pre-cutoff (historical) leads
+    // RECONNECT GUARD: only FRESH leads may be enrolled. After an outage the pre-gap rows were
+    // handled by hand, so DMing a rep about them is noise. See sla.sweepFresh for the full why.
+    if (!sla.sweepFresh(created, now)) { skipOld++; continue; }
     const sm = f['Salesman'];
     const oid = Array.isArray(sm) ? (sm[0]?.id || '') : '';
     const rep = STAFF_BY_OPENID[oid];
@@ -1203,6 +1207,8 @@ async function slaSweep(){
     done++;
   }
   if (done) log(`SLA sweep: enrolled ${done} lead(s) (cap ${SLA_SWEEP_CAP})`);
+  // A reconnect that enrols nothing must SAY why, or a silent sweep and a broken sweep look identical.
+  else if (skipOld) log(`SLA sweep: 0 enrolled — ${skipOld} candidate(s) older than ${sla.SWEEP_MAX_AGE_H}h (reconnect/backlog guard); they stay in Lark, assigned, and are never auto-DM'd`);
   else if (skipRep) log(`SLA sweep: 0 enrolled — ${skipRep} candidate(s) have a salesperson not in the roster (check STAFF map)`);   // precutoff-only = steady state, stay quiet
 }
 // ---------------------------------------------------------------------------------------------
