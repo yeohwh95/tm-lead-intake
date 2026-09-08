@@ -541,6 +541,43 @@ console.log('\n== A number arriving after the lead already went out ==');
      !(fr._state().awaitingLateContact || {})[JID2]);
 }
 
+console.log('\n== 🚨 TWO SALESPEOPLE, ONE ENQUIRY — the 30s pacer race (live 2026-09-08) ==');
+{
+  // Real defect, real customer: 194970191454306@lid sent "012-345 4000" at 13:47:08 MYT and
+  // "@CelerySauce" 24s later. waSend paces every customer reply by 30 SECONDS, and the hold used
+  // to be cleared only AFTER that ack, so the second message re-entered a gate that was still
+  // open and released a SECOND time. Amir was assigned the phone lead, Adib the username lead —
+  // two Lark rows, two round-robin slots, two reps on one buyer about one bike.
+  //
+  // A slow waSend is the whole point of this test: with an instant fake the race cannot happen and
+  // the test passes against the broken code too.
+  reset();
+  let slowAssigned = [];
+  initWith({
+    waSend: async (to, text) => { sent.push({ to, text }); allSent.push({ to, text });
+                                  await wait(120); },          // stands in for the 30s human pacer
+    larkWriteLead: async (l) => { larkRows.push(l); slowAssigned.push(l); return 'recRACE'; },
+  });
+  const JID3 = '194970191454306@lid';
+  fr._state().awaitingPhone[JID3] = { ts: Date.now(), asks: 1, cat: 'product',
+                                      want: 'Hi, I would like to know more about: 2024 Modenas Ninja 650',
+                                      lang: 'en' };
+  fr.onMessage({ jid: JID3, phone: '', kind: 'text', text: '012-345 4000' });
+  await wait(40);                       // the ack is still in flight, exactly as it was live
+  fr.onMessage({ jid: JID3, phone: '', kind: 'text', text: '@CelerySauce' });
+  await wait(600);
+
+  ok('🚨 ONE salesperson, not two', slowAssigned.length === 1);
+  ok('the hold is gone', !(fr._state().awaitingPhone || {})[JID3]);
+  ok('the surviving lead carries the PHONE, not the handle',
+     slowAssigned.length === 1 && /4000/.test(JSON.stringify(slowAssigned[0])));
+  ok('the customer is acked once, not twice',
+     sent.filter(s => /Passing this to our sales advisor/i.test(s.text)).length === 1);
+  ok('🚨 the username ack never went out on top of it',
+     !sent.some(s => /Passing your username/i.test(s.text)));
+  initWith({});                          // restore the shared dep bag for anything after this
+}
+
 console.log('\n== The hold is now 15 minutes ==');
 {
   // ⚠️ This file sets FR_GATE_MS=60000 at the top so the timeout path is testable, so the

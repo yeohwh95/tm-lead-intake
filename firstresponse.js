@@ -631,9 +631,16 @@ function gateHold(jid, cat, want, lang, opts){
   frLogEvent('gate_held', jid, { has_phone: false, cat, phone: '', want: String(want).slice(0, 120), recordId: null });
 }
 
+// Drop the hold. THE HOLD IS THE LOCK: while `awaitingPhone[jid]` exists, every new message from
+// that chat is routed straight back into gateOnReply, so anything that decides to release must
+// clear it BEFORE it awaits anything, not after. Idempotent — gateRelease calls it again.
+function gateClose(jid){
+  if ((state.awaitingPhone || {})[jid]){ delete state.awaitingPhone[jid]; persist(); }
+}
+
 // Release a held lead: assign for real, then tell the customer who has them.
 async function gateRelease(jid, h, phone, reason){
-  delete (state.awaitingPhone || {})[jid]; persist();
+  gateClose(jid);
   const ctx = { gated: true };
   // A handle the customer TYPED comes in on h.username. If they gave us nothing at all, ask
   // WhatsApp for theirs — measured 2026-08-29 across the fleet, 68 of 69 leads released with no
@@ -748,6 +755,18 @@ async function gateOnReply(jid, h, text, bphone){
   const lid = jid.includes('@lid') ? jid.split('@')[0] : '';
   const phone = gateParsePhone(text, lid);
   if (phone){
+    // 🚨 TWO SALESPEOPLE, ONE ENQUIRY — the second way it happens, live on 2026-09-08.
+    // gateRelease() clears the hold, but only on the far side of this ack, and since `3893ef7`
+    // waSend paces every customer reply by 30 SECONDS. That turned a sub-second race into a
+    // 30-second one. Real customer 194970191454306@lid: "012-345 4000" at 13:47:08, "@CelerySauce"
+    // at 13:47:32. The second arrived while this call was still asleep in the pacer with a LIVE
+    // awaitingPhone entry, so it re-entered the gate and took the username branch below — and both
+    // branches released. Amir got the phone lead at 13:47:54, Adib got the username lead at
+    // 13:48:18: two Lark rows, two round-robin slots, two reps ringing one buyer about one bike.
+    // Close the hold while we still own the thread, THEN do the slow work. A later message now
+    // falls through to the 7-day re-greet guard and is logged `repeat` — correct, the rep has the
+    // number and does not need a second identifier.
+    gateClose(jid);
     gateLogEvent('phone_received', jid, { phone,
       waited_seconds: Math.round((Date.now() - (h.ts || Date.now())) / 1000) });
     try { await D.waSend(sendTarget(jid, phone), gateGot(h.lang)); } catch {}
@@ -759,6 +778,7 @@ async function gateOnReply(jid, h, text, bphone){
   // happily store it, and a rep dialling a handle is the exact failure this gate exists to stop.
   const username = gateParseUsername(text, !!h.askedUsername);
   if (username){
+    gateClose(jid);                       // same lock, same reason — see the phone branch above
     try { await D.waSend(sendTarget(jid, bphone), gateGotUser(h.lang)); } catch {}
     await gateRelease(jid, { ...h, username,
                              want: `@${username} (username, not dialable) · ${h.want}` },

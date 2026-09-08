@@ -2,6 +2,66 @@
 
 WhatsApp lead → AI extract → Lark CRM + notify the assigned salesperson. **LIVE.**
 
+## 🚨 TWO SALESPEOPLE, ONE ENQUIRY — the 30s pacer reopened a closed race — 2026-09-08
+
+Benjamin sent the screenshot: one customer, two namecards, **Amir at 1:47PM and Adib at 1:48PM**.
+
+**Timeline, from the Render logs, not inferred** (`194970191454306@lid`, MYT):
+
+| | |
+|---|---|
+| 13:45:09 | `"Hi, I would like to know more about: 2024 Modenas Ninja 650"` — @lid, no phone |
+| 13:45:20 | `FR ⏳ HELD for phone` → answered + gate ask |
+| 13:47:08 | customer: **`012-345 4000`** |
+| 13:47:18 | `gateOnReply` matches the phone → `await waSend(gateGot)` → **sleeps 30s.** The hold is still live |
+| 13:47:32 | customer: **`@CelerySauce`** (24s later) |
+| 13:47:42 | second flush reads `awaitingPhone[jid]` — **still there** → username branch → another 30s sleep |
+| 13:47:54 | first sleep ends → `gateRelease` → **assign → Amir** |
+| 13:48:18 | second sleep ends → `gateRelease` → **assign → Adib** |
+
+**Root cause: the hold IS the lock, and it was being dropped after the slow work instead of before
+it.** `gateRelease` deletes `state.awaitingPhone[jid]` on its first line — but `gateOnReply` awaits
+the customer ack *first*, and since `3893ef7` every customer-facing send waits **30 seconds**. That
+turned a sub-second race nobody could hit into a 30-second one a normal typist walks straight into.
+Two Lark rows, two round-robin slots, two reps ringing one buyer about one bike.
+
+🔑 **A latency change is a concurrency change.** The 30s pacer was added for WhatsApp-flagging
+reasons and reviewed as a copy/timing change. It was neither: it widened every window between a
+decision and the state write that records it. **Nothing else in this file's history moved that
+window — this defect did not exist before 01 Sep.**
+
+🚨 **This file already carried the fix for the OTHER way this happens** (a qualify-parked lead being
+assigned twice — the `h.recordId` branch in `gateRelease`, 2026-08-16). That guard was correct and
+still is; it simply had nothing to say about one hold releasing twice. **Two doors into one failure,
+one of them bolted.**
+
+**Fix:** `gateClose(jid)` — idempotent, drops the hold — is called **synchronously at the top of both
+release branches**, before any await. `gateRelease` still calls it (the timeout path comes in that
+way). A later message now falls through to the 7-day re-greet guard and logs `repeat`: correct, the
+rep has a dialable number and does not need a second identifier.
+
+**Blast radius, measured against the durable gate log, not the logs Render rotates:**
+`/gate-status` returned **349 events, 04 Aug 12:06 → 08 Sep 14:11** (cap is 500, so not truncated —
+the whole life of the gate). Grouping every terminal event by chat: **exactly ONE chat has two.**
+This one. No earlier victim, and no second victim today.
+⚠️ That is consistent with the cause: the pacer shipped 01 Sep, and TM's number was in its one-week
+cooldown, so this is close to the first organic customer through the paced gate path.
+
+**Proof the test is a guard, not decoration:** `gate_test.js` replays both messages 40ms apart
+through a **deliberately slow** `waSend` (an instant fake cannot reproduce the race and would pass
+against the broken code). Reverted against the pre-fix file it fails 3 of 5 assertions, including
+`🚨 ONE salesperson, not two`. Gate **122 → 127**, and firstresponse/qualify/sell/leadsummary/sla all
+still green.
+
+⚠️ **Amir and Adib both currently hold this lead.** The code stops the next one; it does not undo
+this one. One of the two Lark rows needs a human — and per this file's own never-delete rule, that
+is a correction someone makes deliberately, not something to script.
+
+⚠️ **Sibling exposure, checked not assumed.** The other paths that assign after an await
+(`phase:'model'`, the greeting flow) set `state.greeted[jid]` **synchronously before** their awaits,
+so a second message hits the re-greet guard. The gate was the only hole. **The rule to carry to the
+other four bots: write the state that closes a flow before the send that announces it.**
+
 ## ⏳ CUSTOMER REPLIES NOW WAIT 30 SECONDS — 2026-09-01
 
 TM's WhatsApp number was flagged and session 93210 logged out on 01 Sep 10:03 MYT. Harith's read:
