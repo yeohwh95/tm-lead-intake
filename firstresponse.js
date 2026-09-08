@@ -957,7 +957,27 @@ async function flush(jid){
   // day instead of announcing a closure. null while the window is open (a rep gets it immediately).
   const nextLabel = (D.inDistHours && !D.inDistHours() && D.nextWindowLabel) ? (D.nextWindowLabel() || null) : null;
 
-  if (q && now - q.ts < PENDING_MODEL_MS){
+  // 🚨 `admin` is NEVER the customer's answer, so it must not close the qualify flow.
+  // Same defect as the TikTok link (2026-09-08), found by auditing for it: `phase:'model'` collapses
+  // every verdict that is not sell/loan/testride into `product` and assigns a salesperson. So the
+  // SAME message got two opposite outcomes depending only on whether the customer had said "Hi"
+  // first — measured, not reasoned:
+  //   "berapa kos nk tukar nama motor"  first message → admin notified, no lead ✅
+  //                                     after "Hi"    → assigned to a SALES rep, admin never told ❌
+  // That is the 2026-08-28 tukar-nama failure re-entered through a different door, and that
+  // customer waited 7 days. Falling through is all that is needed: the admin branch sits ABOVE the
+  // 7-day re-greet guard precisely so a new question from a greeted customer still lands.
+  // ⚠️ The qualify entry is deliberately LEFT ALIVE — they still have not told us which bike, and
+  // an admin question does not answer that. If they name a model later it works exactly as before.
+  //
+  // 🚨 `skip` is deliberately NOT exempted, and that is the harder call. It means "the classifier
+  // could not read this", which per the 2026-08-15 split covers two OPPOSITE things: a vendor robot
+  // nobody needs to see, and A POSSIBLE BUYER. Inside the qualify flow the customer is replying TO
+  // US, so the second is overwhelmingly the likely one — a bare ad link is exactly this shape and
+  // is a real ad-click lead. Dropping a buyer costs the sale; a stray robot message costs a rep one
+  // glance. **Known and accepted:** an OTP landing mid-flow still becomes a lead.
+  const notAnAnswer = (cat === 'admin');
+  if (q && !notAnAnswer && now - q.ts < PENDING_MODEL_MS){
     // ── They answered something we asked for ──────────────────────────────────────────────────
     // phase 'detail' = the off-hours qualification (model + cash/loan), lead ALREADY parked.
     // phase 'model'  = the in-window greeting flow, nothing written yet.
@@ -976,11 +996,16 @@ async function flush(jid){
       }
       if (qVague){ delete state.qualify[jid]; persist(); return; }   // asked twice, go quiet. Queue untouched.
       const qualified = `${q.want || ''} | qualified: ${text}`.slice(0, 200);
+      // 🚨 Close the flow BEFORE the slow work, never after — the same rule the phone gate had to
+      // learn on 2026-09-08. `larkPatchWant` is a network call, and while it is in flight this
+      // entry is still live, so a second message from the same customer re-enters this branch and
+      // patches the row twice. The window is small today; the gate's window was small too, right
+      // up until the 30s pacer made it thirty seconds wide. Do not rely on a window staying small.
+      delete state.qualify[jid]; persist();
       try { if (D.larkPatchWant && q.recordId) await D.larkPatchWant(q.recordId, qualified); }
       catch(e){ D.log('FR lark patch-want err:', String(e.message||e).slice(0,60)); }
       frLogEvent('qualified', jid, { has_phone: !!b.phone, cat: q.cat || cat, phone: b.phone || '',
         want: qualified.slice(0, 120), recordId: q.recordId || null, note: 'off_hours_qualify' });
-      delete state.qualify[jid]; persist();
       if (b.phone){
         await D.waSend(sendTarget(jid, b.phone), nextLabel ? closingLine(lang, nextLabel)
           : tpl(q.cat || cat, lang, null, '', null));

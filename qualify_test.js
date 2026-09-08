@@ -477,6 +477,63 @@ const initWith = (o) => fr.init({ ...BASE, ...(o || {}) });
     initWith();
   }
 
+  // ── 19. 🚨 SAME CLASS, FOUND BY AUDIT (2026-09-08) ────────────────────────────────────────
+  console.log('\n19. An admin question is not an answer, and the flow closes before the slow work');
+  {
+    const ADMIN_Q = 'berapa kos nk tukar nama motor sikal ye tuan';
+    // 'Hi' has to read as a greeting or the qualify flow never opens and this proves nothing.
+    const ai = c => async t => /^hi$/i.test(String(t).trim()) ? 'greeting' : c;
+    let adminDM = [];
+    const withAdmin = (o) => initWith({ ...(o || {}),
+      waSend: async (to, text) => { sent.push({ to, text });
+        if (String(to).startsWith('601116661324')) adminDM.push(text); return 'm1'; } });
+
+    // Control: the same question as the customer's FIRST message routes to admin correctly today.
+    reset(); adminDM = [];
+    withAdmin({ aiClassify: ai('admin'), inDistHours: () => true, inOpenHours: () => true });
+    fr.onMessage({ jid: 'adm1@s.whatsapp.net', phone: '60111000031', kind: 'text', text: ADMIN_Q });
+    await wait(120);
+    ok('control: admin question as the first message reaches admin', adminDM.length === 1);
+    ok('control: and creates no sales lead', larkRows.length === 0);
+
+    // 🚨 The defect: the identical question, asked after "Hi", used to be force-promoted to
+    // `product` and assigned to a SALES rep, with admin never told. 2026-08-28 all over again.
+    reset(); adminDM = [];
+    withAdmin({ aiClassify: ai('admin'), inDistHours: () => true, inOpenHours: () => true });
+    fr.onMessage({ jid: 'adm2@s.whatsapp.net', phone: '60111000032', kind: 'text', text: 'Hi' });
+    await wait(120);
+    ok('the qualify flow opened', !!fr._state().qualify['adm2@s.whatsapp.net']);
+    fr.onMessage({ jid: 'adm2@s.whatsapp.net', phone: '60111000032', kind: 'text', text: ADMIN_Q });
+    await wait(150);
+    ok('🚨 admin is told, even mid-qualify', adminDM.length === 1);
+    ok('🚨 and NO salesperson was assigned', larkRows.length === 0);
+    ok('the qualify entry stays alive — they still never named a bike',
+       !!fr._state().qualify['adm2@s.whatsapp.net']);
+
+    // And the flow still works afterwards: naming a model assigns exactly as before.
+    initWith({ aiClassify: async () => null, inDistHours: () => true, inOpenHours: () => true });
+    fr.onMessage({ jid: 'adm2@s.whatsapp.net', phone: '60111000032', kind: 'text', text: 'z900 ada stok?' });
+    await wait(150);
+    ok('naming a model after the admin detour still assigns', larkRows.length === 1);
+
+    // 🚨 The gate's lesson, applied to phase 'detail': the entry must be cleared BEFORE the Lark
+    // call, not after it, or a second message re-enters and patches the same row twice.
+    reset();
+    const JIDD = 'det1@s.whatsapp.net';
+    initWith({ inDistHours: () => true, inOpenHours: () => true, aiClassify: async () => null,
+               larkPatchWant: async (rec, t) => { await wait(160); patchedWant.push({ rec, text: t }); } });
+    fr._state().greeted[JIDD] = Date.now();
+    fr._state().qualify[JIDD] = { ts: Date.now(), asks: 1, phase: 'detail', cat: 'product',
+                                  want: 'z900', lang: 'bm', recordId: 'recX', modelKnown: true };
+    fr.onMessage({ jid: JIDD, phone: '60111000033', kind: 'text', text: 'cash' });
+    await wait(40);                                   // the Lark patch is still in flight
+    fr.onMessage({ jid: JIDD, phone: '60111000033', kind: 'text', text: 'loan pun boleh' });
+    await wait(400);
+    ok('🚨 the Lark row is patched ONCE, not twice', patchedWant.length === 1);
+    ok('🚨 and no second lead was created', larkRows.length === 0);
+    initWith();
+  }
+
   console.log(`\n${'='.repeat(54)}\n  ${pass} passed, ${fail} failed\n${'='.repeat(54)}`);
   for (const f of [process.env.FR_STATE_FILE, process.env.FR_EVENTS_FILE]) { try { require('fs').unlinkSync(f); } catch {} }
   process.exit(fail ? 1 : 0);

@@ -2,6 +2,75 @@
 
 WhatsApp lead → AI extract → Lark CRM + notify the assigned salesperson. **LIVE.**
 
+## 🔍 AUDIT: I went looking for more of the same, and found two — 2026-09-08
+
+After the two incidents below, Benjamin asked whether anything else carried the same risk. Both
+defects are one bug class stated two ways, so the audit hunted both shapes across the fleet:
+
+- **(a) the lock dropped late** — a state write that CLOSES a flow placed *after* an `await`, so a
+  second message from the same customer re-enters the flow that is already ending.
+- **(b) the verdict force-promoted** — a routing decision taken on a classifier verdict that does
+  not mean what the branch assumes it means.
+
+### 🚨 Why this class is TM-only, and the sentence to remember
+**TM is the only bot where it is even possible.** KoonKen, Metal Age and FSS all declare
+`async def webhook(...)` and then call a **synchronous** `_process(...)` inside it. A blocking call
+on uvicorn's event loop serializes every inbound message, so two messages from one chat can never be
+in flight together — their gate has the same "ack first, assign second" ordering as TM's and simply
+cannot lose the race. TM is Node: every `await` yields, so two `flush()` calls interleave happily.
+🔑 **Their safety is accidental and it costs them something else** (one slow Sheets call blocks the
+whole inbox). Do not "fix" that without re-reading this section — the serialization is load-bearing.
+
+### Found and fixed
+
+**1. `phase:'detail'` patched Lark before closing the flow (shape a).** The qualify entry was deleted
+*after* `await larkPatchWant`, so a second answer arriving during that network call re-entered the
+branch and patched the same row twice. Identical to the gate defect below, one flow over. The window
+is small today — **so was the gate's, right up until the 30s pacer made it thirty seconds wide.**
+Fixed by moving the delete above the await.
+
+**2. An ADMIN question mid-qualify was assigned to a salesperson (shape b).** `phase:'model'`
+collapses every verdict that is not sell/loan/testride into `product`. Measured end-to-end, the same
+message got two opposite outcomes depending only on whether the customer had said "Hi" first:
+
+| "berapa kos nk tukar nama motor" | Lark row | Admin told |
+|---|---|---|
+| as the customer's first message | none ✅ | yes ✅ |
+| as the answer to "which bike?" | **assigned to a sales rep** ❌ | **never** ❌ |
+
+That is the 2026-08-28 tukar-nama failure re-entered through a different door, and that customer
+waited 7 days. `admin` is now never treated as an answer; it falls through to the admin branch, which
+already sits above the 7-day re-greet guard. The qualify entry is left alive — an admin question does
+not tell us which bike.
+
+### Checked and CLEAN — do not re-audit these
+`lateContact` clears its entry before the send · the greeting and main paths set `state.greeted`
+before every await · the admin branch stamps its 24h cooldown before both sends · `drainFRDeferred`
+has a real `frDraining` re-entrancy lock · phase `'model'` deletes its entry first.
+
+### ⚠️ Open, deliberately not changed
+
+- 🔴 **`flush()` has no re-entrancy guard at all.** Two flushes for one chat cannot currently overlap
+  in the `await classifySmart` window only because **the OpenAI abort timeout (8s) is shorter than
+  `FR_DEBOUNCE_MS` (10s)** — flush #2 fires at message+10s, by which point flush #1's AI call has
+  already aborted. **That guard is arithmetic, not design. Nothing states it and no test pins it.**
+  Raising the classify timeout, or lowering `FR_DEBOUNCE_MS`, silently reopens a race that assigns
+  two salespeople. 🔑 **If either number is ever touched, keep `FR_DEBOUNCE_MS` strictly greater
+  than the classify timeout, or add a real per-chat lock.**
+- ⚪ **`skip` mid-qualify still becomes a lead, and that is the intended trade-off.** Per the
+  2026-08-15 split, `skip` means "could not read this", covering both a vendor robot and A POSSIBLE
+  BUYER. Inside the qualify flow the customer is replying to us, so the buyer reading dominates — a
+  bare ad link is exactly this shape. Dropping a buyer costs the sale; a stray OTP costs a rep one
+  glance. ⚠️ I did try exempting `skip` and **my own link test caught it**: it deleted the ad-click
+  lead entirely. Kept as-is on purpose.
+- 🅿️ **`ai-crm` (KS Thong) has the same precondition and was NOT audited.** Its webhook fires
+  `asyncio.create_task(_ingest(...))` with **no per-chat lock**, so concurrent processing of one
+  chat is possible exactly as it is on TM. Whether any state write sits on the wrong side of an
+  await there is unknown. Different client, different repo — **queue it, do not bundle it.**
+
+Tests: qualify **106 → 115**; suite **1077**, all 18 files green. Section 19 fails 4 assertions
+against the pre-fix file, including `🚨 admin is told, even mid-qualify`.
+
 ## 🚨 A LINK IS THE AD, NOT THE ANSWER — a trade-in was assigned to a sales rep — 2026-09-08
 
 Second defect the same afternoon, **unrelated to the one below it** — Benjamin asked whether the bot
