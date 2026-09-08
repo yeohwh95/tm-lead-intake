@@ -14,6 +14,7 @@
 process.env.FIRSTRESPONSE_ON = '1';
 process.env.FR_DEBOUNCE_MS = '5';
 process.env.FR_GATE_MS = '60000';
+process.env.FR_LINK_WAIT_MS = '120';   // the real default is 45s; short here so the suite stays fast
 process.env.FR_STATE_FILE = require('path').join(require('os').tmpdir(), `fr_qual_state_${process.pid}.json`);
 process.env.FR_EVENTS_FILE = require('path').join(require('os').tmpdir(), `fr_qual_events_${process.pid}.jsonl`);
 for (const f of [process.env.FR_STATE_FILE, process.env.FR_EVENTS_FILE]) { try { require('fs').unlinkSync(f); } catch {} }
@@ -411,6 +412,70 @@ const initWith = (o) => fr.init({ ...BASE, ...(o || {}) });
   await wait(80);
   ok('🚨 silent after the SHORT ask → still exactly one queue entry for the drain', deferred.length === 1);
   ok('🚨 and the Lark row exists regardless of the ask variant', larkRows.length === 1);
+
+  // ── 18. 🚨 A LINK IS THE AD, NOT THE ANSWER (live incident 2026-09-08) ─────────────────────
+  console.log('\n18. A bare link must not close the qualify flow and commit a salesperson');
+  {
+    // +60102723324, 14:26-14:28 MYT. "Hi afternoon" → the bot asked which bike → the customer sent
+    // the TikTok ad he had tapped → the 10s debounce fired and accepted THAT as his answer →
+    // `product` → Fazwan, a sales rep. 22 seconds later: "saya nak jual motor boleh ke? tapi masih
+    // ada hutang dengan aeon" — a TRADE-IN, which belongs to Fitri. The qualify state was already
+    // consumed, so the re-greet guard swallowed the sentence and nobody ever read it.
+    const LINK = 'https://vt.tiktok.com/ZSqr7MWKF/';
+    const SELL = 'saya nak jual motor boleh ke ?\n\n*tapi masih ada hutang dengan aeon';
+    const JID = 'qlink1@s.whatsapp.net', PH = '60102723324';
+
+    // The classifier is not the thing that was broken, and this pins that: it reads the sentence
+    // correctly on its own, reads the two lines together correctly, and calls the URL unreadable.
+    ok('the URL alone carries no intent (classifier says skip)', fr._classify(LINK, false).cat === 'skip');
+    ok('the sentence alone is a sell', fr._classify(SELL, false).cat === 'sell');
+    ok('🚨 link + sentence together are STILL a sell', fr._classify(LINK + ' \n ' + SELL, false).cat === 'sell');
+
+    reset(); initWith({ inDistHours: () => true, inOpenHours: () => true });
+    fr.onMessage({ jid: JID, phone: PH, kind: 'text', text: 'Hi afternoon' });
+    await wait(80);
+    ok('the greeting flow opened as before', !!fr._state().qualify[JID]);
+
+    fr.onMessage({ jid: JID, phone: PH, kind: 'text', text: LINK });
+    await wait(60);                                     // past the 5ms debounce, inside the link wait
+    ok('🚨 the link did NOT assign anybody', larkRows.length === 0);
+    ok('🚨 and the qualify flow is still open for the real answer', !!fr._state().qualify[JID]);
+    ok('the wait is visible in the log, not silent', logs.some(l => /link only, waiting/.test(l)));
+
+    fr.onMessage({ jid: JID, phone: PH, kind: 'text', text: SELL });
+    await wait(150);
+    ok('🚨 exactly ONE lead, not two', larkRows.length === 1);
+    ok('🚨 it went to FITRI the purchaser, not a sales rep', larkRows[0] && larkRows[0].assignee === 'Fitri');
+    ok('the trade-in reason survived onto the row', larkRows[0] && /jual motor/i.test(String(larkRows[0].want)));
+
+    // The regression that would make this fix worse than the bug: a customer who sends a link and
+    // then genuinely stops must still become a lead, exactly as they do today.
+    reset(); initWith({ inDistHours: () => true, inOpenHours: () => true });
+    fr.onMessage({ jid: 'qlink2@s.whatsapp.net', phone: '60102723325', kind: 'text', text: 'Hi' });
+    await wait(80);
+    fr.onMessage({ jid: 'qlink2@s.whatsapp.net', phone: '60102723325', kind: 'text', text: LINK });
+    await wait(300);                                    // let the link wait expire with nothing after it
+    ok('🚨 a link with NOTHING after it still becomes a lead', larkRows.length === 1);
+
+    // And the wait is once per buffer, so a link-spammer cannot hold their own lead open forever.
+    reset(); initWith({ inDistHours: () => true, inOpenHours: () => true });
+    fr.onMessage({ jid: 'qlink3@s.whatsapp.net', phone: '60102723326', kind: 'text', text: 'Hi' });
+    await wait(80);
+    fr.onMessage({ jid: 'qlink3@s.whatsapp.net', phone: '60102723326', kind: 'text', text: LINK });
+    await wait(60);
+    fr.onMessage({ jid: 'qlink3@s.whatsapp.net', phone: '60102723326', kind: 'text', text: 'https://vt.tiktok.com/AAAA/' });
+    await wait(300);
+    ok('🚨 the hold is once per buffer, never renewed by more links', larkRows.length === 1);
+
+    // An ad SCREENSHOT is a real answer — the customer chose to show us a bike. Unchanged.
+    reset(); initWith({ inDistHours: () => true, inOpenHours: () => true });
+    fr.onMessage({ jid: 'qlink4@s.whatsapp.net', phone: '60102723327', kind: 'text', text: 'Hi' });
+    await wait(80);
+    fr.onMessage({ jid: 'qlink4@s.whatsapp.net', phone: '60102723327', kind: 'image', caption: '' });
+    await wait(80);
+    ok('an ad screenshot still assigns immediately, no wait', larkRows.length === 1);
+    initWith();
+  }
 
   console.log(`\n${'='.repeat(54)}\n  ${pass} passed, ${fail} failed\n${'='.repeat(54)}`);
   for (const f of [process.env.FR_STATE_FILE, process.env.FR_EVENTS_FILE]) { try { require('fs').unlinkSync(f); } catch {} }

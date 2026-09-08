@@ -2,6 +2,56 @@
 
 WhatsApp lead → AI extract → Lark CRM + notify the assigned salesperson. **LIVE.**
 
+## 🚨 A LINK IS THE AD, NOT THE ANSWER — a trade-in was assigned to a sales rep — 2026-09-08
+
+Second defect the same afternoon, **unrelated to the one below it** — Benjamin asked whether the bot
+had suddenly gone wrong at assignment. It had not; two different things broke on one day.
+
+**Timeline (`109109600899207@lid` / +60102723324, MYT):**
+
+| | |
+|---|---|
+| 14:26:52 | `"Hi afternoon"` → greeting → the bot asks which bike. Correct |
+| 14:27:14 | customer sends the TikTok ad he tapped: `https://vt.tiktok.com/ZSqr7MWKF/` |
+| 14:27:24 | 10s debounce fires. **That URL is accepted as his answer.** `finalCat` falls through to `product` → **assigned to Fazwan, a SALES rep** |
+| 14:27:36 | **`"saya nak jual motor boleh ke? *tapi masih ada hutang dengan aeon"`** — a TRADE-IN. 22 seconds too late: `state.qualify` was consumed, so the 7-day re-greet guard swallowed it and nobody ever read the sentence |
+
+🔑 **The classifier was never wrong.** Measured on the exact strings: the sentence alone → `sell`;
+the link and the sentence together → `sell`; **the URL alone → `skip`, meaning "I cannot read this".**
+Sixteen minutes earlier the same classifier read *"I'm planning to sell my motorcycle"* and routed it
+to **Fitri** correctly. The bug is that `phase:'model'` **force-promotes every non-sell verdict to
+`product`** — so an explicit "unreadable" became "product enquiry" and committed a salesperson to it.
+
+🚨 **This is NOT the 30s pacer.** The routing decision is made 10s after each message regardless of
+how slowly the bot then speaks; without the pacer Fazwan's card would simply have gone out 30s
+earlier and the sell sentence would still have arrived into a closed flow. **Do not merge these two
+incidents when reasoning about either.** What they do share is shape: *the bot commits state on a
+partial picture while the customer is still typing.*
+
+**Fix:** a buffer whose entire text is a URL waits **once** for `FR_LINK_WAIT_MS` (default 45s)
+instead of being decided on. The buffer is **not** flushed, so a follow-up joins it and both lines are
+classified **together** — which is the only thing that makes the `sell` verdict reachable. Nothing
+follows ⇒ it flushes exactly as it does today.
+- **Once per buffer** (`linkWaited`), so a link-spammer can never hold their own lead open.
+- ⚠️ An ad **screenshot** is deliberately untouched: the customer chose to show us a specific bike,
+  so an image is a real answer and still assigns immediately. Pinned by a test.
+- 🚨 The regression that would make the fix worse than the bug — *a link with nothing after it must
+  still become a lead* — is pinned by its own test.
+
+**Proof:** reverted against the pre-fix file, section 18 fails 5 of 13 assertions, including
+`🚨 it went to FITRI the purchaser, not a sales rep`. qualify **93 → 106**; full suite **1068**, all
+18 files green.
+
+⚠️ **NEEDS A HUMAN — the code stops the next one, it does not undo this one.** This customer's
+trade-in is sitting on **Fazwan's** Lark row as a product lead, and Fitri has never been told. Per
+this file's never-delete rule that is a correction someone makes deliberately.
+
+🅿️ **Deliberately NOT built:** a post-assignment listener that re-routes when a customer says "jual"
+after the lead already went out. `awaitingLateContact` is the obvious hook and it would have caught
+this. It is also a second assigner on rows the first assigner owns — the exact shape this file warns
+about under ORPHAN SWEEP (*"a second assigner on the same rows is how one customer gets two
+salespeople"*), and today already produced that outcome once. **Benjamin's call, not mine.**
+
 ## 🚨 TWO SALESPEOPLE, ONE ENQUIRY — the 30s pacer reopened a closed race — 2026-09-08
 
 Benjamin sent the screenshot: one customer, two namecards, **Amir at 1:47PM and Adib at 1:48PM**.

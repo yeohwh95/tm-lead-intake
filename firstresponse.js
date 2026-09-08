@@ -9,6 +9,26 @@ const path = require('path');
 
 const ON = () => process.env.FIRSTRESPONSE_ON === '1';
 const DEBOUNCE_MS = Number(process.env.FR_DEBOUNCE_MS || 10 * 1000);
+// 🚨 A message that is NOTHING BUT A LINK is the ad the customer tapped, not their question.
+// WhatsApp renders it as a video/preview card the moment it lands, so the customer sends it and
+// then types what they actually want — as one thought, in two bubbles, seconds apart.
+// Live 2026-09-08 (+60102723324, 14:26–14:28 MYT): "Hi afternoon" → the bot asked which bike →
+// `https://vt.tiktok.com/ZSqr7MWKF/` → 10s debounce fired, that URL was accepted as the ANSWER,
+// `finalCat` fell through to `product`, and the lead was assigned to Fazwan, a SALES rep. **22
+// seconds later** came "saya nak jual motor boleh ke? tapi masih ada hutang dengan aeon" — a
+// trade-in, which belongs to Fitri the purchaser. By then `state.qualify` was consumed, so the
+// 7-day re-greet guard swallowed it and nobody ever saw the sentence. TM buys its used stock this
+// way; a missed sell costs the bike, not just a redirect.
+// 🔑 The classifier was never wrong here — 16 minutes earlier it read "I'm planning to sell my
+// motorcycle" and routed it to Fitri correctly. It was asked to judge a URL, which carries no
+// intent at all, and then never shown the sentence that did.
+// So: hold a link-only buffer ONCE for a beat instead of deciding on it. The buffer is NOT
+// flushed, so a follow-up joins it and both lines get classified TOGETHER — which is what makes
+// the sell verdict reachable. Nothing follows ⇒ it flushes exactly as it does today.
+// ⚠️ An ad SCREENSHOT is deliberately NOT treated this way: the customer chose to show us a
+// specific bike, so an image is a real answer and still assigns immediately.
+const LINK_WAIT_MS = Number(process.env.FR_LINK_WAIT_MS || 45 * 1000);
+const RE_URL_ONLY = /^(?:\s*(?:https?:\/\/|www\.)\S+)+\s*$/i;
 const REGREET_MS = 7 * 24 * 3600 * 1000;         // one bot greeting per chat per 7 days
 // 72h, raised from 48h (2026-08-16): the same weekend arithmetic as REHYDRATE_DEFER_H. A customer
 // asked "berminat motor apa?" on a Friday evening who answers Monday morning is 62h later, and at
@@ -898,8 +918,19 @@ const qualifyVague = (t, hasImage) =>
   !hasImage && !RE_PAYMODE.test(String(t || '')) && !RE_BIKE.test(String(t || ''))
   && !RE_MODELISH.test(String(t || '')) && VAGUE(t);
 async function flush(jid){
-  const b = buffers[jid]; delete buffers[jid];
+  const b = buffers[jid];
   if (!b) return;
+  // Link-only so far ⇒ wait one beat for the sentence that follows it. See RE_URL_ONLY above.
+  // Deliberately ONCE per buffer (`linkWaited`), so a customer sending nothing but links can
+  // never hold their own lead open, and the extra wait is bounded at LINK_WAIT_MS.
+  if (!b.linkWaited && !b.hasImage && RE_URL_ONLY.test(b.texts.join(' '))){
+    b.linkWaited = true;
+    if (b.timer) clearTimeout(b.timer);
+    b.timer = setTimeout(() => flush(jid).catch(e => D.log('FR flush err', String(e.message||e))), LINK_WAIT_MS);
+    D.log(`FR 🔗 link only, waiting ${Math.round(LINK_WAIT_MS/1000)}s for the actual question (${jid.slice(0,22)})`);
+    return;                                    // buffer kept — a follow-up joins it and is classified WITH it
+  }
+  delete buffers[jid];
   const text = b.texts.join(' \n ').trim();
   const now = Date.now();
 
