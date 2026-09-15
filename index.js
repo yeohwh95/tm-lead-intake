@@ -1852,9 +1852,15 @@ const firstresponse = require('./firstresponse');
 //   in distribution   → salesman card
 //   open, not dist.   → "advisor will contact you shortly", NO card, NO reopen line
 //   closed            → the operating-hours + "bila pejabat dibuka semula" line
-const FR_DIST_DAYS  = (process.env.FR_DIST_DAYS || '1,2,3,4,5').split(',').map(Number);
+// TM operates MON–SAT 9am–6pm (Benjamin, 2026-09-15). This used to default to Mon–Fri 9–5, which
+// is what made the bot tell Saturday customers "our sales advisor will contact you tomorrow" while
+// the shop was open: measured Sat 13 Sep, 12 real customers were deferred between 12:16 and 17:29
+// MYT for no reason but this line. `sla.js` already ran Mon–Sat 9–18, so the two halves of the same
+// working day disagreed — the SLA clock was ticking on leads distribution had decided to park.
+// Sunday stays OUT on purpose (Benjamin: "until saturday"). Env still wins over all three.
+const FR_DIST_DAYS  = (process.env.FR_DIST_DAYS || '1,2,3,4,5,6').split(',').map(Number);
 const FR_DIST_START = Number(process.env.FR_DIST_START || 9);
-const FR_DIST_END   = Number(process.env.FR_DIST_END || 17);
+const FR_DIST_END   = Number(process.env.FR_DIST_END || 18);
 function inFRDistHours(){ const d = new Date(Date.now() + MYT_OFF); return FR_DIST_DAYS.includes(d.getUTCDay()) && d.getUTCHours() >= FR_DIST_START && d.getUTCHours() < FR_DIST_END; }
 // OPERATING hours — drives only what the customer is TOLD (Harith 2026-07-30: "isnin–sabtu, 9 pagi–6 petang").
 const FR_HOURS_DAYS  = (process.env.FR_HOURS_DAYS || '1,2,3,4,5,6').split(',').map(Number);
