@@ -154,16 +154,41 @@ sla.init(deps, { now: () => clock });
   const H = 3600e3;
   const T0 = Date.UTC(2026, 8, 7, 12, 0, 0);            // 7 Sep 2026 20:00 MYT
   ok('sweepFresh: a lead from 1 minute ago is fresh', sla.sweepFresh(T0 - 60000, T0));
-  ok('sweepFresh: 23h old is still fresh', sla.sweepFresh(T0 - 23 * H, T0));
-  ok('sweepFresh: exactly 24h is fresh (boundary inclusive)', sla.sweepFresh(T0 - 24 * H, T0));
-  ok('sweepFresh: 24h + 1ms is STALE', !sla.sweepFresh(T0 - 24 * H - 1, T0));
+  ok('sweepFresh: a lead from 8 open hours ago is fresh', sla.sweepFresh(T0 - 8 * H, T0));
   ok('sweepFresh: the 6-day outage case is STALE', !sla.sweepFresh(T0 - 6 * 24 * H, T0));
   ok('sweepFresh: the 67-day backlog case is STALE', !sla.sweepFresh(T0 - 67 * 24 * H, T0));
+
+  // ---- the cap counts WORKING hours, not wall clock (2026-09-16) ----------------------------
+  // The wall-clock cap shipped 7 Sep silently orphaned every Sunday: Sun 6 Sep (before the cap)
+  // 4 of 4 TikTok ad leads reached a rep on Monday; Sun 13 Sep (after it) 0 of 46 did, because by
+  // Monday 09:00 they were 24h+ old. "24h + 1ms is STALE" used to live here and encoded exactly
+  // that bug as intended behaviour — replaced, not deleted, so the change is visible in blame.
+  // Window is Mon-Sat 09:00-18:00 MYT = 9 open hours a day.
+  const SUN_9AM  = Date.UTC(2026, 8, 13, 1, 0, 0);      // Sun 13 Sep 09:00 MYT — the TikTok cron
+  const MON_9AM  = Date.UTC(2026, 8, 14, 1, 0, 0);      // Mon 14 Sep 09:00 MYT — the next sweep
+  const MON_6PM  = Date.UTC(2026, 8, 14, 10, 0, 0);     // Mon 14 Sep 18:00 MYT — close of play
+  const TUE_10AM = Date.UTC(2026, 8, 15, 2, 0, 0);      // Tue 15 Sep 10:00 MYT
+  ok('sweepFresh: 24h wall-clock across a CLOSED Sunday is still fresh (the 46-lead bug)',
+     sla.sweepFresh(SUN_9AM, MON_9AM));
+  ok('sweepFresh: Sunday lead is still fresh at Monday close (9 open hours)',
+     sla.sweepFresh(SUN_9AM, MON_6PM));
+  ok('sweepFresh: Sunday lead survives ALL of Monday (this is the whole fix)',
+     sla.sweepFresh(SUN_9AM, Date.UTC(2026, 8, 14, 9, 59, 0)));
+  ok('sweepFresh: Sunday lead is STALE by Tuesday morning — bounded, not unlimited',
+     !sla.sweepFresh(SUN_9AM, TUE_10AM));
+  ok('sweepFresh: a MONDAY lead still dies on Tuesday exactly as before the change',
+     !sla.sweepFresh(MON_9AM, TUE_10AM));
+  ok('workingMsBetween: a closed Sunday counts as zero',
+     sla.workingMsBetween(SUN_9AM, Date.UTC(2026, 8, 13, 9, 0, 0)) === 0);
+  ok('workingMsBetween: Mon 09:00→18:00 is 9 open hours',
+     sla.workingMsBetween(MON_9AM, MON_6PM) === 9 * H);
+  ok('sweepFresh: the 6-day outage is STALE in OPEN hours too (the guard still holds)',
+     !sla.sweepFresh(Date.UTC(2026, 8, 8, 1, 0, 0), Date.UTC(2026, 8, 14, 1, 0, 0)));
   // slaRecCreated returns 0 when Lark hands back a shape it cannot read. A row that silently aged
   // to 1970 must NEVER read as brand-new — that would make the guard enrol the oldest rows first.
   ok('sweepFresh: unknown age (0) is never fresh', !sla.sweepFresh(0, T0));
   ok('sweepFresh: undefined age is never fresh', !sla.sweepFresh(undefined, T0));
-  ok('sweepFresh: default cap is 24h', sla.SWEEP_MAX_AGE_H === 24);
+  ok('sweepFresh: default cap is 9 OPEN hours', sla.SWEEP_MAX_AGE_H === 9);
 
   console.log(`\n${pass} passed, ${fail} failed`);
   process.exit(fail ? 1 : 0);

@@ -36,7 +36,7 @@ const HOUR = 3600 * 1000;
 // half queued on the FIRST message — it is simply waiting for the drain, so it counts as a lead.
 // 🚨 THE LESSON: this list and `frLogEvent`'s outcomes are two halves of one contract. Adding an
 // outcome without adding it here does not lose the lead, but it DOES break the client's numbers.
-const LEAD_BUCKETS = ['assigned', 'parked', 'qualified', 'gate_held', 'no_rep', 'awaiting_model'];
+const LEAD_BUCKETS = ['assigned', 'parked', 'qualified', 'gate_held', 'intent_held', 'no_rep', 'awaiting_model'];
 // Chats that are NOT sales leads. Reported on their own line so (a)(b)(c) reads on real leads —
 // never folded into the total, never hidden either.
 // `admin_handoff` added 2026-08-28 with the admin category. It is NOT a sales lead (Benjamin: no
@@ -50,6 +50,7 @@ const WHY = {
   parked:         'parked for the next assignment window',
   qualified:      'answered our question, waiting for the next assignment window',
   gate_held:      'no phone number yet, still asking',
+  intent_held:    'asked buy-or-sell, waiting before routing',
   no_rep:         '🚨 NOBODY took it (the CRM row has no owner)',
   awaiting_model: 'greeted, waiting for them to say which bike',
   other:          'unrecognised outcome (see ⚠️ above)',

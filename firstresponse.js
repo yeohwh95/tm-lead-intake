@@ -510,6 +510,24 @@ function readFrEvents(limit){
 // all wait a full hour before a salesperson saw them. On TM specifically, ZERO of 59 repliers
 // took longer than 15 min. Env-overridable: FR_GATE_MS=3600000 restores the old hold.
 const GATE_MS = Number(process.env.FR_GATE_MS || 15 * 60 * 1000);
+
+// ---------- INTENT HOLD (2026-09-16, Benjamin) ------------------------------------------------
+// 🚨 WHY: the bot decides BUY vs SELL from the FIRST message only, and a vague opener resolves to
+// `product` — a SALES rep. Sell intent that arrives one message later is never re-read.
+// MEASURED, chat 13 Sep 10:40 MYT: "Hi" → "Tm motorworld" → classified PRODUCT → 10:42 the customer
+// asks "Boleh jual motor ke dekat TM Motorworld?" (a trade-in) → assigned next morning to Amir, a
+// sales rep. Fitri, who actually BUYS the bikes, was never told. That is TM's used-stock pipeline,
+// and it is the same shape as the trade-in still sitting under Fazwan.
+// 🔑 So the hold is not about being polite with a delay — it is about not ROUTING on a guess.
+// Ask which one, wait, and let the answer pick the destination. If they say nothing in 10 minutes
+// we assign exactly as before, so the worst case is today's behaviour arriving 10 minutes later.
+const INTENT_HOLD_MS = Number(process.env.FR_INTENT_HOLD_MS || 10 * 60 * 1000);
+// Kill switch: FR_INTENT_HOLD=0 restores the old assign-immediately path with no deploy.
+const INTENT_HOLD_ON = () => process.env.FR_INTENT_HOLD !== '0';
+const intentAsk = lang => lang === 'en'
+  ? 'Got it 👍 Quick one so I pass you to the right person — are you looking to *buy* a bike, or to *sell / trade in* yours?\n\nAnd which model, if you have one in mind?'
+  : 'Baik tuan 👍 Sikit je — tuan nak *beli* motor, atau nak *jual / trade-in* motor tuan?\n\nDan model apa ya, kalau dah ada dalam fikiran?';
+
 // How long we keep listening for a number AFTER a lead went out with none. Matches the 7-day
 // re-greet window: past that the chat is a new conversation anyway.
 const LATE_CONTACT_MS = Number(process.env.FR_LATE_CONTACT_MS || 7 * 24 * 60 * 60 * 1000);
@@ -833,6 +851,67 @@ async function gateOnReply(jid, h, text, bphone){
 }
 
 // Called on the 60s tick from index.js. Nobody is abandoned over a privacy setting.
+// A lead whose INTENT we asked about. Nothing is written to Lark yet and nobody is assigned —
+// exactly like the phone gate, and for the same reason: a routing decision made on no information
+// is worse than one made 10 minutes later.
+function intentHold(jid, cat, want, lang, phone){
+  state.qualify[jid] = { ts: Date.now(), asks: 1, phase: 'intent', cat, want, lang,
+                         recordId: null, phone: phone || '' };
+  persist();
+  D.log(`FR 🤔 INTENT HELD — asked buy-or-sell (${jid.slice(0, 22)}) "${String(want).slice(0, 40)}"`);
+  frLogEvent('intent_held', jid, { has_phone: !!phone, cat, phone: phone || '',
+    want: String(want).slice(0, 120), recordId: null });
+}
+
+// Release an intent hold: decide buy vs sell from EVERYTHING the customer has said, then assign.
+// `answer` is '' when the 10 minutes ran out with no reply — then we assign on what we had, which
+// is precisely the old behaviour, so a silent customer is never worse off than before this existed.
+async function intentRelease(jid, q, answer, reason){
+  delete state.qualify[jid]; persist();          // close BEFORE any await — the gate's 2026-09-08 rule
+  const lang = q.lang || 'bm';
+  const phone = q.phone || '';
+  let cat = q.cat || 'product';
+  let want = q.want || 'WhatsApp direct inquiry';
+  if (answer){
+    // Both messages together. The sell signal is often in the SECOND one ("boleh jual motor ke"),
+    // which is the entire bug this exists to fix, and classifySmart already refuses to let the LLM
+    // downgrade a regex `sell` — so merging can only ever ADD intent, never lose it.
+    const merged = await classifySmart(`${q.want || ''} \n ${answer}`, false);
+    if (merged && merged.cat && merged.cat !== 'greeting' && merged.cat !== 'skip') cat = merged.cat;
+    want = `${q.want || ''} | ${answer}`.replace(/\s+/g, ' ').trim().slice(0, 160);
+  }
+  const ctx = {};
+  const card = await assign(cat, jid, phone, want, ctx);
+  D.log(`FR 🤝 intent released (${reason}) → ${cat} → ${ctx.assignee || 'nobody'} (${jid.slice(0, 22)})`);
+  frLogEvent(ctx.outcome || 'assigned', jid, { has_phone: !!phone, cat, assignee: ctx.assignee || '',
+    phone, want: String(want).slice(0, 120), recordId: ctx.recordId || null,
+    note: `intent_${reason}` });
+  const nextLabel = (D.inDistHours && !D.inDistHours() && D.nextWindowLabel) ? (D.nextWindowLabel() || null) : null;
+  try { await D.waSend(sendTarget(jid, phone), tpl(cat, lang, card, '', nextLabel)); }
+  catch(e){ D.log('FR intent release send err:', String(e.message||e).slice(0,60)); }
+}
+
+// Both holds time out on the SAME 60s tick. A second timer for a second hold is how two mechanisms
+// drift apart; there is one sweep and it releases whatever is ripe.
+async function intentSweep(){
+  const q = state.qualify || {};
+  const now = Date.now();
+  for (const jid of Object.keys(q)){
+    const h = q[jid];
+    if (!h || h.phase !== 'intent') continue;
+    if (h.ts && now - h.ts < INTENT_HOLD_MS) continue;
+    if (humanTouched.has(jid)){        // a salesperson already replied — never assign over a human
+      delete q[jid]; persist();
+      D.log(`FR intent hold dropped — human took over (${jid.slice(0,22)})`);
+      frLogEvent('human_owned', jid, { has_phone: !!h.phone, cat: h.cat || '', phone: h.phone || '',
+        want: String(h.want || '').slice(0, 120), recordId: null, note: 'intent_human_takeover' });
+      continue;
+    }
+    try { await intentRelease(jid, h, '', 'timeout'); }
+    catch(e){ D.log('FR intent sweep err:', String(e.message||e).slice(0,60)); }
+  }
+}
+
 async function gateSweep(){
   const held = state.awaitingPhone || {};
   const now = Date.now();
@@ -859,6 +938,7 @@ async function gateSweep(){
     try { await gateRelease(jid, h || { cat: 'product', want: 'WhatsApp direct inquiry', lang: 'bm' }, '', 'timeout'); }
     catch(e){ D.log('FR gate sweep err:', String(e.message||e).slice(0,60)); }
   }
+  await intentSweep();
 }
 
 // ---------- ADMIN hand-off (2026-08-28) ----------------------------------------------------------
@@ -983,6 +1063,11 @@ async function flush(jid){
     // phase 'model'  = the in-window greeting flow, nothing written yet.
     const vague = VAGUE(text) && !b.hasImage;
 
+    // ── phase 'intent': they answered the buy-or-sell question. Route on the ANSWER. ─────────
+    if (q.phase === 'intent'){
+      await intentRelease(jid, q, text, 'answered');
+      return;
+    }
     if (q.phase === 'detail'){
       // 🚨 The lead is already in Lark and already queued for the drain. NOTHING here may create a
       // second row or a second queue entry — the answer only ENRICHES what exists.
@@ -1029,6 +1114,30 @@ async function flush(jid){
       gateHold(jid, finalCat, want, lang);
       await D.waSend(sendTarget(jid, b.phone), tpl(finalCat, lang, null, stockLine, null));
       await D.waSend(sendTarget(jid, b.phone), gateAsk(lang));
+      return;
+    }
+    // 🚨 THE ROUTING DECISION. `vague` here means the customer has told us NOTHING usable — they
+    // answered our "which bike?" with "Tm motorworld" or an ad click. Assigning on that picks a
+    // SALES rep by default, which is a coin flip on the one fact that decides the destination:
+    // buy goes to a rep, sell goes to Fitri. Ask, and let the answer decide.
+    // In-window only — off-window the deferred flow already asks and nobody is assigned tonight.
+    // The trigger is "we are about to call this `product` BY DEFAULT" — `finalCat` collapses
+    // everything that is not sell/loan/testride into product, so a customer who named no bike and
+    // stated no intent gets a SALES rep because that is the fallback, not because anyone read a
+    // buying signal. `RE_BIKE` is the same test the rest of the file already trusts for "a bike was
+    // named"; deliberately not a second signal invented here.
+    // ⚠️ AN AD SCREENSHOT OR AD LINK IS NOT AMBIGUOUS AND MUST NOT BE HELD. TM's ads sell bikes, so
+    // clicking one IS the buying signal — and "an ad screenshot still assigns immediately, no wait"
+    // is an existing, deliberate decision with its own test. The customer this hold exists for sent
+    // plain text and no link at all ("Tm motorworld" / "Ahad buka kedai?"); the ad-click WORDING on
+    // that Lark row is just the placeholder `vague` writes, not evidence of a real click.
+    const hasLink = /https?:\/\//i.test(String(text || ''));
+    const intentUnknown = finalCat === 'product' && !b.hasImage && !hasLink
+                       && (vague || !RE_BIKE.test(String(text || '')));
+    if (INTENT_HOLD_ON() && !nextLabel && intentUnknown){
+      intentHold(jid, finalCat, want, lang, b.phone);
+      await D.waSend(sendTarget(jid, b.phone),
+        (stockLine ? stockLine + '\n\n' : '') + intentAsk(lang));
       return;
     }
     const ctx = {};

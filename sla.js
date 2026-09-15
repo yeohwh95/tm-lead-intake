@@ -42,13 +42,43 @@ function inHours(ms) { const d = new Date(ms + MYT); return HOURS.days.includes(
 // Notifying a rep about a lead they closed five days ago is noise, and noise trains people to
 // ignore the alert that matters. Those rows stay in Lark, assigned and visible — they are skipped,
 // not deleted.
-const SWEEP_MAX_AGE_H = Number(process.env.SLA_SWEEP_MAX_AGE_H || 24);
+// 9 OPEN hours, not 24 wall-clock hours (2026-09-16). These are the same strictness on a weekday:
+// under the old cap a Monday-09:00 lead died at Tuesday 09:00, which is 9 open hours later. Keeping
+// the number at 24 while switching the unit would have QUIETLY TRIPLED the window to ~2.7 working
+// days, and the whole point of the cap is to bound an outage blast to about one day of leads.
+// What changes is only the closed time in between: a Sunday lead now has the whole of Monday to be
+// picked up instead of being dead before anyone opened the shop.
+const SWEEP_MAX_AGE_H = Number(process.env.SLA_SWEEP_MAX_AGE_H || 9);
 const SWEEP_MAX_AGE_MS = SWEEP_MAX_AGE_H * 3600e3;
 // Unknown age is NEVER fresh: `slaRecCreated` returns 0 when Lark hands back a shape it cannot
 // read, and a row that silently aged to 1970 must not read as a brand-new lead.
+// ⚠️ AGE IS MEASURED IN WORKING HOURS, NOT WALL CLOCK (2026-09-16). The wall-clock version shipped
+// on 7 Sep to stop a reconnect blast, and it did — but it also silently orphaned every Sunday.
+// MEASURED: Sun 6 Sep, 4 TikTok ad leads, all 4 reached a rep on Monday morning. Sun 13 Sep, the
+// first Sunday AFTER the cap, 46 leads, ZERO reached anybody — by Monday 09:00 they were 24h+ old
+// and every sweep skipped them for good. Nothing failed and nothing logged an error; the leads just
+// sat in Lark with a salesperson's name on them and that salesperson was never told.
+// 🔑 A lead that arrives while the shop is CLOSED has not gone stale — nobody could have worked it.
+// Counting only open hours says exactly that: Sunday→Monday is 0 hours elapsed (fresh), while a
+// 6-day outage or the 67-day backlog is hundreds of open hours (stale), so the guard the cap was
+// written for is untouched. Wall clock could not tell those two apart, and that is why it was wrong.
+function workingMsBetween(fromMs, toMs) {
+  if (toMs <= fromMs) return 0;
+  let total = 0;
+  // Walk hour by hour from the START of the hour containing `fromMs`. Hours are the resolution the
+  // window itself is defined in (startH/endH), so anything finer would be inventing precision.
+  const HOUR = 3600e3;
+  for (let t = Math.floor(fromMs / HOUR) * HOUR; t < toMs; t += HOUR) {
+    if (!inHours(t)) continue;
+    const from = Math.max(t, fromMs), to = Math.min(t + HOUR, toMs);
+    if (to > from) total += to - from;
+  }
+  return total;
+}
 function sweepFresh(createdMs, nowMs) {
   if (!createdMs) return false;
-  return (nowMs - createdMs) <= SWEEP_MAX_AGE_MS;
+  if (nowMs <= createdMs) return true;
+  return workingMsBetween(createdMs, nowMs) <= SWEEP_MAX_AGE_MS;
 }
 
 function init(injected, opts = {}) {
@@ -234,4 +264,4 @@ function stats() {
   }
   return { reassign: process.env.SLA_REASSIGN === '1' ? 'ON' : 'PAUSED', reps: Object.keys(state.reps).length, tracked, byStatus, pending: pendingLeads };
 }
-module.exports = { init, register, onReply, tick, scoreboard, stats, inHours, sweepFresh, _state: () => state, NUDGE_MS, REASSIGN_MS, SWEEP_MAX_AGE_H };
+module.exports = { init, register, onReply, tick, scoreboard, stats, inHours, sweepFresh, workingMsBetween, _state: () => state, NUDGE_MS, REASSIGN_MS, SWEEP_MAX_AGE_H };
