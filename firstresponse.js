@@ -211,9 +211,21 @@ function tpl(cat, lang, card, stockLine, nextLabel){
     : nextLabel ? `\n\n${closingLine(lang, nextLabel)}`
     : '';
   const s = stockLine ? `\n\n${stockLine}` : '';
+  // 🚨 THE DETAILS MUST GO TO THE PURCHASER, NOT TO THIS LINE (Benjamin, 2026-09-16). The old
+  // wording said "share model, tahun & gambar motor" with no destination, so customers sent the
+  // photos HERE, to a bot that cannot look at them, and a human had to step in and redirect every
+  // one. Real: Sofian 15 Sep — bot asked at 09:34, he replied "R25 purple 2024" at 09:36, and a
+  // human had to type "boleh hantar detail motor kat number purchaser kami ya" at 10:08. Same
+  // correction typed by hand again on 60163953737 at 16:07. Benjamin's own wording is used here.
+  // ⚠️ The pointer is only added when a card ACTUALLY follows — same rule as the loan template.
+  // Off-hours there is no card, so it promises a call back instead of pointing at nothing.
   if (cat === 'sell') return (lang === 'en'
-    ? `Hi! Sure, we do buy & trade-in 👍 Which bike (model, year)? Photos help too. Our purchaser will contact you shortly ya`
-    : `${g} 😊 Boleh tuan. Nak jual/trade-in motor apa ya? Boleh share model, tahun & gambar motor. Purchaser kami akan contact awak ya`) + c;
+    ? `Hi! Sure, we do buy & trade-in 👍 ` + (card
+        ? `Please send the bike details (model, year and photos) straight to our purchaser below ya 👇`
+        : `Which bike is it (model, year)? Our purchaser will contact you and take the photos from there ya`)
+    : `${g} 😊 Boleh tuan. ` + (card
+        ? `Untuk urusan jual/trade-in, boleh hantar detail motor (model, tahun & gambar) terus kat number purchaser kami ya 👇`
+        : `Nak jual/trade-in motor apa ya (model, tahun)? Purchaser kami akan contact awak untuk detail & gambar ya`)) + c;
   // LOAN — Benjamin approved 2026-08-14 (DRAFT-1). Two deliberate changes from the 07-20 wording:
   // (a) the bot now says outright that it is customer service, so a customer never reads a
   // financier list as an approval decision; (b) the "👇" pointer is only appended when a
@@ -403,8 +415,25 @@ async function assign(cat, jid, phone, wantText, ctx){
 // to read) + vendor auto-replies (cheap and certain). An image WITH a short caption keeps the
 // regex verdict when the LLM says greeting/skip — the image carries intent the LLM can't see.
 const AI_CATS = new Set(['sell', 'loan', 'testride', 'product', 'admin', 'greeting', 'skip']);
-async function classifySmart(text, hasImage){
+async function classifySmart(text, hasImage, imageUrl){
   const rx = classify(text, hasImage);
+  // 🚨 EVERY IMAGE USED TO MEAN `product` — a hardcoded guess, and TM runs SELL ads. Real chat,
+  // 60163953737 on 15 Sep 14:10: the customer sent back TM's own creative reading "NAK JUAL MOTOR
+  // TAPI ADA BAKI HUTANG LAGI?! ... you mahu letgo motor awak dengan harga tinggi" — an advert
+  // asking people to SELL. The bot filed it as a buyer and gave them Amir, a sales rep. At 15:55
+  // the customer wrote "Dia ni takde response", and a human had to ask "nak jual motor ya bos?"
+  // and hand them to Fitri. The answer was written on the picture the whole time.
+  // 🔑 UPGRADE ONLY, never downgrade — same contract as the text classifier: the image may reveal
+  // a sell we missed, it may not overrule a customer who typed a buying question.
+  if (hasImage && imageUrl && D.aiClassifyImage && rx.cat === 'product'){
+    try {
+      const seen = await D.aiClassifyImage(imageUrl);
+      if (seen === 'sell'){
+        D.log('FR 🖼️ image reads as a SELL ad → routing to the purchaser, not a sales rep');
+        return { cat: 'sell', imageOnly: rx.imageOnly };
+      }
+    } catch(e){ D.log('FR image read err → keeping product:', String(e.message||e).slice(0,60)); }
+  }
   const t = String(text || '').trim();
   if (!D.aiClassify || !t || RE_VENDOR_AUTO.test(t)) return rx;
   try {
@@ -1082,7 +1111,7 @@ async function flush(jid){
   }
 
   const q = state.qualify[jid];
-  let { cat, imageOnly } = await classifySmart(text, b.hasImage);
+  let { cat, imageOnly } = await classifySmart(text, b.hasImage, b.imageUrl);
   const lang = isEnglish(text) ? 'en' : 'bm';
   // Outside the DISTRIBUTION window nobody is assigned right now, so the reply must commit to a
   // day instead of announcing a closure. null while the window is open (a rep gets it immediately).
@@ -1414,6 +1443,8 @@ function onMessage(info){
     }
     const b = buffers[info.jid] = buffers[info.jid] || { texts: [], hasImage: false, phone: num, timer: null };
     if (info.kind === 'image') b.hasImage = true;
+    // Keep the decrypted URL so the classifier can actually LOOK at the ad they sent back.
+    if (info.imageUrl) b.imageUrl = info.imageUrl;
     const t = info.text || info.caption || '';
     if (t) b.texts.push(t);
     if (b.timer) clearTimeout(b.timer);

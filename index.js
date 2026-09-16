@@ -733,6 +733,31 @@ Answer with EXACTLY one word from: sell, loan, testride, product, admin, greetin
 - skip = automated vendor/OTP/verification messages, or long text unrelated to motorcycles.
 Priority for mixed messages: sell beats loan beats product beats greeting.
 Naming bike models does NOT make it product when the customer also wants to trade in or sell one — "Cbr650r / Mt25 / Trade in mt25 2024 mileage 25k" is sell, because they are handing us a bike.`;
+// Read a picture a CUSTOMER sent us and say whether it is someone wanting to BUY or to SELL.
+// Exists because TM advertises FOR STOCK ("nak jual motor tapi ada baki hutang lagi?!"), so a
+// customer replying to an ad with the ad itself is very often a seller — and every image was being
+// filed as a buyer. Deliberately answers only three words: the caller upgrades `product` to `sell`
+// and ignores everything else, so a confused answer costs nothing.
+async function aiClassifyImage(imageUrl){
+  if (!OPENAI_KEY || !imageUrl) return '';
+  const blocks = [
+    { type: 'text', text: 'This picture was sent to a Malaysian motorcycle dealer by a customer. '
+      + 'It is usually one of the dealer\'s own adverts, a bike photo, or a screenshot. '
+      + 'Decide what the CUSTOMER wants, from the words and pictures shown. '
+      + 'Answer JSON {"cat":"sell"} if the advert or image is about the dealer BUYING the customer\'s '
+      + 'bike (trade-in, letgo, "nak jual motor", settle hutang / outstanding loan, cash for your bike). '
+      + 'Answer {"cat":"product"} if it is about the customer BUYING a bike from the dealer '
+      + '(price, promo, stock, new model, instalment on a purchase). '
+      + 'Answer {"cat":"unknown"} if you genuinely cannot tell.' },
+    { type: 'image_url', image_url: { url: imageUrl, detail: 'low' } },
+  ];
+  try {
+    const raw = await aiExtract(blocks);
+    const cat = String((JSON.parse(raw || '{}').cat || '')).toLowerCase().trim();
+    log('FR image classify →', cat || '(empty)');
+    return cat;
+  } catch(e){ log('aiClassifyImage err', String(e.message||e).slice(0,80)); return ''; }
+}
 async function aiClassify(text){
   if (!OPENAI_KEY || process.env.FR_AI_CLASSIFY === '0') return null;
   const ctrl = new AbortController();
@@ -1938,7 +1963,7 @@ setInterval(() => { firstresponse.gateSweep().catch(e => log('FR gate sweep err'
   // boot: a snapshot would keep treating a departed rep as staff, and would treat a NEWLY added rep's
   // own messages as customer leads, until the next deploy.
   const isStaffPhone = p => { const d = String(p || '').replace(/\D/g, ''); return !!d && (!!identity.nameByPhone(STAFF_BY_LAST9, d) || FR_EXTRA_INTERNAL.has(d)); };
-  firstresponse.init({ waSend, assignLeads, larkWriteLead, notifyStaff, sla, getUnavailable, log, isStaffPhone, wooCheckStock, aiClassify, fetchUsername, alertReview, inDistHours: inFRDistHours, inOpenHours: inFROpenHours, deferStaffNotify, hoursLabel,
+  firstresponse.init({ waSend, assignLeads, larkWriteLead, notifyStaff, sla, getUnavailable, log, isStaffPhone, wooCheckStock, aiClassify, aiClassifyImage, fetchUsername, alertReview, inDistHours: inFRDistHours, inOpenHours: inFROpenHours, deferStaffNotify, hoursLabel,
     // WHEN a rep will actually pick the lead up, derived from the DISTRIBUTION window — never the
     // operating hours, and never hardcoded (2026-07-30). Tests inject their own.
     nextWindowLabel: () => require('./hours').nextWindowLabel(Date.now(), FR_DIST_DAYS, FR_DIST_START, FR_DIST_END),
@@ -2150,7 +2175,15 @@ async function handle(payload){
     try {
       const kfr = (pickMessages(payload.data || {}).key) || {};
       const phoneFr = String(kfr.cleanedSenderPn || kfr.senderPn || '').replace(/\D/g, '') || (info.chatId.includes('@lid') ? '' : (info.chatId.split('@')[0] || '').replace(/\D/g, ''));
-      firstresponse.onMessage({ jid: info.chatId, phone: phoneFr, kind: info.kind, text: info.kind === 'text' ? info.text : '', caption: info.caption || '' });
+      // An image with no URL is an image nobody can read — and "every image is a buyer" is exactly
+      // the guess that sent a seller to a sales rep. Best effort: a decrypt failure just means the
+      // old behaviour, never a dropped message, so this is awaited but never allowed to throw.
+      const frImg = info.kind === 'image'
+        ? decryptMedia(info.fullMessage).then(() => decryptMedia.lastUrl || '')
+            .catch(e => { log('FR image decrypt skipped:', String(e.message||e).slice(0,60)); return ''; })
+        : Promise.resolve('');
+      frImg.then(imageUrl => firstresponse.onMessage({ jid: info.chatId, phone: phoneFr, kind: info.kind,
+        text: info.kind === 'text' ? info.text : '', caption: info.caption || '', imageUrl }));
     } catch (e) { log('FR hook err', String(e.message||e)); }
   }
 

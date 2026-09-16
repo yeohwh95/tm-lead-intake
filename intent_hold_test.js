@@ -88,5 +88,42 @@ fr.init({ waSend:async(to,t)=>{sent.push({to,text:t});return 'm';},
   await wait(600);
   ok(sent.length===nSent,'late answer: still SILENT to the customer (one-touch rule unchanged)');
 
+
+  // ---- IMAGE THAT IS ACTUALLY A SELL AD (2026-09-16) ----------------------------------------
+  // 60163953737 sent back TM's own "NAK JUAL MOTOR TAPI ADA BAKI HUTANG LAGI?!" creative and was
+  // filed as a buyer, then waited 105 minutes and wrote "Dia ni takde response".
+  let imgVerdict='product', imgSeen=null;
+  fr.init({ waSend:async(to,t)=>{sent.push({to,text:t});return 'm';},
+    assignLeads:(ls,ov)=>ls.map(l=>({...l,want:l.interest,brand:'HQ',origin:'WhatsApp Direct',
+      assignee:(ov&&ov.noAssign)?'':'Aso',staff:(ov&&ov.noAssign)?null:{phone:'+60127674828',openId:'x'}})),
+    larkWriteLead:async l=>{leads.push(l);return 'recImg';}, notifyStaff:async()=>'d',
+    sla:{register:()=>{}}, getUnavailable:async()=>new Set(), log:()=>{}, isStaffPhone:()=>false,
+    wooCheckStock:async()=>({matches:[]}), inDistHours:()=>true, inOpenHours:()=>true,
+    hoursLabel:()=>require('./hours').hoursLabel([1,2,3,4,5,6],9,18),
+    nextWindowLabel:()=>null, larkPatchWant:async()=>{}, larkPatchPhone:async()=>{},
+    deferStaffNotify:()=>{}, aiClassify:async()=>null,
+    aiClassifyImage:async(url)=>{ imgSeen=url; return imgVerdict; } });
+
+  const n5=leads.length;
+  imgVerdict='sell';
+  fr.onMessage({jid:'sellad@s.whatsapp.net',phone:'60163953737',kind:'image',text:'',imageUrl:'https://x/ad.jpg'});
+  await wait(700);
+  ok(imgSeen==='https://x/ad.jpg','image: the classifier was actually given the picture');
+  ok(leads.length===n5+1 && /TRADE-IN/i.test(String(leads[leads.length-1].want||'')),
+     '🚨 image: a SELL advert routes to the purchaser, not to a sales rep');
+
+  imgVerdict='product';
+  const n6=leads.length;
+  fr.onMessage({jid:'buyad@s.whatsapp.net',phone:'60163953738',kind:'image',text:'',imageUrl:'https://x/buy.jpg'});
+  await wait(700);
+  ok(leads.length===n6+1 && !/TRADE-IN/i.test(String(leads[leads.length-1].want||'')),
+     'image: a normal bike/promo picture still goes to a sales rep (behaviour unchanged)');
+
+  // no URL, or a vision failure, must never change today's behaviour
+  const n7=leads.length;
+  fr.onMessage({jid:'noimg@s.whatsapp.net',phone:'60163953739',kind:'image',text:''});
+  await wait(700);
+  ok(leads.length===n7+1,'image: no readable URL still produces a lead, exactly as before');
+
   console.log(`\n${pass} passed, ${fail} failed`); process.exit(fail?1:0);
 })();
