@@ -555,8 +555,14 @@ ok(/ADIB : 017-8869542/.test(sent[sent.length-1].text), 'flow: reply carries ass
     await wait(120);
     const rp = evOf('cust5@s.whatsapp.net');
     ok(sent.length === nBefore, 'events: a repeat chatter still gets no second greeting (behaviour unchanged)');
-    ok(rp.length === 2 && rp[1].outcome === 'repeat' && rp[1].note === 'already_greeted_7d',
-       'events: …but it is now logged as `repeat`, excluded from lead totals, used only to reconcile');
+    // 2026-09-16: this used to assert `repeat`. It still must NOT reply and it still must be
+    // logged (the inbox cross-check reads these), but when the chat has a lead we wrote within the
+    // last hour the sentence now goes ONTO that lead instead of being discarded. Hakim's
+    // "368G V2.1 High Seat, EPP Maybank" was dropped by the old behaviour and his salesperson
+    // never saw it. Silence is the design; deafness was not.
+    ok(rp.length === 2 && rp[1].outcome === 'enriched' && rp[1].note === 'late_answer',
+       'events: a late answer is added to the existing lead, still silently');
+    ok(rp[1].recordId, 'events: the enriched event names the Lark row it was added to');
   }
   {
     // 🚨 A MISSING LOG AND AN UNREADABLE LOG ARE OPPOSITE FACTS. Found 2026-08-14 by pointing the

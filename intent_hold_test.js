@@ -45,5 +45,48 @@ fr.init({ waSend:async(to,t)=>{sent.push({to,text:t});return 'm';},
   fr.onMessage({jid:J2,phone:'60122222222',kind:'text',text:'Zontes 368 ada stock tak?'});
   await wait(500);
   ok(leads.length===n+1,'🚨 a customer who names a bike is assigned IMMEDIATELY, no hold');
+
+  // ---- OFF-HOURS (2026-09-16). The first version of this hold ran in-hours only, which is half
+  // the clock and the wrong half: off-hours the row is written now and drained to a rep at 09:00,
+  // so a category decided at 01:00 is still wrong eight hours later with nobody awake to catch it.
+  const patched=[];
+  fr.init({ waSend:async(to,t)=>{sent.push({to,text:t});return 'm';},
+    assignLeads:(ls,ov)=>ls.map(l=>({...l,want:l.interest,brand:'HQ',origin:'WhatsApp Direct',
+      assignee:(ov&&ov.noAssign)?'':'Aso',staff:(ov&&ov.noAssign)?null:{phone:'+60127674828',openId:'x'}})),
+    larkWriteLead:async l=>{leads.push(l);return 'recOff';}, notifyStaff:async()=>'d',
+    sla:{register:()=>{}}, getUnavailable:async()=>new Set(), log:()=>{}, isStaffPhone:()=>false,
+    wooCheckStock:async()=>({matches:[]}),
+    inDistHours:()=>false, inOpenHours:()=>false,            // 01:00 MYT, shop shut
+    hoursLabel:()=>require('./hours').hoursLabel([1,2,3,4,5,6],9,18),
+    nextWindowLabel:()=>'tomorrow morning',
+    larkPatchWant:async(rec,w)=>{patched.push({rec,w});}, larkPatchPhone:async()=>{},
+    deferStaffNotify:()=>{}, aiClassify:async()=>null });
+
+  const J3='night@s.whatsapp.net'; const n3=leads.length;
+  fr.onMessage({jid:J3,phone:'60133333333',kind:'text',text:'Hi'}); await wait(500);
+  fr.onMessage({jid:J3,phone:'60133333333',kind:'text',text:'Tm motorworld'}); await wait(500);
+  ok(leads.length===n3,'off-hours: nothing written to Lark while intent is unknown');
+  ok(sent.some(s=>/beli.*jual|jual.*beli/i.test(s.text)),'off-hours: buy-or-sell asked at night too');
+  fr.onMessage({jid:J3,phone:'60133333333',kind:'text',text:'Saya nak jual motor saya'});
+  await wait(600);
+  ok(leads.length===n3+1,'off-hours: the answer creates the lead');
+  ok(leads[leads.length-1] && /TRADE-IN/i.test(String(leads[leads.length-1].want||'')),
+     '🚨 off-hours: a night-time trade-in is filed as a trade-in, not as a sales lead');
+
+  // ---- LATE ANSWER. The message that lands seconds after the bot goes quiet used to be dropped.
+  const J4='late@s.whatsapp.net';
+  fr.onMessage({jid:J4,phone:'60144444444',kind:'text',text:'Nak tanya zontes 368G'});
+  await wait(600);
+  const before=patched.length;
+  fr.onMessage({jid:J4,phone:'60144444444',kind:'text',text:'Sy minat 368G V2.1 High Seat, guna EPP maybank'});
+  await wait(600);
+  ok(patched.length===before+1,'🚨 late answer is written onto the existing lead, not dropped');
+  ok(patched.length>before && /EPP maybank/i.test(patched[patched.length-1].w),
+     'late answer: the salesperson actually gets the financing detail');
+  const nSent=sent.length;
+  fr.onMessage({jid:J4,phone:'60144444444',kind:'text',text:'Ada high seat tak'});
+  await wait(600);
+  ok(sent.length===nSent,'late answer: still SILENT to the customer (one-touch rule unchanged)');
+
   console.log(`\n${pass} passed, ${fail} failed`); process.exit(fail?1:0);
 })();

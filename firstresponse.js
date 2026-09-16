@@ -368,6 +368,10 @@ async function assign(cat, jid, phone, wantText, ctx){
   if (ctx && ctx.username) l.username = ctx.username;
   try { l.recordId = await D.larkWriteLead(l); } catch(e){ D.log('FR lark err:', String(e.message||e).slice(0,60)); }
   if (ctx) ctx.recordId = l.recordId || null;   // null here = the Lark write FAILED; the report counts those
+  // 🔑 Remember which Lark row belongs to this chat. The bot deliberately stops REPLYING after one
+  // touch — that part is fine — but it was also throwing the customer's next message away, and that
+  // message is routinely the most useful thing they say. See the enrichment window below.
+  if (l.recordId) rememberLead(jid, l.recordId, l.want);
   if (defer){
     D.deferStaffNotify({ kind: 'pool', phone, want: l.want, brand: l.brand, recordId: l.recordId || null, jid, gated, cat });
     D.log(`FR 🌙 ${cat.toUpperCase()} lead deferred to office hours (${phone}) "${want}"`);
@@ -629,6 +633,12 @@ function gateParseUsername(text, expectUsername){
 // ONE ask, either identifier accepted (Benjamin, 2026-08-04). Offering both lets the customer
 // pick what they're comfortable with instead of refusing outright. Naming the '@' is deliberate:
 // it is what makes a handle safe to parse back out of a free-text reply.
+// The SECOND ask must not be the first one again. Careen (15 Sep 21:55) received the identical
+// sentence twice, a minute apart — to a customer that reads as a broken bot, not as a reminder,
+// and she had in fact already answered the question we were repeating.
+const gateAsk2 = lang => lang === 'en'
+  ? 'Sorry to ask again 🙏 I still cannot see a contact for you. A phone number works, or your WhatsApp username starting with @. Either one and the sales advisor can take it from there.'
+  : 'Maaf tanya sekali lagi ya 🙏 Kami masih tak nampak contact tuan. Nombor telefon pun boleh, atau username WhatsApp tuan yang start dengan @. Mana-mana satu, lepas tu sales advisor terus follow up.';
 const gateAsk = lang => lang === 'en'
   ? `One thing ya, WhatsApp hasn't shared your contact details with us, so our sales advisor has no way to reach you back. 🙏 Could you reply with your phone number, or your WhatsApp username (the one starting with @)?`
   : `Satu je bos, WhatsApp tak share contact tuan dengan kami, jadi sales advisor kami tak boleh contact balik. 🙏 Boleh reply nombor telefon tuan, atau username WhatsApp tuan (yang start dengan @)?`;
@@ -831,7 +841,7 @@ async function gateOnReply(jid, h, text, bphone){
     const offered = RE_GATE_USERNAME.test(text);
     const body = offered                   ? gateUsername(h.lang)
                : RE_GATE_WHY.test(text)    ? gateWhy(h.lang)
-               : gateAsk(h.lang);
+               : gateAsk2(h.lang);          // never the same sentence twice — see gateAsk2
     h.asks += 1;
     h.note = offered ? 'offered username' : undefined;
     // Set only when we actually asked them to type one — this is what makes a bare one-word
@@ -910,6 +920,47 @@ async function intentSweep(){
     try { await intentRelease(jid, h, '', 'timeout'); }
     catch(e){ D.log('FR intent sweep err:', String(e.message||e).slice(0,60)); }
   }
+}
+
+// ---------- LATE-ANSWER ENRICHMENT (2026-09-16, Benjamin) -------------------------------------
+// 🚨 The bot answers once per 7 days by design, and that design silently ATE the customer's answer.
+// Three real chats Benjamin reviewed, all the same shape — the useful message landed seconds after
+// the bot had closed the exchange, so the re-greet guard dropped it before anything read it:
+//   Hakim  00:58  "Sy minat 368G V2.1 High Seat. Sy ingin beli guna EPP maybank"  -> Amirul got
+//                 only "Nak tanya berkenaan motor zontes 368G V2.1". Variant and financing lost.
+//   H      01:03  "Cash"                     -> Adib got "I am looking for ninja 650", no payment.
+//   Careen 21:57  "Jual"                     -> nothing at all.
+// Measured over 11-15 Sep: roughly ONE dropped follow-up for every lead created.
+// 🔑 Staying SILENT is the right call. Throwing the information away is not. So the reply rule is
+// untouched and the lead row gets the sentence appended instead.
+const LISTEN_MS = Number(process.env.FR_LISTEN_MS || 60 * 60 * 1000);
+function rememberLead(jid, recordId, want){
+  if (!jid || !recordId) return;
+  state.lastLead = state.lastLead || {};
+  state.lastLead[jid] = { recordId, ts: Date.now(), want: String(want || '').slice(0, 160) };
+  // Unbounded growth is a slow leak on a file that is written on every message. Trim oldest first.
+  const keys = Object.keys(state.lastLead);
+  if (keys.length > 2000){
+    keys.sort((a, b) => (state.lastLead[a].ts || 0) - (state.lastLead[b].ts || 0));
+    for (const k of keys.slice(0, 500)) delete state.lastLead[k];
+  }
+  persist();
+}
+// Returns true when the message was used to enrich an existing lead (caller then stays silent).
+async function enrichLead(jid, text, hasImage){
+  const e = (state.lastLead || {})[jid];
+  if (!e || !e.recordId) return false;
+  if (Date.now() - (e.ts || 0) > LISTEN_MS) return false;
+  const add = String(text || '').replace(/\s+/g, ' ').trim();
+  if (!add && !hasImage) return false;
+  const merged = `${e.want || ''} | said after: ${add || '[sent a photo]'}`.slice(0, 200);
+  try { if (D.larkPatchWant) await D.larkPatchWant(e.recordId, merged); }
+  catch(err){ D.log('FR enrich patch err:', String(err.message||err).slice(0,60)); return false; }
+  e.want = merged; e.ts = Date.now(); persist();
+  D.log(`FR 📝 late answer added to the lead (${jid.slice(0,22)}) "${add.slice(0,50)}"`);
+  frLogEvent('enriched', jid, { has_phone: false, cat: '', phone: '',
+    want: add.slice(0, 120), recordId: e.recordId, note: 'late_answer' });
+  return true;
 }
 
 async function gateSweep(){
@@ -1134,7 +1185,12 @@ async function flush(jid){
     const hasLink = /https?:\/\//i.test(String(text || ''));
     const intentUnknown = finalCat === 'product' && !b.hasImage && !hasLink
                        && (vague || !RE_BIKE.test(String(text || '')));
-    if (INTENT_HOLD_ON() && !nextLabel && intentUnknown){
+    // OFF-HOURS TOO (2026-09-16). Shipping this in-hours only was a half fix: 3 of the 3 chats
+    // Benjamin reviewed were after midnight, and off-hours is where it matters MORE, not less —
+    // the row is created now and drained to a rep at 09:00, so a wrong category set at 01:00 is
+    // still wrong eight hours later with nobody awake to catch it. Measured: Hakim 00:57, H 01:03,
+    // Careen 21:53 — all three had their real intent arrive AFTER we had already decided.
+    if (INTENT_HOLD_ON() && intentUnknown){
       intentHold(jid, finalCat, want, lang, b.phone);
       await D.waSend(sendTarget(jid, b.phone),
         (stockLine ? stockLine + '\n\n' : '') + intentAsk(lang));
@@ -1202,7 +1258,11 @@ async function flush(jid){
       note: RE_VENDOR_AUTO.test(String(text || '')) ? 'vendor_auto' : 'unclassified' });
     return;
   }
+  // Before dropping this as a repeat: if they are still talking about a lead we just wrote, put
+  // what they said ON that lead. No reply — the one-touch rule is unchanged — but the salesperson
+  // sees the sentence that actually matters.
   if (state.greeted[jid] && now - state.greeted[jid] < REGREET_MS){
+    if (await enrichLead(jid, text, b.hasImage)) return;
     // Already greeted within 7 days and this is not an answer we were waiting for, so the bot stays
     // quiet by design. Logged as `repeat` (Benjamin, 2026-08-14): excluded from every lead count,
     // and used ONLY so the inbox cross-check does not read a returning chatter as a missed webhook.

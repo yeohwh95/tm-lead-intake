@@ -43,13 +43,14 @@ const LEAD_BUCKETS = ['assigned', 'parked', 'qualified', 'gate_held', 'intent_he
 // Lark row, no SLA clock) but it IS a real customer who was served, so it belongs on the
 // not-a-sales-lead line and never in `other`. Same contract as the note above: the outcome and
 // this list are two halves of one change.
-const NON_LEAD_BUCKETS = ['ai_skip', 'human_owned', 'repeat', 'admin_handoff'];
+const NON_LEAD_BUCKETS = ['ai_skip', 'human_owned', 'repeat', 'admin_handoff', 'enriched'];
 
 // Plain English for the "why wasn't it assigned" list. A reason a salesperson can act on.
 const WHY = {
   parked:         'parked for the next assignment window',
   qualified:      'answered our question, waiting for the next assignment window',
   gate_held:      'no phone number yet, still asking',
+  enriched:       'said more after we went quiet, added to their existing lead',
   intent_held:    'asked buy-or-sell, waiting before routing',
   no_rep:         '🚨 NOBODY took it (the CRM row has no owner)',
   awaiting_model: 'greeted, waiting for them to say which bike',
