@@ -1185,6 +1185,12 @@ async function readAvailRows(tok){
   return out;
 }
 async function sheetWrite(tok, sid, a1, value){
+  // 🚨 Lark's v2 values PUT rejects a single-cell range: "E47" comes back code=90202
+  // "wrong range". It must be "E47:E47". Found 18 Sep by the first armed run — the DRY RUN could
+  // not have caught it, because a dry run computes the plan and never calls this. The plan looked
+  // perfect and the write was broken, which is the whole reason the armed run was verified against
+  // the sheet itself rather than against the endpoint's own idea of what it did.
+  a1 = settingsMod.a1Range(a1);
   const r = await fetch(`${LARK_BASE}/sheets/v2/spreadsheets/${AVAIL_SHEET}/values`, {
     method: 'PUT', headers: { 'Authorization': 'Bearer ' + tok, 'Content-Type': 'application/json' },
     body: JSON.stringify({ valueRange: { range: `${sid}!${a1}`, values: [[value]] } }) });
@@ -1195,7 +1201,7 @@ async function sheetWrite(tok, sid, a1, value){
   return true;
 }
 
-let _panel = { settings: null, campaigns: [], leave: [], warnings: [], ts: 0, appliedKey: '', warnKey: '', lastLeave: null };
+let _panel = { settings: null, campaigns: [], leave: [], warnings: [], ts: 0, appliedKey: '', warnKey: '', lastLeave: null, statusAlertAt: 0 };
 function panelStatus(){
   return { on: PANEL_ON, leaveWrite: PANEL_LEAVE_WRITE, tab: _panelSid, readAt: _panel.ts ? new Date(_panel.ts).toISOString() : null,
     suspended: botSuspendedReason() || null, settings: _panel.settings, campaigns: _panel.campaigns,
@@ -1280,8 +1286,17 @@ async function leaveTick(tok, panelSid, leave, dry){
     catch (e){ log('🚨 LEAVE write failed for ' + w.name + ': ' + String(e.message || e).slice(0, 120));
       await alertReview(`🚨 *Planned Leave could not be applied*\n${w.name} should be ${w.value} but the sheet write failed.\nSomebody needs to set Available? for ${w.name} by hand.`); }
   }
+  let statusFail = 0;
   for (const st of plan.statuses){
-    try { await sheetWrite(tok, panelSid, `E${st.row}`, st.value); } catch (e){ log('leave status write err row ' + st.row + ': ' + String(e.message || e).slice(0, 80)); }
+    try { await sheetWrite(tok, panelSid, `E${st.row}`, st.value); }
+    catch (e){ statusFail++; log('🚨 leave status write err row ' + st.row + ': ' + String(e.message || e).slice(0, 120)); }
+  }
+  // That column is NOT decoration — it is where "(was YES)" lives, and it is the only record of
+  // what to restore someone to. If it cannot be written, the bot can switch people OFF and then
+  // never know what to put back. So this shouts rather than sitting in a log nobody reads.
+  if (statusFail && Date.now() - _panel.statusAlertAt > 6 * 3600 * 1000){
+    _panel.statusAlertAt = Date.now();
+    await alertReview(`🚨 *Planned Leave: cannot write the Status column*\n${statusFail} row(s) failed on the control panel.\n\nThat column is where the bot remembers whether somebody was YES or NO BEFORE their leave, so until this is fixed it cannot reliably switch them back. Please check that the bot still has edit access to the sheet.`);
   }
   for (const a of plan.alerts){ try { await alertReview(a); } catch {} }
   // The availability cache is 5 min old and we have just changed the thing it caches; without this

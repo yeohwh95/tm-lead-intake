@@ -213,4 +213,13 @@ function parseLeave(rows) {
   return { ok: true, leave: out, warnings };
 }
 
-module.exports = { norm, isDate, parseDays, parseSettings, parseCampaigns, parseLeave, LABELS, DEFAULTS };
+// Lark's v2 values PUT rejects a SINGLE-CELL range: "E47" returns code=90202 "wrong range". It
+// wants "E47:E47". Proven against the live sheet 2026-09-18 ("Z80" -> 90202, "Z80:Z80" -> 0).
+// Lives here, tested, rather than inline at the call site: this is the write that switches a
+// salesperson off and back on, and it failed silently the first time it ran for real.
+function a1Range(a1){
+  const s = String(a1 == null ? '' : a1).trim();
+  return s.includes(':') ? s : `${s}:${s}`;
+}
+
+module.exports = { norm, isDate, parseDays, parseSettings, parseCampaigns, parseLeave, a1Range, LABELS, DEFAULTS };

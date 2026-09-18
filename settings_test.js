@@ -117,6 +117,16 @@ ok('the page\u2019s own pointer rows are NOT read as leave', lptr.leave.length =
 ok('and produce ZERO warnings', lptr.warnings.length === 0 || (console.log('     ' + lptr.warnings.join('\n     ')), false));
 ok('a real date typo IS still caught', s.parseLeave([['AMIR', '18/09/2026', '21/09/2026']]).warnings.some(w => /not a valid date pair/.test(w)));
 
+console.log('\n-- a1Range: Lark rejects a single-cell range --');
+// REGRESSION 2026-09-18: sheetWrite sent "E47" and Lark answered code=90202 "wrong range". The
+// Planned-Leave status write failed silently on its first armed run, and the Available? write - the
+// one that actually switches a person off - would have failed identically. Proven against the live
+// sheet: "Z80" -> 90202, "Z80:Z80" -> success.
+ok('a single cell is expanded to a range', s.a1Range('E47') === 'E47:E47');
+ok('an existing range is left alone', s.a1Range('A1:B60') === 'A1:B60');
+ok('the column letter is preserved', s.a1Range('B19') === 'B19:B19');
+ok('whitespace is trimmed', s.a1Range('  E47  ') === 'E47:E47');
+
 console.log('\n-- row positions do not matter --');
 const shuffled = [['zzz filler'], ['more filler'], ...PAGE];
 const r2 = s.parseSettings(shuffled), c2 = s.parseCampaigns(shuffled), l2 = s.parseLeave(shuffled);
