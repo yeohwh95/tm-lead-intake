@@ -1118,7 +1118,7 @@ async function pollAvailability(){
 
 // One announcer for the WHOLE control sheet — availability AND the panel settings/campaigns — so an
 // editing session produces ONE message instead of one per subsystem.
-let _settingsFp = null;
+let _settingsFp = null, _lastAnnounce = null;
 async function sheetAnnounceTick(){
   try {
     const now = Date.now();
@@ -1157,9 +1157,13 @@ async function sheetAnnounceTick(){
     // Reset FIRST, so a send failure cannot wedge the burst open and re-announce forever.
     _availPending = false; _burstBase = null; _lastChangeTs = 0; _burstStartTs = 0;
     _settingsFp = fpFresh; _botWroteAvail.clear();
-    if (!msg){ log('sheet edits cancelled out — nothing announced'); return; }
+    if (!msg){
+      _lastAnnounce = { at: new Date().toISOString(), outcome: 'cancelled out — the edits ended up back where they started, nothing sent' };
+      log('sheet edits cancelled out — nothing announced'); return;
+    }
     const off = Object.keys(availNow || {}).filter(n => availNow[n] === 'NO');
     await alertReview(msg + (availLines.length ? (off.length ? `\n\nCurrently OFF: ${off.join(', ')}` : '\n\nEveryone available ✅') : ''));
+    _lastAnnounce = { at: new Date().toISOString(), outcome: 'announced', avail: availLines.map(x => x.line), settings: settingLines };
     log('sheet change announced:', (availLines.map(x => x.name).join(',') || '-') + ' | settings ' + settingLines.length);
   } catch (e){ log('sheetAnnounceTick err', String(e.message || e).slice(0, 120)); }
 }
@@ -1257,7 +1261,20 @@ async function sheetWrite(tok, sid, a1, value){
 
 let _panel = { settings: null, campaigns: [], leave: [], warnings: [], ts: 0, appliedKey: '', warnKey: '', lastLeave: null, statusAlertAt: 0 };
 function panelStatus(){
+  // The debounce had no observable state, so "did it decide to stay quiet, or is it still holding?"
+  // could only be answered by waiting to see whether a message arrived. A timer you cannot inspect
+  // is a timer you cannot trust.
+  const now = Date.now();
   return { on: PANEL_ON, leaveWrite: PANEL_LEAVE_WRITE, tab: _panelSid, readAt: _panel.ts ? new Date(_panel.ts).toISOString() : null,
+    announce: {
+      quietMs: sheetwatch.QUIET_MS, maxMs: sheetwatch.MAX_MS,
+      pending: _availPending,
+      baselineReady: _settingsFp !== null && _availSnap !== null,
+      secsSinceLastEdit: _lastChangeTs ? Math.round((now - _lastChangeTs) / 1000) : null,
+      secsSinceBurstStart: _burstStartTs ? Math.round((now - _burstStartTs) / 1000) : null,
+      wouldFlushNow: _availPending && sheetwatch.shouldFlush(now, _lastChangeTs, _burstStartTs),
+      botWroteAvail: [..._botWroteAvail],
+      lastAnnounce: _lastAnnounce },
     suspended: botSuspendedReason() || null, settings: _panel.settings, campaigns: _panel.campaigns,
     leave: _panel.leave, warnings: _panel.warnings, lastLeaveRun: _panel.lastLeave,
     liveWindow: { days: FR_DIST_DAYS, start: FR_DIST_START, end: FR_DIST_END, openNow: inFRDistHours() } };
