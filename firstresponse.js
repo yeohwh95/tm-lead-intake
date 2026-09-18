@@ -8,6 +8,17 @@ const fs = require('fs');
 const path = require('path');
 
 const ON = () => process.env.FIRSTRESPONSE_ON === '1';
+// ---- LIVE CONFIG from the Lark control panel (2026-09-18) ------------------------------------
+// index.js calls setConfig() every 5 min from the panel read. Every getter below falls back to the
+// env var and then to the built-in default, in that order, so an unreadable page leaves behaviour
+// EXACTLY as it was rather than reverting the bot to some neutral state nobody chose.
+let CFG = {};
+function setConfig(c){ CFG = c || {}; }
+const cfgBool = (k, envFallback) => (typeof CFG[k] === 'boolean' ? CFG[k] : envFallback);
+// A reply template is only overridden when the cell actually has text in it. A blank cell means
+// "keep saying what you already say" — never "say nothing", which is how a cleared cell would
+// otherwise silence the bot on a whole category.
+const cfgText = (k, builtin) => { const v = CFG.replies && CFG.replies[k]; return (typeof v === 'string' && v.trim()) ? v.trim() : builtin; };
 const DEBOUNCE_MS = Number(process.env.FR_DEBOUNCE_MS || 10 * 1000);
 // 🚨 A message that is NOTHING BUT A LINK is the ad the customer tapped, not their question.
 // WhatsApp renders it as a video/preview card the moment it lands, so the customer sends it and
@@ -240,13 +251,17 @@ function tpl(cat, lang, card, stockLine, nextLabel){
       + `Saya customer service je ya, jadi untuk detail loan & kelulusan salesman kami lagi arif. `
       + `Info tuan dah saya pass kat dia, dia akan contact tuan sebentar lagi.`
       + (card ? ` Kalau nak terus pun boleh 👇` : ``)) + c;
-  if (cat === 'testride') return (lang === 'en'
+  // Panel: "Reply - test ride". The team rewrote this sentence twice by asking us (20 Jul, 19 Aug);
+  // now they edit the cell. The BM wording is theirs verbatim, so the panel default matches exactly
+  // what the bot already said and switching the page on changes nothing on day one.
+  if (cat === 'testride') return cfgText('testRide', lang === 'en'
     ? `Thank you for your interest in a test ride with us! 😊 Our sales advisor will contact you as soon as possible to help check the model, date, time availability and the test ride process.`
     : `Terima kasih kerana berminat untuk membuat test ride bersama kami! 😊 Sales advisor kami akan menghubungi anda secepat mungkin untuk membantu semakan model, tarikh, masa yang available dan proses untuk test ride.`) + c;
   if (cat === 'greeting') return lang === 'en'
     ? `Hi! 😊 Which bike are you interested in? Feel free to share the model or a screenshot of the ad you saw 👍`
     : `${g} 😊 Ya bos, berminat motor apa ya? Boleh share model atau screenshot iklan yang bos tengok tadi 👍`;
-  return (lang === 'en'
+  // Panel: "Reply - general enquiry" (their own 20 Jul wording is the default).
+  return cfgText('general', lang === 'en'
     ? `Thank you for contacting us. 😊 Your message has been received. Our sales advisor will contact you shortly to help answer your questions.`
     : `Terima kasih kerana menghubungi kami. 😊 Mesej anda telah diterima. Sales advisor kami akan menghubungi anda dalam masa terdekat untuk membantu menjawab pertanyaan anda.`) + s + c;
 }
@@ -255,12 +270,22 @@ function tpl(cat, lang, card, stockLine, nextLabel){
 // a product/stock question, instead of always assuming yes or staying silent on it) ----------
 async function stockLineFor(cat, text, lang){
   if (cat !== 'product' || !text || !RE_BIKE.test(text) || !D.wooCheckStock) return '';
+  // Panel: "May the bot say whether a bike is in stock?" — Steven's ruling of 22 Jul 2026, now a
+  // switch instead of a comment. MEASURED cost of getting this wrong: 9 separate complaints in the
+  // internal group ("er6n still available but ai respon takde stock", "aprilia rsv4 still
+  // available", "mt07 still available", "R1 tak ada stock") — each one a lead the customer walked
+  // away from. With this OFF the whole stock/price sentence is dropped and the lead simply goes to
+  // a salesperson, which is what the team asked for.
+  if (!cfgBool('maySayStock', true)) return '';
   let r = null;
   try { r = await D.wooCheckStock(text); } catch(e){ D.log && D.log('FR stock err:', String(e.message||e).slice(0,60)); }
   if (!r) return '';   // not configured / lookup failed → skip silently, never block the reply
   // Did they actually ask a price? Only then does the CS-price line REPLACE the stock line's
   // "salesman will confirm" tail. Never both — that would be two salesman-will-confirm sentences.
-  const priceAsked = RE_PRICE.test(String(text || ''));
+  // Panel: "May the bot quote a price?" — when NO (the team ruling), a price question always gets
+  // the customer-service "I won't give you a wrong number" line and never a figure off the site.
+  // This is what stops the "ai salah inform harga" reports (10 + 22 Jul, 10 Aug) recurring.
+  const priceAsked = RE_PRICE.test(String(text || '')) || !cfgBool('maySayPrice', true);
   // Booking/pre-release listing matched (2026-07-24, Zontes 175X: bot claimed "we have stock —
   // from RM 8,888.889" off the placeholder price of "OPEN FOR BOOKING NEW ZONTES 175X") →
   // booking pitch, never a stock/price claim. Zontes gets Steven's dealer + mystery-gift lines.
@@ -554,9 +579,13 @@ const GATE_MS = Number(process.env.FR_GATE_MS || 15 * 60 * 1000);
 // 🔑 So the hold is not about being polite with a delay — it is about not ROUTING on a guess.
 // Ask which one, wait, and let the answer pick the destination. If they say nothing in 10 minutes
 // we assign exactly as before, so the worst case is today's behaviour arriving 10 minutes later.
-const INTENT_HOLD_MS = Number(process.env.FR_INTENT_HOLD_MS || 10 * 60 * 1000);
-// Kill switch: FR_INTENT_HOLD=0 restores the old assign-immediately path with no deploy.
-const INTENT_HOLD_ON = () => process.env.FR_INTENT_HOLD !== '0';
+// Panel: "Ask buy-or-sell before assigning?" + "How long to hold for that answer (minutes)".
+// Now functions, not consts, because the panel can change them between two messages.
+const INTENT_HOLD_MS_DEFAULT = Number(process.env.FR_INTENT_HOLD_MS || 10 * 60 * 1000);
+const intentHoldMs = () => (Number.isFinite(CFG.intentHoldMs) && CFG.intentHoldMs > 0) ? CFG.intentHoldMs : INTENT_HOLD_MS_DEFAULT;
+// Kill switch: FR_INTENT_HOLD=0 restores the old assign-immediately path with no deploy. The panel
+// switch overrides it either way.
+const INTENT_HOLD_ON = () => cfgBool('intentHold', process.env.FR_INTENT_HOLD !== '0');
 const intentAsk = lang => lang === 'en'
   ? 'Got it 👍 Quick one so I pass you to the right person — are you looking to *buy* a bike, or to *sell / trade in* yours?\n\nAnd which model, if you have one in mind?'
   : 'Baik tuan 👍 Sikit je — tuan nak *beli* motor, atau nak *jual / trade-in* motor tuan?\n\nDan model apa ya, kalau dah ada dalam fikiran?';
@@ -938,7 +967,7 @@ async function intentSweep(){
   for (const jid of Object.keys(q)){
     const h = q[jid];
     if (!h || h.phase !== 'intent') continue;
-    if (h.ts && now - h.ts < INTENT_HOLD_MS) continue;
+    if (h.ts && now - h.ts < intentHoldMs()) continue;
     if (humanTouched.has(jid)){        // a salesperson already replied — never assign over a human
       delete q[jid]; persist();
       D.log(`FR intent hold dropped — human took over (${jid.slice(0,22)})`);
@@ -1482,7 +1511,7 @@ function clearQualify(jid){
 }
 
 function init(deps){ D = deps; D.log('firstresponse init — ON:', ON(), 'debounce:', DEBOUNCE_MS + 'ms'); }
-module.exports = { init, onMessage, markHuman, rehydrateGreeted, gateSweep, gateReadEvents, gateLogParked, readFrEvents, clearQualify,
+module.exports = { init, setConfig, onMessage, markHuman, rehydrateGreeted, gateSweep, gateReadEvents, gateLogParked, readFrEvents, clearQualify,
   gateStatus: () => Object.entries(state.awaitingPhone || {}).map(([jid, h]) => ({
     jid, cat: h.cat, asks: h.asks, note: h.note || '',
     waitingMin: Math.round((Date.now() - (h.ts || Date.now())) / 60000),

@@ -928,6 +928,20 @@ function assignLeads(leads, ov, unavail){
     // into Lark instead of leaving it empty and asking the group to reply.
     if (!VALID_BRANDS.has(l.brand)) l.brand = brandFromModel(l.interest || l.name || '') || 'HQ';
     let assignee = ov.assignee || '';
+    // ---- STICKY OWNER (panel: "If the same customer comes back, keep the same salesperson?") ----
+    // MEASURED 8-15 Sep: 641 ad rows were 397 real customers, and 149 of those customers ended up
+    // with TWO different salespeople. Each duplicate is two reps calling the same person about the
+    // same bike, and the customer hearing an uncoordinated shop. Duplicates were already REPORTED
+    // in the 09:10 report; this is the first thing that PREVENTS one.
+    // The map is phone-last9 -> the rep who already owns them, read from Lark at import time (not
+    // on a timer — a full CRM scan is a cost the client feels, and it is only needed right here).
+    if (!assignee && !ov.noAssign && ov.stickyOwner) {
+      const d9 = String(l.phone || '').replace(/\D/g, '').slice(-9);
+      const prior = d9 && ov.stickyOwner.get(d9);
+      // Only honour a name that is STILL on the roster. A departed rep in an old Lark row must not
+      // keep receiving leads forever — that is how Azwin kept getting them after he resigned.
+      if (prior && STAFF[prior]) { assignee = prior; l._sticky = true; }
+    }
     if (!assignee && !ov.noAssign) {
       let team, pool;
       if (ov.teamOverride && ov.teamOverride.length) {
@@ -945,7 +959,7 @@ function assignLeads(leads, ov, unavail){
     const staff = STAFF[assignee] || null;
     const want = (l.interest && !/^\s*no question\s*$/i.test(l.interest)) ? l.interest : (l.name || 'No question');
     const origin = ov.origin || l.origin || 'Whatsapp';
-    return { phone: l.phone || '', name: l.name || '', want, brand: l.brand || '', origin, assignee, staff, override: !!ov.assignee, requestedName: ov.requestedName || '' };
+    return { phone: l.phone || '', name: l.name || '', want, brand: l.brand || '', origin, assignee, staff, override: !!ov.assignee, requestedName: ov.requestedName || '', sticky: !!l._sticky };
   });
 }
 
@@ -967,6 +981,8 @@ async function larkToken(){
 
 // ---- Salesman availability (Lark Sheet) → set of names marked "NO" (skip them in rotation). Cached 5 min. ----
 const AVAIL_SHEET = process.env.AVAIL_SHEET || 'YjLTslshkhRGeXt9V5DlJi8cgdl';
+const settingsMod = require('./settings');
+const leavesync   = require('./leavesync');
 // ---- ROSTER-FROM-SHEET, SHADOW MODE (2026-07-30) ----
 // The team list lives in FOUR places (this file's POOLS/STAFF, tiktok-lead-engine POOL_*,
 // tm-daily-report TEAM_KW, and the Lark sheet). Drift between them has silently cost leads four
@@ -1097,6 +1113,191 @@ async function pollAvailability(){
 setInterval(pollAvailability, 2 * 60 * 1000);
 setTimeout(pollAvailability, 8000);   // baseline shortly after startup
 
+// ================================ THE LARK CONTROL PANEL =======================================
+// One page in the AI REFERENCE SHEET now owns: the master switch, off days, the working hours, what
+// the bot may say about stock/price, the routing rules, the reply wording, the TikTok ad rotations
+// (read by tiktok-lead-engine, not here) and planned leave. Built 2026-09-18 after Harith asked for
+// "a toggle switch in lark for disabling the bot during offdays" — but the 1,056 messages in the
+// internal group say the thing they actually change most is the ad rotation, which until now was
+// hardcoded Python. Two of those requests (15 + 17 Sep) were never applied at all and nothing
+// alarmed; that silence is what this page removes.
+//
+// 🔑 TWO SEPARATE SWITCHES, deliberately:
+//   PANEL_ON=1         → read the page and OBEY it (settings only; writes nothing)
+//   PANEL_LEAVE_WRITE=1 → additionally allow Planned Leave to SET the Available? column
+// The second is the only thing here that writes into a tab a human also edits, so it is armed
+// separately and after a dry run — the same "prove the data first" order used for ROSTER_FROM_SHEET.
+const PANEL_ON = process.env.PANEL_ON !== '0';
+const PANEL_LEAVE_WRITE = process.env.PANEL_LEAVE_WRITE === '1';
+// Resolved by TITLE first, then BY CONTENT. The tab is called "Ad salesman info" because that is
+// what Harith named it when it held only the ad table; it now holds everything and may be renamed.
+// Every previous sheet reader in this repo broke at least once on a tab being renamed or dragged,
+// so the fallback looks for the page itself: the tab containing a "Bot ON / OFF" cell IS the panel.
+const PANEL_TAB_TITLES = (process.env.PANEL_TAB_TITLE || 'BOT SETTINGS,Bot Settings,Ad salesman info,Bot Control Panel,CONTROL PANEL')
+  .split(',').map(x => x.trim().toLowerCase()).filter(Boolean);
+let _panelSid = null;
+async function panelSheetId(tok){
+  if (_panelSid) return _panelSid;
+  const meta = await (await fetch(`${LARK_BASE}/sheets/v3/spreadsheets/${AVAIL_SHEET}/sheets/query`, { headers: { 'Authorization': 'Bearer ' + tok } })).json();
+  const sheets = (meta.data && meta.data.sheets) || [];
+  const byTitle = sheets.find(x => PANEL_TAB_TITLES.includes(String(x.title || '').trim().toLowerCase()));
+  if (byTitle && await panelLooksRight(tok, byTitle.sheet_id)) { _panelSid = byTitle.sheet_id; return _panelSid; }
+  for (const sh of sheets){
+    if (byTitle && sh.sheet_id === byTitle.sheet_id) continue;
+    if (await panelLooksRight(tok, sh.sheet_id)){
+      log('ℹ️ PANEL: found the control panel on tab "' + sh.title + '" (title not in the expected list — fine, it was matched by content)');
+      _panelSid = sh.sheet_id; return _panelSid;
+    }
+  }
+  log('🚨 PANEL: no tab on this sheet contains a "Bot ON / OFF" row (tabs: ' + sheets.map(x => x.title).join(' | ') + ') — the bot keeps its built-in settings');
+  return null;
+}
+async function panelLooksRight(tok, sid){
+  try {
+    const rows = await panelRows(tok, sid);
+    return rows.some(r => settingsMod.norm(r && r[0]) === settingsMod.norm('Bot ON / OFF'));
+  } catch { return false; }
+}
+async function panelRows(tok, sid){
+  // A1:G200 — the page is ~72 rows; the headroom is for rows the team inserts. Reading past the
+  // end is free, and a bounded range that the page GROWS INTO would silently truncate the last
+  // campaigns (the read-limit failure class that once reported 0 leads when there were 17).
+  const v = await (await fetch(`${LARK_BASE}/sheets/v2/spreadsheets/${AVAIL_SHEET}/values/${sid}!A1:G200`, { headers: { 'Authorization': 'Bearer ' + tok } })).json();
+  return (v.data && v.data.valueRange && v.data.valueRange.values) || [];
+}
+// Lark returns a cell as a string, a number, or an ARRAY of rich-text runs. Flatten to text or a
+// "YES" typed as rich text reads as [object Object] and every switch falls back to its default.
+function flat(c){
+  if (c == null) return '';
+  if (Array.isArray(c)) return c.map(x => (x && (x.text != null ? x.text : x.link != null ? x.link : '')) || '').join('');
+  if (typeof c === 'object') return String(c.text != null ? c.text : '');
+  return String(c);
+}
+const flatRows = rows => rows.map(r => (r || []).map(flat));
+
+// availability tab as [{name, value, row}] — row is 1-indexed, for writing back
+async function readAvailRows(tok){
+  const sid = await availSheetId(tok);
+  const v = await (await fetch(`${LARK_BASE}/sheets/v2/spreadsheets/${AVAIL_SHEET}/values/${sid}!A1:B60`, { headers: { 'Authorization': 'Bearer ' + tok } })).json();
+  const rows = (v.data && v.data.valueRange && v.data.valueRange.values) || [];
+  const out = [];
+  rows.forEach((r, i) => { const name = flat(r && r[0]).trim(); if (name) out.push({ name, value: flat(r && r[1]).trim(), row: i + 1 }); });
+  return out;
+}
+async function sheetWrite(tok, sid, a1, value){
+  const r = await fetch(`${LARK_BASE}/sheets/v2/spreadsheets/${AVAIL_SHEET}/values`, {
+    method: 'PUT', headers: { 'Authorization': 'Bearer ' + tok, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ valueRange: { range: `${sid}!${a1}`, values: [[value]] } }) });
+  const j = await r.json();
+  // 🚨 Lark refuses with HTTP 200 and a non-zero code in the body. A previous job treated the 200
+  // as success and lost a whole day of capture, so the BODY is what decides here.
+  if (j.code !== 0) throw new Error(`lark write ${sid}!${a1} code=${j.code} ${j.msg || ''}`);
+  return true;
+}
+
+let _panel = { settings: null, campaigns: [], leave: [], warnings: [], ts: 0, appliedKey: '', warnKey: '', lastLeave: null };
+function panelStatus(){
+  return { on: PANEL_ON, leaveWrite: PANEL_LEAVE_WRITE, tab: _panelSid, readAt: _panel.ts ? new Date(_panel.ts).toISOString() : null,
+    suspended: botSuspendedReason() || null, settings: _panel.settings, campaigns: _panel.campaigns,
+    leave: _panel.leave, warnings: _panel.warnings, lastLeaveRun: _panel.lastLeave,
+    liveWindow: { days: FR_DIST_DAYS, start: FR_DIST_START, end: FR_DIST_END, openNow: inFRDistHours() } };
+}
+
+// Apply the key/value settings. Only LOGS when something actually changed — this runs every 5
+// minutes and an unchanged read must be silent, or the log becomes unreadable and the one line
+// that matters gets lost in it.
+function applyPanelSettings(st){
+  const before = JSON.stringify([FR_DIST_DAYS, FR_DIST_START, FR_DIST_END, FR_HOURS_DAYS, FR_HOURS_START, FR_HOURS_END]);
+  FR_DIST_DAYS = st.distDays.slice(); FR_DIST_START = st.distStart; FR_DIST_END = st.distEnd;
+  // The customer-facing hours sentence tracks the same window — they disagreed for 8 days once.
+  FR_HOURS_DAYS = st.distDays.slice(); FR_HOURS_START = st.distStart; FR_HOURS_END = st.distEnd;
+  const after = JSON.stringify([FR_DIST_DAYS, FR_DIST_START, FR_DIST_END, FR_HOURS_DAYS, FR_HOURS_START, FR_HOURS_END]);
+  if (before !== after) log('🔁 PANEL hours → ' + fmtHours(FR_DIST_DAYS, FR_DIST_START, FR_DIST_END).en);
+  if (firstresponse.setConfig) firstresponse.setConfig({
+    intentHold: st.intentHold, intentHoldMs: st.intentHoldMin * 60 * 1000,
+    maySayStock: st.maySayStock, maySayPrice: st.maySayPrice, maySayWorkshop: st.maySayWorkshop,
+    sellGoesTo: st.sellGoesTo, adminGoesTo: st.adminGoesTo,
+    replies: { general: st.replyGeneral, testRide: st.replyTestRide, admin: st.replyAdmin, offHours: st.replyOffHoursMsg },
+    replyOffHours: st.replyOffHours });
+}
+
+async function panelTick(){
+  if (!PANEL_ON) return;
+  try {
+    const tok = await larkToken();
+    const sid = await panelSheetId(tok);
+    if (!sid) return;
+    const rows = flatRows(await panelRows(tok, sid));
+    if (!rows.length) { log('⚠️ PANEL: read returned ZERO rows — keeping the settings currently in use'); return; }
+
+    const S = settingsMod.parseSettings(rows);
+    const C = settingsMod.parseCampaigns(rows);
+    const L = settingsMod.parseLeave(rows);
+    // A page that produced no recognisable setting is a wrong-tab read, not a config change.
+    if (!S.ok) { log('🚨 PANEL: not one known setting found — refusing to use this read'); return; }
+    _panel.settings = S.settings; _panel.campaigns = C.campaigns; _panel.leave = L.leave; _panel.ts = Date.now();
+    _panel.warnings = [...S.warnings, ...C.warnings, ...L.warnings];
+
+    const key = JSON.stringify(S.settings);
+    if (key !== _panel.appliedKey){
+      applyPanelSettings(S.settings);
+      _panel.appliedKey = key;
+      const sus = botSuspendedReason();
+      log('🔁 PANEL applied — ' + S.foundCount + ' settings · window ' + fmtHours(FR_DIST_DAYS, FR_DIST_START, FR_DIST_END).en
+        + ' · stock=' + (S.settings.maySayStock ? 'may answer' : 'never') + ' · price=' + (S.settings.maySayPrice ? 'may answer' : 'never')
+        + (sus ? ' · 🔴 SUSPENDED: ' + sus : ''));
+      if (sus) await alertReview(`🔴 *Bot suspended*\n${sus}\n\nLeads are still being CAPTURED into the CRM — nothing is lost. Nobody is being messaged and no leads are being handed out until this is changed back.`);
+    }
+    // Tell the group about a page that cannot be read properly — but only when the set of
+    // complaints CHANGES, so a typo nobody fixes does not shout every 5 minutes forever.
+    const wk = JSON.stringify(_panel.warnings);
+    if (_panel.warnings.length && wk !== _panel.warnKey){
+      _panel.warnKey = wk;
+      await alertReview('⚠️ *Bot control panel — please check these rows*\n' + _panel.warnings.slice(0, 10).map(w => '• ' + w).join('\n')
+        + (_panel.warnings.length > 10 ? `\n…and ${_panel.warnings.length - 10} more` : '')
+        + '\n\nThe bot is using its previous value for anything it could not read — nothing has been guessed at.');
+    } else if (!_panel.warnings.length) _panel.warnKey = '';
+
+    await leaveTick(tok, sid, L.leave);
+  } catch (e){ log('panelTick err', String(e.message || e).slice(0, 160)); }
+}
+
+// Planned Leave → Available?. dry=true computes and returns the plan without writing anything.
+async function leaveTick(tok, panelSid, leave, dry){
+  const avail = await readAvailRows(tok);
+  const today = leavesync.todayMYT();
+  const plan = leavesync.plan(leave, avail, today);
+  const dryRun = dry || !PANEL_LEAVE_WRITE;
+  _panel.lastLeave = { at: new Date().toISOString(), today, dryRun, writes: plan.writes, statuses: plan.statuses, alerts: plan.alerts };
+  if (!plan.writes.length && !plan.statuses.length) return plan;
+  if (dryRun){
+    if (plan.writes.length) log('🌴 LEAVE (dry run, PANEL_LEAVE_WRITE is not 1) would set: ' + plan.writes.map(w => `${w.name}→${w.value}`).join(', '));
+    return plan;
+  }
+  const availSid = await availSheetId(tok);
+  for (const w of plan.writes){
+    try { await sheetWrite(tok, availSid, `B${w.row}`, w.value); log(`🌴 LEAVE set ${w.name} (row ${w.row}) → ${w.value}`); }
+    catch (e){ log('🚨 LEAVE write failed for ' + w.name + ': ' + String(e.message || e).slice(0, 120));
+      await alertReview(`🚨 *Planned Leave could not be applied*\n${w.name} should be ${w.value} but the sheet write failed.\nSomebody needs to set Available? for ${w.name} by hand.`); }
+  }
+  for (const st of plan.statuses){
+    try { await sheetWrite(tok, panelSid, `E${st.row}`, st.value); } catch (e){ log('leave status write err row ' + st.row + ': ' + String(e.message || e).slice(0, 80)); }
+  }
+  for (const a of plan.alerts){ try { await alertReview(a); } catch {} }
+  // The availability cache is 5 min old and we have just changed the thing it caches; without this
+  // the bot would keep handing leads to somebody it has already switched off, for up to 5 minutes.
+  if (plan.writes.length){ _unavailTs = 0; _availSnap = null; }
+  return plan;
+}
+
+if (PANEL_ON){
+  setInterval(() => { panelTick().catch(e => log('panel tick err', String(e.message || e))); }, 5 * 60 * 1000);
+  setTimeout(() => { panelTick().catch(e => log('panel boot read err', String(e.message || e))); }, 12000);
+  log('🎛  Control panel ON — reading every 5 min · Planned-Leave writes ' + (PANEL_LEAVE_WRITE ? 'ARMED' : 'DRY RUN (set PANEL_LEAVE_WRITE=1 to arm)'));
+} else log('🎛  Control panel OFF (PANEL_ON=0) — using env + built-in settings');
+// ==============================================================================================
+
+
 async function larkWriteLead(l){
   const tok = await larkToken();
   const fields = { 'Phone number': l.phone || '', 'Customer want': l.want || 'No question', 'Stage': 'Passed lead' };
@@ -1119,6 +1320,38 @@ async function larkWriteLead(l){
   const j = await r.json();
   if (j.code !== 0) throw new Error('lark code ' + j.code + ' ' + (j.msg || ''));
   return j.data?.record?.record_id;
+}
+
+// phone(last 9) -> the salesperson who already owns that customer in the CRM.
+// Read on demand only. Paged with page_token in the QUERY STRING: putting it in the body returns
+// the SAME first page forever with has_more:true, which once produced 6,000 "records" that were one
+// row repeated. Deduped by record so the count in the log is real.
+async function ownerMapFromLark(){
+  const tok = await larkToken();
+  const map = new Map(); let pt = null, pages = 0, rows = 0;
+  do {
+    const url = `${LARK_BASE}/bitable/v1/apps/${LARK_APP_TOKEN}/tables/${LARK_TABLE_ID}/records/search?page_size=500` + (pt ? `&page_token=${encodeURIComponent(pt)}` : '');
+    const r = await fetch(url, { method: 'POST', headers: { 'Authorization': 'Bearer ' + tok, 'Content-Type': 'application/json' }, body: JSON.stringify({ field_names: ['Phone number', 'Salesman'] }) });
+    const j = await r.json();
+    if (j.code !== 0) throw new Error('lark owner scan code ' + j.code + ' ' + (j.msg || ''));
+    for (const rec of (j.data && j.data.items) || []){
+      rows++;
+      let ph = rec.fields && rec.fields['Phone number'];
+      if (Array.isArray(ph)) ph = ph.length ? (ph[0].text || '') : '';
+      else if (ph && typeof ph === 'object') ph = ph.text || '';
+      const d9 = String(ph || '').replace(/\D/g, '').slice(-9);
+      if (!d9) continue;
+      const sm = rec.fields && rec.fields['Salesman'];
+      const openId = Array.isArray(sm) && sm.length ? (sm[0].id || '') : '';
+      if (!openId) continue;
+      const name = Object.keys(STAFF).find(n => STAFF[n] && STAFF[n].openId === openId);
+      if (name && !map.has(d9)) map.set(d9, name);        // FIRST owner wins — the original rep keeps them
+    }
+    pt = (j.data && j.data.has_more) ? j.data.page_token : null;
+    pages++;
+  } while (pt && pages < 40);
+  log(`👤 owner map: ${map.size} customers already have a salesperson (${rows} rows, ${pages} page(s))`);
+  return map;
 }
 
 // ---- SLA: update a lead's Salesman field on reassign ----
@@ -1883,15 +2116,33 @@ const firstresponse = require('./firstresponse');
 // MYT for no reason but this line. `sla.js` already ran Mon–Sat 9–18, so the two halves of the same
 // working day disagreed — the SLA clock was ticking on leads distribution had decided to park.
 // Sunday stays OUT on purpose (Benjamin: "until saturday"). Env still wins over all three.
-const FR_DIST_DAYS  = (process.env.FR_DIST_DAYS || '1,2,3,4,5,6').split(',').map(Number);
-const FR_DIST_START = Number(process.env.FR_DIST_START || 9);
-const FR_DIST_END   = Number(process.env.FR_DIST_END || 18);
-function inFRDistHours(){ const d = new Date(Date.now() + MYT_OFF); return FR_DIST_DAYS.includes(d.getUTCDay()) && d.getUTCHours() >= FR_DIST_START && d.getUTCHours() < FR_DIST_END; }
+// `let`, not `const`, since 2026-09-18: the Lark CONTROL PANEL drives these now (see panelTick).
+// Env still wins at BOOT, so a bad page can never leave the bot with no window at all; the panel
+// then overwrites them on its first successful read and logs the change.
+let FR_DIST_DAYS  = (process.env.FR_DIST_DAYS || '1,2,3,4,5,6').split(',').map(Number);
+let FR_DIST_START = Number(process.env.FR_DIST_START || 9);
+let FR_DIST_END   = Number(process.env.FR_DIST_END || 18);
+// 🚨 The master switch and the off-day switch are checked HERE, in the one function every
+// distribution path already calls, rather than at each call site. There are five call sites and a
+// sixth will be added; a switch that has to be remembered at each of them is a switch that will be
+// missed at one of them, and "the bot was supposed to be off" is not a failure anyone notices.
+function botSuspendedReason(){
+  const p = _panel.settings;
+  if (!p) return '';
+  if (p.botOn === false) return 'Bot ON / OFF is set to OFF on the control panel';
+  if (p.offToday) return 'Off today? is set to YES on the control panel';
+  const today = leavesync.todayMYT();
+  if ((p.offDates || []).includes(today)) return `${today} is listed under "Extra off dates" on the control panel`;
+  return '';
+}
+function inFRDistHours(){ if (botSuspendedReason()) return false; const d = new Date(Date.now() + MYT_OFF); return FR_DIST_DAYS.includes(d.getUTCDay()) && d.getUTCHours() >= FR_DIST_START && d.getUTCHours() < FR_DIST_END; }
 // OPERATING hours — drives only what the customer is TOLD (Harith 2026-07-30: "isnin–sabtu, 9 pagi–6 petang").
-const FR_HOURS_DAYS  = (process.env.FR_HOURS_DAYS || '1,2,3,4,5,6').split(',').map(Number);
-const FR_HOURS_START = Number(process.env.FR_HOURS_START || 9);
-const FR_HOURS_END   = Number(process.env.FR_HOURS_END || 18);
-function inFROpenHours(){ const d = new Date(Date.now() + MYT_OFF); return FR_HOURS_DAYS.includes(d.getUTCDay()) && d.getUTCHours() >= FR_HOURS_START && d.getUTCHours() < FR_HOURS_END; }
+let FR_HOURS_DAYS  = (process.env.FR_HOURS_DAYS || '1,2,3,4,5,6').split(',').map(Number);
+let FR_HOURS_START = Number(process.env.FR_HOURS_START || 9);
+let FR_HOURS_END   = Number(process.env.FR_HOURS_END || 18);
+// On an off day the shop is shut, so "are we open" must answer NO even at 11am on a Wednesday —
+// otherwise the bot promises a call back today on a day nobody is in.
+function inFROpenHours(){ if (botSuspendedReason()) return false; const d = new Date(Date.now() + MYT_OFF); return FR_HOURS_DAYS.includes(d.getUTCDay()) && d.getUTCHours() >= FR_HOURS_START && d.getUTCHours() < FR_HOURS_END; }
 // The customer-facing hours SENTENCE is generated from the OPERATING window — never hardcoded, so
 // what we say and when we're open cannot disagree (they did, for 8 days). See hours.js.
 const { hoursLabel: fmtHours } = require('./hours');
@@ -2332,7 +2583,17 @@ async function handle(payload){
     // a deliberate human instruction, the filename is often auto-generated and can accidentally
     // contain a misleading brand/team word (e.g. the Zontes/KTM test-ride Excel's own filename
     // contains "ktm", which silently overrode Harith's actual "shah alam + hq" caption instruction).
-    const enriched = assignLeads(leads, fileOverrides(info.caption || info.fileName), unavail);
+    const ovFile = fileOverrides(info.caption || info.fileName);
+    // The duplicate problem is specific to THIS path: the Excel/screenshot drop dedupes only within
+    // one file, so the same file sent twice, or a customer appearing in two exports, creates a
+    // second lead under a second rep. Consult the CRM once per import.
+    if (_panel.settings && _panel.settings.stickyOwner && !ovFile.assignee && !ovFile.noAssign){
+      try { ovFile.stickyOwner = await ownerMapFromLark(); }
+      catch (e){ log('⚠️ owner map read failed (' + String(e.message || e).slice(0, 80) + ') — importing WITHOUT sticky-owner, rotation as before'); }
+    }
+    const enriched = assignLeads(leads, ovFile, unavail);
+    const stuck = enriched.filter(l => l.sticky);
+    if (stuck.length) log(`👤 sticky owner kept ${stuck.length} customer(s) with their existing salesperson: ` + stuck.map(l => `${l.phone}→${l.assignee}`).join(', '));
     // Bulk-queue durability (2026-07-24): leads beyond the first batch are stamped SLA Status =
     // 'Queued' in Lark (instead of Pending) so (a) the boot rehydrator can rebuild the drip-feed
     // queue after a deploy wipes bulk_queue.json, and (b) the timer rehydrate never registers a
@@ -2451,6 +2712,26 @@ http.createServer((req, res) => {
       cardsBuiltOn: { sales: 'render', ops: 'render', marketing: 'box-66', operations: 'box-66', boss: 'removed 2026-08-21' },
       digestSent: digest.sent, cardsSent: cardsState.sent,
     }, null, 1));
+  } else if (req.url.startsWith('/panel')) {
+    // Read-only view of everything the control panel is currently driving, plus what Planned Leave
+    // WOULD do. `?dry=1` recomputes the leave plan live against the sheet without writing, which is
+    // how the wiring was proved before PANEL_LEAVE_WRITE was armed.
+    const dry = new URL(req.url, 'http://x').searchParams.get('dry') === '1';
+    (async () => {
+      if (!dry) return panelStatus();
+      const tok = await larkToken();
+      const sid = await panelSheetId(tok);
+      const rows = sid ? flatRows(await panelRows(tok, sid)) : [];
+      const S = settingsMod.parseSettings(rows), C = settingsMod.parseCampaigns(rows), L = settingsMod.parseLeave(rows);
+      const plan = await leaveTick(tok, sid, L.leave, true);
+      return { dryRun: true, tab: sid, rowsRead: rows.length, foundSettings: S.foundCount,
+        settings: S.settings, campaigns: C.campaigns, leave: L.leave,
+        warnings: [...S.warnings, ...C.warnings, ...L.warnings],
+        leavePlan: { today: leavesync.todayMYT(), writes: plan.writes, statuses: plan.statuses, alerts: plan.alerts },
+        liveWindow: { days: FR_DIST_DAYS, start: FR_DIST_START, end: FR_DIST_END, openNow: inFRDistHours() },
+        suspended: botSuspendedReason() || null };
+    })().then(out => { res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(out, null, 1)); })
+      .catch(e => { res.writeHead(500, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: String(e.message || e) })); });
   } else if (req.url.startsWith('/gate-status')) {
     // Same shape as the Python bots' /gate-status so one reporting tool covers all four.
     // Read-only.
