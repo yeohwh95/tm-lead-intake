@@ -982,6 +982,7 @@ async function larkToken(){
 // ---- Salesman availability (Lark Sheet) → set of names marked "NO" (skip them in rotation). Cached 5 min. ----
 const AVAIL_SHEET = process.env.AVAIL_SHEET || 'YjLTslshkhRGeXt9V5DlJi8cgdl';
 const settingsMod = require('./settings');
+const sheetwatch   = require('./sheetwatch');
 const leavesync   = require('./leavesync');
 // ---- ROSTER-FROM-SHEET, SHADOW MODE (2026-07-30) ----
 // The team list lives in FOUR places (this file's POOLS/STAFF, tiktok-lead-engine POOL_*,
@@ -1095,23 +1096,57 @@ async function readAvail(){
   for (const row of rows) { const name = row[0], av = String(row[1] || '').trim().toUpperCase(); if (name && (av === 'YES' || av === 'NO')) m[String(name).trim()] = av; }
   return m;
 }
+// DEBOUNCED (2026-09-18, Benjamin: "edit the sheet → wait 3 mins → then update the group").
+// `_burstBase` is the state as it was when the current run of edits STARTED — the diff is taken
+// against that, not against the previous poll, so an edit that gets undone inside the window
+// produces no message at all.
+let _availPending = false, _burstBase = null, _lastChangeTs = 0, _burstStartTs = 0;
+const _botWroteAvail = new Set();      // names the bot itself just set → Planned Leave already said so
 async function pollAvailability(){
   try {
     const cur = await readAvail();
     if (!Object.keys(cur).length) return;                       // read failed/empty → skip (don't reset baseline)
     if (_availSnap === null){ _availSnap = cur; log('availability baseline (' + Object.keys(cur).length + ' staff)'); return; }
-    const lines = [];
-    for (const name in cur){ if (_availSnap[name] && _availSnap[name] !== cur[name]) lines.push(cur[name] === 'NO' ? `🔴 ${name} → OFF (no new leads)` : `✅ ${name} → back ON`); }
-    if (lines.length){
-      const off = Object.keys(cur).filter(n => cur[n] === 'NO');
-      await alertReview('🔔 *Salesman availability changed*\n' + lines.join('\n') + (off.length ? `\n\nCurrently OFF: ${off.join(', ')}` : '\n\nEveryone available ✅'));
-      log('availability toggle:', lines.join(' | '));
+    if (JSON.stringify(cur) !== JSON.stringify(_availSnap)){
+      if (!_availPending){ _availPending = true; _burstBase = _availSnap; _burstStartTs = Date.now(); }
+      _lastChangeTs = Date.now();
+      log('availability edit seen — holding ' + Math.round(sheetwatch.QUIET_MS / 60000) + ' min for more edits');
     }
     _availSnap = cur;
   } catch (e){ log('pollAvailability err', String(e.message || e)); }
 }
+
+// One announcer for the WHOLE control sheet — availability AND the panel settings/campaigns — so an
+// editing session produces ONE message instead of one per subsystem.
+let _settingsFp = null;
+async function sheetAnnounceTick(){
+  try {
+    const now = Date.now();
+    const fpNow = sheetwatch.settingsFingerprint(_panel.settings, _panel.campaigns);
+    if (_settingsFp === null){ _settingsFp = fpNow; return; }          // first read = baseline, never a message
+    const settingsChanged = fpNow && JSON.stringify(fpNow) !== JSON.stringify(_settingsFp);
+    if (settingsChanged){
+      if (!_availPending){ _availPending = true; _burstBase = _availSnap; _burstStartTs = now; }
+      _lastChangeTs = now;
+    }
+    if (!_availPending) return;
+    if (!sheetwatch.shouldFlush(now, _lastChangeTs, _burstStartTs)) return;
+
+    const availLines = sheetwatch.diffAvail(_burstBase, _availSnap, _botWroteAvail);
+    const settingLines = sheetwatch.diffMap(_settingsFp, fpNow);
+    const msg = sheetwatch.buildMessage(availLines, settingLines);
+    // Reset FIRST, so a send failure cannot wedge the burst open and re-announce forever.
+    _availPending = false; _burstBase = null; _lastChangeTs = 0; _burstStartTs = 0;
+    _settingsFp = fpNow; _botWroteAvail.clear();
+    if (!msg){ log('sheet edits cancelled out — nothing announced'); return; }
+    const off = Object.keys(_availSnap || {}).filter(n => _availSnap[n] === 'NO');
+    await alertReview(msg + (availLines.length ? (off.length ? `\n\nCurrently OFF: ${off.join(', ')}` : '\n\nEveryone available ✅') : ''));
+    log('sheet change announced:', (availLines.map(x => x.name).join(',') || '-') + ' | settings ' + settingLines.length);
+  } catch (e){ log('sheetAnnounceTick err', String(e.message || e).slice(0, 120)); }
+}
 setInterval(pollAvailability, 2 * 60 * 1000);
 setTimeout(pollAvailability, 8000);   // baseline shortly after startup
+setInterval(() => { sheetAnnounceTick().catch(e => log('announce tick err', String(e.message || e))); }, 30 * 1000);
 
 // ================================ THE LARK CONTROL PANEL =======================================
 // One page in the AI REFERENCE SHEET now owns: the master switch, off days, the working hours, what
@@ -1282,7 +1317,7 @@ async function leaveTick(tok, panelSid, leave, dry){
   }
   const availSid = await availSheetId(tok);
   for (const w of plan.writes){
-    try { await sheetWrite(tok, availSid, `B${w.row}`, w.value); log(`🌴 LEAVE set ${w.name} (row ${w.row}) → ${w.value}`); }
+    try { await sheetWrite(tok, availSid, `B${w.row}`, w.value); _botWroteAvail.add(String(w.name).trim().toLowerCase()); log(`🌴 LEAVE set ${w.name} (row ${w.row}) → ${w.value}`); }
     catch (e){ log('🚨 LEAVE write failed for ' + w.name + ': ' + String(e.message || e).slice(0, 120));
       await alertReview(`🚨 *Planned Leave could not be applied*\n${w.name} should be ${w.value} but the sheet write failed.\nSomebody needs to set Available? for ${w.name} by hand.`); }
   }
