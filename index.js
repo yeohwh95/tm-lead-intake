@@ -722,7 +722,7 @@ Return JSON only.`;
 // template. Malay has endless sell phrasings (jual/tolak/lepas/let go/...) — a keyword list can
 // never keep up. Regex classify() stays as the instant fallback (API error/timeout/garbage output
 // → exactly the old behavior). Kill switch: FR_AI_CLASSIFY=0 (no redeploy of code needed, env only).
-const CLASSIFY_PROMPT = `You classify the FIRST WhatsApp message a customer sends to TM Motoworld, a Malaysian motorcycle dealer. Messages are Malay (often short-forms: nk, sy, x, bleh, tnya), English, or mixed.
+const CLASSIFY_PROMPT_BUILTIN = `You classify the FIRST WhatsApp message a customer sends to TM Motoworld, a Malaysian motorcycle dealer. Messages are Malay (often short-forms: nk, sy, x, bleh, tnya), English, or mixed.
 Answer with EXACTLY one word from: sell, loan, testride, product, admin, greeting, skip
 - sell = customer wants to SELL or TRADE-IN their OWN bike to the shop. Phrasings include jual, tolak, lepas, let go, trade in, tukar ("nak tolak moto", "moto nak let go"). If they mention their own bike still has a loan/hutang while selling ("mau tolak moto masih ada loan boleh kah?"), it is STILL sell.
 - loan = asking about financing to BUY from the shop: loan, ansuran, EPP, kad kredit, bulanan berapa, deposit, blacklist/CTOS/CCRIS.
@@ -768,7 +768,7 @@ async function aiClassify(text){
       headers: { 'Authorization': 'Bearer ' + OPENAI_KEY, 'Content-Type': 'application/json' },
       signal: ctrl.signal,
       body: JSON.stringify({ model: MODEL, max_tokens: 5, temperature: 0, messages: [
-        { role: 'system', content: CLASSIFY_PROMPT },
+        { role: 'system', content: _classifyPrompt },
         { role: 'user', content: String(text).slice(0, 1000) },
       ] }),
     });
@@ -982,6 +982,7 @@ async function larkToken(){
 // ---- Salesman availability (Lark Sheet) → set of names marked "NO" (skip them in rotation). Cached 5 min. ----
 const AVAIL_SHEET = process.env.AVAIL_SHEET || 'YjLTslshkhRGeXt9V5DlJi8cgdl';
 const settingsMod = require('./settings');
+const msgtypes     = require('./msgtypes');
 const sheetwatch   = require('./sheetwatch');
 const leavesync   = require('./leavesync');
 // ---- ROSTER-FROM-SHEET, SHADOW MODE (2026-07-30) ----
@@ -1259,6 +1260,62 @@ async function sheetWrite(tok, sid, a1, value){
   return true;
 }
 
+// ---- MESSAGE TYPES TAB (2026-09-18) ----------------------------------------------------------
+// TM edits what each kind of customer message means; the classifier prompt is rebuilt from it every
+// 5 min. Nothing is trained - the AI is handed these words fresh on every message, which is why an
+// edit lands in 5 minutes and why it never improves on its own.
+const MSGTYPE_TAB_TITLES = (process.env.MSGTYPE_TAB_TITLE || 'Message Types,Message Type,MESSAGE TYPES')
+  .split(',').map(x => x.trim().toLowerCase()).filter(Boolean);
+let _mtSid = null, _msgTypes = null, _mtWarnKey = '';
+let _classifyPrompt = CLASSIFY_PROMPT_BUILTIN;
+async function msgTypeSheetId(tok){
+  if (_mtSid) return _mtSid;
+  const meta = await (await fetch(`${LARK_BASE}/sheets/v3/spreadsheets/${AVAIL_SHEET}/sheets/query`, { headers: { 'Authorization': 'Bearer ' + tok } })).json();
+  const sheets = (meta.data && meta.data.sheets) || [];
+  const looksRight = async sid => {
+    try {
+      const v = await (await fetch(`${LARK_BASE}/sheets/v2/spreadsheets/${AVAIL_SHEET}/values/${sid}!A1:G60`, { headers: { 'Authorization': 'Bearer ' + tok } })).json();
+      const rows = flatRows(((v.data && v.data.valueRange && v.data.valueRange.values) || []));
+      return msgtypes.parseTypes(rows).found >= 3;     // 3+ known type names = this is the tab
+    } catch { return false; }
+  };
+  const byTitle = sheets.find(x => MSGTYPE_TAB_TITLES.includes(String(x.title || '').trim().toLowerCase()));
+  if (byTitle && await looksRight(byTitle.sheet_id)) { _mtSid = byTitle.sheet_id; return _mtSid; }
+  for (const sh of sheets){
+    if (byTitle && sh.sheet_id === byTitle.sheet_id) continue;
+    if (await looksRight(sh.sheet_id)){ log('PANEL: message types found on tab "' + sh.title + '" (matched by content)'); _mtSid = sh.sheet_id; return _mtSid; }
+  }
+  return null;
+}
+async function msgTypeTick(){
+  try {
+    const tok = await larkToken();
+    const sid = await msgTypeSheetId(tok);
+    if (!sid){ if (_msgTypes) log('MSGTYPES: tab no longer found - keeping the definitions currently in use'); return; }
+    const v = await (await fetch(`${LARK_BASE}/sheets/v2/spreadsheets/${AVAIL_SHEET}/values/${sid}!A1:G120`, { headers: { 'Authorization': 'Bearer ' + tok } })).json();
+    const rows = flatRows(((v.data && v.data.valueRange && v.data.valueRange.values) || []));
+    const parsed = msgtypes.parseTypes(rows);
+    // A read that finds nothing is a wrong-tab read, not "the team deleted every type". Keeping the
+    // last good definitions is always safer than classifying against a blank prompt.
+    if (!parsed.ok){ log('MSGTYPES: read produced ZERO types - keeping what is in use'); return; }
+    const built = msgtypes.buildPrompt(parsed, CLASSIFY_PROMPT_BUILTIN);
+    const changed = built !== _classifyPrompt;
+    _msgTypes = parsed; _classifyPrompt = built;
+    if (firstresponse.setConfig && _panel.settings) applyPanelSettings(_panel.settings);
+    if (changed){
+      const kw = Object.values(parsed.types).reduce((a, t) => a + t.keywords.length, 0);
+      const ex = Object.values(parsed.types).reduce((a, t) => a + t.examples.length, 0);
+      log(`MSGTYPES applied - ${parsed.found} types, ${ex} examples, ${kw} keywords, prompt ${built.length} chars`);
+    }
+    const wk = JSON.stringify(parsed.warnings);
+    if (parsed.warnings.length && wk !== _mtWarnKey){
+      _mtWarnKey = wk;
+      await alertReview('*Message Types - please check these rows*\n' + parsed.warnings.slice(0, 8).map(w => '- ' + w).join('\n')
+        + '\n\nThe bot is using its built-in wording for anything it could not read.');
+    } else if (!parsed.warnings.length) _mtWarnKey = '';
+  } catch (e){ log('msgTypeTick err', String(e.message || e).slice(0, 140)); }
+}
+
 let _panel = { settings: null, campaigns: [], leave: [], warnings: [], ts: 0, appliedKey: '', warnKey: '', lastLeave: null, statusAlertAt: 0 };
 function panelStatus(){
   // The debounce had no observable state, so "did it decide to stay quiet, or is it still holding?"
@@ -1275,6 +1332,12 @@ function panelStatus(){
       wouldFlushNow: _availPending && sheetwatch.shouldFlush(now, _lastChangeTs, _burstStartTs),
       botWroteAvail: [..._botWroteAvail],
       lastAnnounce: _lastAnnounce },
+    messageTypes: _msgTypes ? {
+      tab: _mtSid, found: _msgTypes.found, warnings: _msgTypes.warnings,
+      promptChars: _classifyPrompt.length, usingBuiltinPrompt: _classifyPrompt === CLASSIFY_PROMPT_BUILTIN,
+      types: Object.fromEntries(Object.entries(_msgTypes.types).map(([k, t]) =>
+        [k, { action: t.action, examples: t.examples.length, never: t.never.length, keywords: t.keywords }])),
+    } : { tab: _mtSid, found: 0, usingBuiltinPrompt: true },
     suspended: botSuspendedReason() || null, settings: _panel.settings, campaigns: _panel.campaigns,
     leave: _panel.leave, warnings: _panel.warnings, lastLeaveRun: _panel.lastLeave,
     liveWindow: { days: FR_DIST_DAYS, start: FR_DIST_START, end: FR_DIST_END, openNow: inFRDistHours() } };
@@ -1295,7 +1358,7 @@ function applyPanelSettings(st){
     maySayStock: st.maySayStock, maySayPrice: st.maySayPrice, maySayWorkshop: st.maySayWorkshop,
     sellGoesTo: st.sellGoesTo, adminGoesTo: st.adminGoesTo,
     replies: { general: st.replyGeneral, testRide: st.replyTestRide, admin: st.replyAdmin, offHours: st.replyOffHoursMsg },
-    replyOffHours: st.replyOffHours });
+    replyOffHours: st.replyOffHours, msgTypes: _msgTypes });
 }
 
 async function panelTick(){
@@ -1379,6 +1442,8 @@ async function leaveTick(tok, panelSid, leave, dry){
 if (PANEL_ON){
   setInterval(() => { panelTick().catch(e => log('panel tick err', String(e.message || e))); }, 5 * 60 * 1000);
   setTimeout(() => { panelTick().catch(e => log('panel boot read err', String(e.message || e))); }, 12000);
+  setInterval(() => { msgTypeTick().catch(e => log('msgtype tick err', String(e.message || e))); }, 5 * 60 * 1000);
+  setTimeout(() => { msgTypeTick().catch(e => log('msgtype boot read err', String(e.message || e))); }, 16000);
   log('🎛  Control panel ON — reading every 5 min · Planned-Leave writes ' + (PANEL_LEAVE_WRITE ? 'ARMED' : 'DRY RUN (set PANEL_LEAVE_WRITE=1 to arm)'));
 } else log('🎛  Control panel OFF (PANEL_ON=0) — using env + built-in settings');
 // ==============================================================================================

@@ -43,7 +43,11 @@ const LEAD_BUCKETS = ['assigned', 'parked', 'qualified', 'gate_held', 'intent_he
 // Lark row, no SLA clock) but it IS a real customer who was served, so it belongs on the
 // not-a-sales-lead line and never in `other`. Same contract as the note above: the outcome and
 // this list are two halves of one change.
-const NON_LEAD_BUCKETS = ['ai_skip', 'human_owned', 'repeat', 'admin_handoff', 'enriched'];
+// `chasing`, `hiring`, `workshop` added 2026-09-18 with the Message Types tab. None is a NEW sales
+// lead: chasing is a customer we ALREADY have complaining nobody called, and the other two are not
+// sales at all. All three are real customers who were served, so they belong on the
+// not-a-sales-lead line and never in `other`.
+const NON_LEAD_BUCKETS = ['ai_skip', 'human_owned', 'repeat', 'admin_handoff', 'enriched', 'chasing', 'hiring', 'workshop'];
 
 // Plain English for the "why wasn't it assigned" list. A reason a salesperson can act on.
 const WHY = {
@@ -54,6 +58,9 @@ const WHY = {
   intent_held:    'asked buy-or-sell, waiting before routing',
   no_rep:         '🚨 NOBODY took it (the CRM row has no owner)',
   awaiting_model: 'greeted, waiting for them to say which bike',
+  chasing:        '🚨 already our customer, chasing a salesperson who never contacted them',
+  hiring:         'job enquiry, passed to the group (no HR number set up yet)',
+  workshop:       'parts/service enquiry, passed to the group (no workshop number set up yet)',
   other:          'unrecognised outcome (see ⚠️ above)',
 };
 

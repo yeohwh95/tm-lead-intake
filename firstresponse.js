@@ -7,6 +7,7 @@
 const fs = require('fs');
 const path = require('path');
 
+const msgtypes = require('./msgtypes');
 const ON = () => process.env.FIRSTRESPONSE_ON === '1';
 // ---- LIVE CONFIG from the Lark control panel (2026-09-18) ------------------------------------
 // index.js calls setConfig() every 5 min from the panel read. Every getter below falls back to the
@@ -442,7 +443,7 @@ async function assign(cat, jid, phone, wantText, ctx){
 // error/timeout/garbage output, and still fully handles image-only messages (nothing for the LLM
 // to read) + vendor auto-replies (cheap and certain). An image WITH a short caption keeps the
 // regex verdict when the LLM says greeting/skip — the image carries intent the LLM can't see.
-const AI_CATS = new Set(['sell', 'loan', 'testride', 'product', 'admin', 'greeting', 'skip']);
+const AI_CATS = new Set(['sell', 'loan', 'testride', 'product', 'admin', 'greeting', 'skip', 'chasing', 'hiring', 'workshop']);
 async function classifySmart(text, hasImage, imageUrl){
   const rx = classify(text, hasImage);
   // 🚨 EVERY IMAGE USED TO MEAN `product` — a hardcoded guess, and TM runs SELL ads. Real chat,
@@ -463,6 +464,21 @@ async function classifySmart(text, hasImage, imageUrl){
     } catch(e){ D.log('FR image read err → keeping product:', String(e.message||e).slice(0,60)); }
   }
   const t = String(text || '').trim();
+  // ---- SHEET KEYWORDS: deterministic, and they win (2026-09-18) ---------------------------------
+  // Benjamin was told "keywords are a guarantee, examples only steer the AI", so they must beat the
+  // model, not act as a tiebreak. Two limits, both deliberate:
+  //   - a keyword may NOT overrule a regex `sell`. RE_SELL only fires on an explicit "I want to sell
+  //     MY bike", and a missed trade-in costs TM the bike, so the protected list stays in code.
+  //   - no keyword, no match, no guess: it falls through to the AI exactly as before.
+  const kwTypes = CFG.msgTypes && CFG.msgTypes.types;
+  if (t && kwTypes){
+    const hit = msgtypes.keywordMatch(t, kwTypes);
+    if (hit && !(msgtypes.PROTECTED.has(rx.cat) && hit.type !== rx.cat)){
+      if (hit.type !== rx.cat) D.log(`FR sheet keyword "${hit.kw}" -> ${hit.type} (regex said ${rx.cat}): "${t.slice(0,60)}"`);
+      return { cat: hit.type, imageOnly: false, viaKeyword: hit.kw };
+    }
+    if (hit && msgtypes.PROTECTED.has(rx.cat)) D.log(`FR kept regex ${rx.cat} over sheet keyword "${hit.kw}"`);
+  }
   if (!D.aiClassify || !t || RE_VENDOR_AUTO.test(t)) return rx;
   try {
     const cat = await D.aiClassify(t);
@@ -1077,6 +1093,17 @@ const ADMIN_DISPLAY = process.env.TM_ADMIN_DISPLAY  || '+60 11-1666 1324';
 // (the 7-day re-greet guard would otherwise swallow it — that guard is for SALES touches).
 const ADMIN_COOLDOWN_MS = Number(process.env.TM_ADMIN_COOLDOWN_MS || 24 * 3600 * 1000);
 
+// Deliberately does NOT promise a time - we do not know when the rep will call, and a promise the
+// shop cannot keep is exactly what put this customer here in the first place.
+const chaseAck = (lang) => lang === 'en'
+  ? `So sorry about that \u{1F64F} I'm letting our sales advisor know right now and they will contact you shortly.`
+  : `Maaf atas kelewatan tuan \u{1F64F} Saya dah maklumkan kepada sales advisor kami sekarang, dia akan hubungi tuan sebentar lagi.`;
+const hiringAck = (lang) => lang === 'en'
+  ? `Thanks for your interest in joining us! \u{1F64F} I've passed your message to our team - they'll get back to you.`
+  : `Terima kasih kerana berminat untuk sertai kami! \u{1F64F} Saya dah hantar mesej tuan kepada team kami, mereka akan hubungi tuan.`;
+const workshopAck = (lang) => lang === 'en'
+  ? `Thanks! \u{1F64F} For parts, service and repair our workshop team handles that - I've passed your message to them.`
+  : `Terima kasih tuan! \u{1F64F} Untuk parts, servis & repair, team workshop kami yang uruskan - saya dah hantar mesej tuan kepada mereka.`;
 const adminAck = (lang) => (lang === 'en'
   ? `Thank you! \u{1F64F} Ownership transfer / insurance / roadtax is handled by our admin team. `
     + `Admin will contact you.\n\nOr you can WhatsApp our admin directly:\n`
@@ -1269,6 +1296,48 @@ async function flush(jid){
   // used to fall into skip) and BEFORE the 7-day re-greet guard, because a customer who was greeted
   // about a bike last week and now asks about tukar nama is a NEW question that must still reach a
   // human. Its own 24h cooldown replaces that guard rather than bypassing it.
+  // ---- CHASING: they are ALREADY ours and nobody has called (2026-09-18) ------------------------
+  // Harith, 18 Sep: "for messages like this the ai should reply and not pass to admin". The real
+  // case was "Hi, masih belum dapat ws dari SA" - a customer chasing a salesperson who never
+  // messaged them. It was filed as `admin`, so admin got a card and the salesperson was never told.
+  // The point of this type: the person who needs telling is the REP WHO ALREADY HAS THEM.
+  if (cat === 'chasing'){
+    try { await D.waSend(sendTarget(jid, b.phone), chaseAck(lang)); }
+    catch(e){ D.log('FR chase ack send err:', String(e.message||e).slice(0,60)); }
+    const who = b.phone ? ('+' + b.phone) : jid.slice(0, 22);
+    try {
+      await D.alertReview(`\u{23F0} *Customer is chasing us*\n\u{1F464} ${who}\n\u{1F4AC} "${String(text).slice(0,120)}"\n`
+        + (b.phone ? `\u{1F449} https://wa.me/${b.phone}\n` : '')
+        + `\nThey say nobody has contacted them yet. Whoever has this lead needs to call them today.`);
+    } catch(e){ D.log('FR chase alert err:', String(e.message||e).slice(0,60)); }
+    frLogEvent('chasing', jid, { has_phone: !!b.phone, cat: 'chasing', phone: b.phone || '',
+      want: String(text).slice(0, 120), recordId: null });
+    return;
+  }
+
+  // ---- HIRING / WORKSHOP: recognised, answered and flagged - but NOT yet routed -----------------
+  // There is no HR or workshop WhatsApp number from TM yet. Rather than pretend, the customer gets
+  // an honest holding reply and the internal group is told so a human picks it up. The moment a
+  // number arrives this becomes the same shape as the admin hand-off below.
+  if (cat === 'hiring' || cat === 'workshop'){
+    try { await D.waSend(sendTarget(jid, b.phone), cat === 'hiring' ? hiringAck(lang) : workshopAck(lang)); }
+    catch(e){ D.log('FR ' + cat + ' ack send err:', String(e.message||e).slice(0,60)); }
+    const who = b.phone ? ('+' + b.phone) : jid.slice(0, 22);
+    try {
+      await D.alertReview(`${cat === 'hiring' ? '\u{1F4BC} *Job enquiry*' : '\u{1F527} *Workshop enquiry*'}\n\u{1F464} ${who}\n`
+        + `\u{1F4AC} "${String(text).slice(0,120)}"\n` + (b.phone ? `\u{1F449} https://wa.me/${b.phone}\n` : '')
+        + `\nNo ${cat === 'hiring' ? 'HR' : 'workshop'} number is set up yet, so nobody was messaged automatically. Please pass this on.`);
+    } catch(e){ D.log('FR ' + cat + ' alert err:', String(e.message||e).slice(0,60)); }
+    // Written as two LITERAL calls rather than passing the variable: leadsummary_test greps this
+    // file for literal outcome strings to prove every outcome the bot writes has a reporting
+    // bucket. A variable is invisible to that guard, so the outcome would quietly vanish from the
+    // client's numbers - the exact failure the guard exists to catch.
+    // (And the guard is literal-minded: do not write an example call in a comment, it scans those too.)
+    if (cat === 'hiring') frLogEvent('hiring', jid, { has_phone: !!b.phone, cat, phone: b.phone || '', want: String(text).slice(0, 120), recordId: null });
+    else                  frLogEvent('workshop', jid, { has_phone: !!b.phone, cat, phone: b.phone || '', want: String(text).slice(0, 120), recordId: null });
+    return;
+  }
+
   if (cat === 'admin'){
     state.adminNotified = state.adminNotified || {};
     const last = state.adminNotified[jid] || 0;
