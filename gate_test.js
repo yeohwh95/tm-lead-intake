@@ -13,7 +13,17 @@ process.env.FR_DEBOUNCE_MS = '5';        // flush almost immediately
 process.env.FR_GATE_MS = '60000';        // 60s hold so the timeout path is testable
 process.env.FR_STATE_FILE = require('path').join(require('os').tmpdir(), `fr_gate_test_${process.pid}.json`);
 process.env.FR_EVENTS_FILE = require('path').join(require('os').tmpdir(), `fr_gate_events_${process.pid}.jsonl`);
+// 🚨 PER-PID, and deleted at both ends (2026-09-18). GATE_LOG_FILE used to be DERIVED from
+// FR_STATE_FILE's directory, so every run of this file since August appended to ONE shared
+// `<tmp>/gate_events.jsonl` that nothing ever cleaned up. It had reached 8,101 lines.
+// That made case 9 flaky at about 1 run in 13: it counts `human_takeover` events before and after
+// the sweep and expects +1, but `gateReadEvents(500)` only reads the LAST 500 lines — so appending
+// a line EVICTS one, and whenever the evicted line was itself a human_takeover the count came back
+// unchanged and the assertion failed. Nothing was wrong with the bot; the test was reading a
+// sliding window over shared state. A fresh file per process makes the before/after count exact.
+process.env.GATE_LOG_FILE = require('path').join(require('os').tmpdir(), `fr_gate_log_${process.pid}.jsonl`);
 try { require('fs').unlinkSync(process.env.FR_EVENTS_FILE); } catch {}
+try { require('fs').unlinkSync(process.env.GATE_LOG_FILE); } catch {}
 
 const fr = require('./firstresponse.js');
 
@@ -596,5 +606,6 @@ console.log('\n== The hold is now 15 minutes ==');
 console.log(`\n${'='.repeat(54)}\n  ${pass} passed, ${fail} failed\n${'='.repeat(54)}`);
   try { require('fs').unlinkSync(process.env.FR_STATE_FILE); } catch {}
   try { require('fs').unlinkSync(process.env.FR_EVENTS_FILE); } catch {}
+  try { require('fs').unlinkSync(process.env.GATE_LOG_FILE); } catch {}
   process.exit(fail ? 1 : 0);
 })();

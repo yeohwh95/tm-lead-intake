@@ -54,6 +54,18 @@ p = ls.plan([L({ name: 'BELLA', row: 48, from: '2026-10-01', to: '2026-10-03', s
 ok('BELLA back: stays OFF — NOT switched on by the return', !p.writes.some(w => w.value === 'YES'));
 ok('BELLA back: says plainly that she stays off', p.alerts.some(a => /stay OFF/.test(a)));
 
+console.log('\n-- ALREADY off on day one: ambiguous, so it asks instead of guessing --');
+// Real case found by the dry run, 18 Sep: Harith had already set ADIB to NO by hand for this very
+// leave, so "restore the prior value" would have left him off after 21 Sep.
+const availAdibOff = AVAIL.map(a => a.name === 'ADIB' ? { ...a, value: 'NO' } : a);
+p = ls.plan([L()], availAdibOff, '2026-09-18');
+ok('no pointless write (already NO)', p.writes.length === 0);
+ok('records the honest prior value', p.statuses.some(st => /\(was NO\)/.test(st.value)));
+ok('WARNS that they will not come back, on day ONE not the return day', p.alerts.some(a => /ALREADY NO/.test(a) && /stay OFF/.test(a)));
+ok('and gives the exact one-step fix', p.alerts.some(a => /set ADIB to \*YES\*/.test(a)));
+p = ls.plan([L({ status: 'on leave until 2026-09-21 (was NO)' })], availAdibOff, '2026-09-19');
+ok('it says it ONCE, not every 5 minutes', p.alerts.length === 0);
+
 console.log('\n-- a human flips them ON mid-leave --');
 p = ls.plan([stamped], AVAIL, '2026-09-19');   // AVAIL has ADIB = YES again
 ok('page wins: re-asserts NO', p.writes.some(w => w.row === 19 && w.value === 'NO'));

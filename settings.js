@@ -57,6 +57,9 @@ const DEFAULTS = Object.fromEntries(LABELS.map(r => [r[0], r[3]]));
 
 const DAYS = { sun: 0, mon: 1, tue: 2, wed: 3, thu: 4, fri: 5, sat: 6 };
 const DATE_RE = /^(\d{4})-(\d{2})-(\d{2})$/;
+// "looks like somebody tried to type a date": 18/09/2026, 2026-9-1, 18.09.26 — but NOT prose that
+// merely happens to contain a number.
+const DATEISH = /^\s*\d{1,4}\s*[-/.]\s*\d{1,2}/;
 
 function isDate(s) {
   const m = DATE_RE.exec(String(s == null ? '' : s).trim());
@@ -197,9 +200,11 @@ function parseLeave(rows) {
     const at = `row ${i + 1}`;
     if (!from && !to) return;                                     // blank leave row, or some other text row
     if (!isDate(from) || !isDate(to)) {
-      // Only complain when it LOOKS like someone tried: otherwise every prose line on the page
-      // would produce a warning.
-      if (/\d/.test(from) || /\d/.test(to)) warnings.push(`planned leave for "${name}" (${at}): "${from}" - "${to}" is not a valid date pair. Use YYYY-MM-DD in both cells. This leave is IGNORED.`);
+      // Only complain when the cell LOOKS like a date attempt. "contains a digit" was too loose:
+      // the page's own pointer rows ("Written by the bot every 15 minutes") tripped it, and those
+      // two false warnings would have been WhatsApp'd to the group on every change — the fastest
+      // way to teach the team to ignore this alert.
+      if (DATEISH.test(from) || DATEISH.test(to)) warnings.push(`planned leave for "${name}" (${at}): "${from}" - "${to}" is not a valid date pair. Use YYYY-MM-DD in both cells. This leave is IGNORED.`);
       return;
     }
     if (to < from) { warnings.push(`planned leave for "${name}" (${at}): "Leave until" (${to}) is BEFORE "Leave from" (${from}) — IGNORED. Swap them.`); return; }

@@ -105,6 +105,17 @@ ok('wrong date format ignored + warned', !lbad.leave.some(x => x.name === 'AMIR'
 ok('reversed range ignored + warned', !lbad.leave.some(x => x.name === 'ASO') && lbad.warnings.some(w => /BEFORE/.test(w)));
 ok('single-day leave accepted', lbad.leave.some(x => x.name === 'ROY'));
 ok('prose row produces no warning noise', !lbad.warnings.some(w => /prose line/.test(w)));
+// REGRESSION 2026-09-18: the page's own pointer rows ("Written by the bot every 15 minutes")
+// were read as leave rows with bad dates. Two false warnings, WhatsApp'd to the group on every
+// change - the fastest way to train the team to ignore the alert.
+const lptr = s.parseLeave([
+  ['Each salesperson\u2019s on/off, branch, phone and Lark ID', '\u2192 \u201cSalesman Availability\u201d tab', 'That tab is ALREADY LIVE \u2014 both bots read it every 5 minutes.'],
+  ['Per-bike website / Mudah status', '\u2192 \u201cmudah group info\u201d tab', 'Written by the bot every 15 minutes. Read-only for you.'],
+  ['In a rotation, ADD a name at the END.', '', ''],
+]);
+ok('the page\u2019s own pointer rows are NOT read as leave', lptr.leave.length === 0);
+ok('and produce ZERO warnings', lptr.warnings.length === 0 || (console.log('     ' + lptr.warnings.join('\n     ')), false));
+ok('a real date typo IS still caught', s.parseLeave([['AMIR', '18/09/2026', '21/09/2026']]).warnings.some(w => /not a valid date pair/.test(w)));
 
 console.log('\n-- row positions do not matter --');
 const shuffled = [['zzz filler'], ['more filler'], ...PAGE];

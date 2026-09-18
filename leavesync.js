@@ -73,6 +73,14 @@ function plan(leave, avail, today) {
         } else {
           alerts.push(`🌴 *Planned Leave*: ${person.name} is off ${lead.from} → ${lead.to}${lead.reason ? ` (${lead.reason})` : ''} — switched OFF, no new leads. Will go back to ${prior} on ${nextDay(lead.to)}.`);
         }
+      } else if (!stamped && prior === 'NO') {
+        // AMBIGUOUS, and it must not be guessed at: they are already OFF on day one of their leave.
+        // Either a human switched them off FOR this leave (so they should come back ON), or they are
+        // off for an unrelated reason such as a resignation (so they must stay OFF). Recording
+        // "was NO" is the safe choice, but silently leaving somebody switched off after they return
+        // is the failure this feature exists to prevent - so say it now, while there is time to fix
+        // it, not on the return date.
+        alerts.push(`⚠️ *Planned Leave*: ${person.name} is booked off ${lead.from} → ${lead.to}, but Available? is ALREADY NO.\n\nSo on ${nextDay(lead.to)} they will stay OFF, not come back.\nIf they should come back: set ${person.name} to *YES* on the Salesman Availability tab now — the bot will switch them off again within 5 minutes and remember YES as the value to restore.`);
       }
       const want = `on leave until ${lead.to} (was ${prior})`;
       if (lead.status !== want) statuses.push({ row: lead.row, value: want });
