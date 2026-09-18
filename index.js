@@ -1132,14 +1132,33 @@ async function sheetAnnounceTick(){
     if (!_availPending) return;
     if (!sheetwatch.shouldFlush(now, _lastChangeTs, _burstStartTs)) return;
 
-    const availLines = sheetwatch.diffAvail(_burstBase, _availSnap, _botWroteAvail);
-    const settingLines = sheetwatch.diffMap(_settingsFp, fpNow);
+    // 🔑 RE-READ BOTH SHEETS FRESH before speaking. Without this, net-zero suppression only works
+    // for edits that both land between two polls — and the panel is read every 5 min while the
+    // debounce is 3 min, so an edit undone AFTER a read would still have been announced as a
+    // change that no longer exists. One extra read per ANNOUNCEMENT (not per tick) removes the
+    // whole class: what gets announced is what the sheet says at the moment we speak.
+    let availNow = _availSnap, fpFresh = fpNow;
+    try {
+      availNow = await readAvail();
+      if (!Object.keys(availNow).length) availNow = _availSnap;      // failed read → trust the cache
+      else _availSnap = availNow;
+      const tok = await larkToken();
+      const sid = await panelSheetId(tok);
+      if (sid){
+        const rows = flatRows(await panelRows(tok, sid));
+        const S = settingsMod.parseSettings(rows);
+        if (S.ok) fpFresh = sheetwatch.settingsFingerprint(S.settings, settingsMod.parseCampaigns(rows).campaigns);
+      }
+    } catch (e){ log('announce re-read failed (' + String(e.message || e).slice(0, 60) + ') — announcing from cache'); }
+
+    const availLines = sheetwatch.diffAvail(_burstBase, availNow, _botWroteAvail);
+    const settingLines = sheetwatch.diffMap(_settingsFp, fpFresh);
     const msg = sheetwatch.buildMessage(availLines, settingLines);
     // Reset FIRST, so a send failure cannot wedge the burst open and re-announce forever.
     _availPending = false; _burstBase = null; _lastChangeTs = 0; _burstStartTs = 0;
-    _settingsFp = fpNow; _botWroteAvail.clear();
+    _settingsFp = fpFresh; _botWroteAvail.clear();
     if (!msg){ log('sheet edits cancelled out — nothing announced'); return; }
-    const off = Object.keys(_availSnap || {}).filter(n => _availSnap[n] === 'NO');
+    const off = Object.keys(availNow || {}).filter(n => availNow[n] === 'NO');
     await alertReview(msg + (availLines.length ? (off.length ? `\n\nCurrently OFF: ${off.join(', ')}` : '\n\nEveryone available ✅') : ''));
     log('sheet change announced:', (availLines.map(x => x.name).join(',') || '-') + ' | settings ' + settingLines.length);
   } catch (e){ log('sheetAnnounceTick err', String(e.message || e).slice(0, 120)); }
