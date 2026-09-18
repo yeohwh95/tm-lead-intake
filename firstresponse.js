@@ -270,13 +270,6 @@ function tpl(cat, lang, card, stockLine, nextLabel){
 // a product/stock question, instead of always assuming yes or staying silent on it) ----------
 async function stockLineFor(cat, text, lang){
   if (cat !== 'product' || !text || !RE_BIKE.test(text) || !D.wooCheckStock) return '';
-  // Panel: "May the bot say whether a bike is in stock?" — Steven's ruling of 22 Jul 2026, now a
-  // switch instead of a comment. MEASURED cost of getting this wrong: 9 separate complaints in the
-  // internal group ("er6n still available but ai respon takde stock", "aprilia rsv4 still
-  // available", "mt07 still available", "R1 tak ada stock") — each one a lead the customer walked
-  // away from. With this OFF the whole stock/price sentence is dropped and the lead simply goes to
-  // a salesperson, which is what the team asked for.
-  if (!cfgBool('maySayStock', true)) return '';
   let r = null;
   try { r = await D.wooCheckStock(text); } catch(e){ D.log && D.log('FR stock err:', String(e.message||e).slice(0,60)); }
   if (!r) return '';   // not configured / lookup failed → skip silently, never block the reply
@@ -300,6 +293,16 @@ async function stockLineFor(cat, text, lang){
       ? ` Kami Zontes dealer, sesiapa book awal dengan kami akan dapat stock cepat & mystery gift 🎁 Beli Zontes, beli dengan TM Motoworld 😁`
       : ` Book awal dengan kami untuk dapat unit cepat ya 👍`);
   }
+  // Panel: "May the bot say whether a bike is in stock?" — Steven's ruling of 22 Jul 2026, now a
+  // switch instead of a comment. MEASURED cost of getting it wrong: 9 complaints in the internal
+  // group ("er6n still available but ai respon takde stock", "aprilia rsv4 still available",
+  // "mt07 still available", "R1 tak ada stock") — each one a lead the customer walked away from.
+  // 🚨 THE GUARD SITS HERE, NOT AT THE TOP OF THIS FUNCTION. It was at the top for two hours on
+  // 18 Sep, which ALSO silenced the booking pitch above — and that pitch is not a stock claim, it
+  // is Steven's own "not released yet, book early + mystery gift" wording, asked for on 24 Jul.
+  // Turning off stock answers must not quietly delete a message the client asked us to send.
+  // Below this line every branch makes a stock claim, so below this line is where NO means no.
+  if (!cfgBool('maySayStock', true)) return '';
   // A customer asking for a NEW bike is asking a question this catalog cannot answer. Woo holds
   // TM's USED inventory — one row per physical secondhand unit — plus 87 hand-typed "NEW …" rows
   // that nobody maintains (one is priced RM 888,888.8888, one has no price, and there is no new
@@ -1522,6 +1525,6 @@ module.exports = { init, setConfig, onMessage, markHuman, rehydrateGreeted, gate
   // fact, drifting the moment one of them changed.
   _gateMs: () => GATE_MS,
   _gateParsePhone: gateParsePhone, _classify: classify, _classifySmart: classifySmart,
-  _tpl: tpl, _isEnglish: isEnglish, _state: () => state,
+  _tpl: tpl, _isEnglish: isEnglish, _state: () => state, _stockLineFor: stockLineFor,
   _qualifyAsk: qualifyAsk, _closingLine: closingLine,
   _frLogEvent: frLogEvent, _eventsFile: () => FR_EVENTS_FILE, RE_BIKE };
