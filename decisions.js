@@ -12,7 +12,11 @@
 //
 // Pure: index.js does the fetching and appending.
 
-const HEADER_ROWS = 5;                     // title, 2 help lines, blank, column header
+// 🚨 The header must be CONTIGUOUS - no blank row above the data. Lark's values_append writes into
+// the FIRST EMPTY ROW it finds, not after the last used one: with a blank row 4 sitting in the
+// header, the first real decision was written INTO the header, above the column titles. Proven
+// against the live sheet 18 Sep (landed row 4, wanted row 5). Rows 1-3 help, row 4 column titles.
+const HEADER_ROWS = 4;
 const MAX_APPEND = 40;                     // per run — a burst must not become a 500-row write
 
 // what each outcome means in the customer's terms, for the "Sent to" column

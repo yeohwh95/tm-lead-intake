@@ -43,8 +43,10 @@ console.log('\n-- a no-phone lead still gets a row --');
 ok('falls back to the chat id', D.rowsToAppend([E(1,'gate_held',{phone:''})], 0).rows[0][1].length > 0);
 
 console.log('\n-- reading their ticks back --');
+// header is rows 1-4 and CONTIGUOUS on purpose - a blank row here would make Lark's append write
+// the first real decision inside the header (proven on the live sheet, 18 Sep).
 const SHEET = [
-  ['TM MOTOWORLD'],['help'],['help'],[],['Time','Customer','Said','Decided','Sent to','\u274c','Should be'],
+  ['TM MOTOWORLD'],['help'],['help'],['Time','Customer','Said','Decided','Sent to','\u274c','Should be'],
   ['09-18 13:40','+60175258225','masih belum dapat ws dari SA','admin','Admin','\u274c','chasing'],
   ['09-18 13:41','+60111231749','Lambretta x250 berapa','product','Zeera','',''],
   ['09-18 13:42','+60128888888','nak jual motor','product','Nabil','yes','sell'],
@@ -54,8 +56,8 @@ ok('only ticked rows come back', t.length === 2);
 ok('header rows are never mistaken for data', !t.some(x => x.row <= D.HEADER_ROWS));
 ok('any mark counts as a tick, not just \u274c', t.some(x => x.said === 'nak jual motor'));
 ok('carries what it SHOULD have been', t[0].shouldBe === 'chasing');
-ok('carries the row number so a human can find it', t[0].row === 6);
-ok('no ticks -> empty, not an error', D.readTicks(SHEET.slice(0,5)).length === 0);
+ok('carries the row number so a human can find it', t[0].row === 5);
+ok('no ticks -> empty, not an error', D.readTicks(SHEET.slice(0, D.HEADER_ROWS)).length === 0);
 
 console.log(`\n${n - fail}/${n} passed`);
 process.exit(fail ? 1 : 0);
