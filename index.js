@@ -983,6 +983,7 @@ async function larkToken(){
 const AVAIL_SHEET = process.env.AVAIL_SHEET || 'YjLTslshkhRGeXt9V5DlJi8cgdl';
 const settingsMod = require('./settings');
 const msgtypes     = require('./msgtypes');
+const decisions    = require('./decisions');
 const sheetwatch   = require('./sheetwatch');
 const leavesync   = require('./leavesync');
 // ---- ROSTER-FROM-SHEET, SHADOW MODE (2026-07-30) ----
@@ -1316,6 +1317,87 @@ async function msgTypeTick(){
   } catch (e){ log('msgTypeTick err', String(e.message || e).slice(0, 140)); }
 }
 
+// ---- BOT DECISIONS TAB (2026-09-18) -----------------------------------------------------------
+// Every message the bot handled, written to a tab TM can scan, with a column for them to tick the
+// wrong ones. Closes the loop: the sheet was only the INPUT half, and nobody could see whether
+// accuracy was improving. Harith found the 18 Sep admin misfire by opening one chat by chance.
+//
+// APPEND-ONLY via Lark's values_append. It never rewrites a row, because the team's tick has to
+// stay attached to the message it was about - a shifted row would put a tick on someone else's
+// message and be believed.
+const DECISIONS_ON = process.env.DECISIONS_ON !== '0';
+const DECISIONS_TAB_TITLES = (process.env.DECISIONS_TAB_TITLE || 'Bot Decisions,Bot decisions,BOT DECISIONS')
+  .split(',').map(x => x.trim().toLowerCase()).filter(Boolean);
+const DECISIONS_MARK = process.env.DECISIONS_MARK_FILE
+  || (process.env.FR_STATE_FILE ? require('path').join(require('path').dirname(process.env.FR_STATE_FILE), 'decisions_mark.json')
+                                : require('path').join(__dirname, 'decisions_mark.json'));
+let _decSid = null, _decTicksKey = '', _lastDecRun = null;
+function decMark(){ try { return JSON.parse(require('fs').readFileSync(DECISIONS_MARK, 'utf8')).ts || 0; } catch { return 0; } }
+function decMarkSet(ts){ try { require('fs').writeFileSync(DECISIONS_MARK, JSON.stringify({ ts })); } catch(e){ log('decisions mark write err', String(e.message||e).slice(0,60)); } }
+async function decisionsSheetId(tok){
+  if (_decSid) return _decSid;
+  const meta = await (await fetch(`${LARK_BASE}/sheets/v3/spreadsheets/${AVAIL_SHEET}/sheets/query`, { headers: { 'Authorization': 'Bearer ' + tok } })).json();
+  const sheets = (meta.data && meta.data.sheets) || [];
+  const hit = sheets.find(x => DECISIONS_TAB_TITLES.includes(String(x.title || '').trim().toLowerCase()));
+  if (hit) { _decSid = hit.sheet_id; return _decSid; }
+  log('DECISIONS: tab not found (tabs: ' + sheets.map(x => x.title).join(' | ') + ') - nothing logged');
+  return null;
+}
+async function decisionsTick(){
+  if (!DECISIONS_ON) return;
+  try {
+    const ev = firstresponse.readFrEvents && firstresponse.readFrEvents(1500);
+    if (!ev || !ev.ok) return;
+    const events = ev.text.split('\n').filter(Boolean).map(l => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
+    const since = decMark();
+    // First ever run: start from NOW, not from the whole history. Back-filling weeks of events
+    // would bury today's decisions and is not what anyone is going to read.
+    if (!since){ const newest = events.reduce((m, e) => Math.max(m, Number(e.ts) || 0), 0); decMarkSet(newest || Math.floor(Date.now()/1000)); log('DECISIONS: baseline set, logging from now on'); return; }
+    const plan = decisions.rowsToAppend(events, since);
+    _lastDecRun = { at: new Date().toISOString(), since, appended: plan.rows.length, pending: plan.pending };
+    if (plan.rows.length){
+      const tok = await larkToken();
+      const sid = await decisionsSheetId(tok);
+      if (!sid) return;
+      const r = await fetch(`${LARK_BASE}/sheets/v2/spreadsheets/${AVAIL_SHEET}/values_append?insertDataOption=OVERWRITE`, {
+        method: 'POST', headers: { 'Authorization': 'Bearer ' + tok, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ valueRange: { range: `${sid}!A:G`, values: plan.rows } }) });
+      const j = await r.json();
+      // Lark refuses with HTTP 200 and a code in the body. Advancing the watermark on a refused
+      // write would silently drop those decisions for good.
+      if (j.code !== 0) { log('DECISIONS append refused: code ' + j.code + ' ' + (j.msg || '')); return; }
+      log(`DECISIONS: +${plan.rows.length} row(s)` + (plan.pending ? ` (${plan.pending} more next run)` : ''));
+    }
+    decMarkSet(plan.watermark);
+    await decisionsTicksTick();
+  } catch (e){ log('decisionsTick err', String(e.message || e).slice(0, 140)); }
+}
+// Read their ❌ ticks back. A tick is the team telling us the bot got one wrong - it is the most
+// valuable thing on the whole sheet, so it must not sit there unread.
+async function decisionsTicksTick(){
+  try {
+    const tok = await larkToken();
+    const sid = await decisionsSheetId(tok);
+    if (!sid) return;
+    const v = await (await fetch(`${LARK_BASE}/sheets/v2/spreadsheets/${AVAIL_SHEET}/values/${sid}!A1:G800`, { headers: { 'Authorization': 'Bearer ' + tok } })).json();
+    const ticks = decisions.readTicks(flatRows(((v.data && v.data.valueRange && v.data.valueRange.values) || [])));
+    if (!ticks.length) { _decTicksKey = ''; return; }
+    const key = JSON.stringify(ticks.map(t => t.row));
+    if (key === _decTicksKey) return;                       // only shout when a NEW one is ticked
+    const fresh = ticks.slice(-5);
+    _decTicksKey = key;
+    await alertReview(`*The team marked ${ticks.length} bot decision(s) as wrong*\n`
+      + fresh.map(t => `- "${t.said.slice(0, 70)}"\n   bot said *${t.decided}*` + (t.shouldBe ? ` -> should be *${t.shouldBe}*` : '')).join('\n')
+      + `\n\nPaste those exact words into the "Message Types" tab so it stops happening.`);
+    log(`DECISIONS: ${ticks.length} row(s) ticked wrong`);
+  } catch (e){ log('decisionsTicks err', String(e.message || e).slice(0, 120)); }
+}
+if (DECISIONS_ON){
+  setInterval(() => { decisionsTick().catch(e => log('decisions tick err', String(e.message || e))); }, 15 * 60 * 1000);
+  setTimeout(() => { decisionsTick().catch(e => log('decisions boot err', String(e.message || e))); }, 25000);
+  log('Bot Decisions log ON - appending every 15 min');
+}
+
 let _panel = { settings: null, campaigns: [], leave: [], warnings: [], ts: 0, appliedKey: '', warnKey: '', lastLeave: null, statusAlertAt: 0 };
 function panelStatus(){
   // The debounce had no observable state, so "did it decide to stay quiet, or is it still holding?"
@@ -1332,6 +1414,7 @@ function panelStatus(){
       wouldFlushNow: _availPending && sheetwatch.shouldFlush(now, _lastChangeTs, _burstStartTs),
       botWroteAvail: [..._botWroteAvail],
       lastAnnounce: _lastAnnounce },
+    decisions: { on: DECISIONS_ON, tab: _decSid, markFile: DECISIONS_MARK, lastRun: _lastDecRun },
     messageTypes: _msgTypes ? {
       tab: _mtSid, found: _msgTypes.found, warnings: _msgTypes.warnings,
       promptChars: _classifyPrompt.length, usingBuiltinPrompt: _classifyPrompt === CLASSIFY_PROMPT_BUILTIN,
