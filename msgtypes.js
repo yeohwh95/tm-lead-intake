@@ -113,6 +113,18 @@ function buildPrompt(parsed, builtin){
   L.push('Priority for mixed messages: sell beats loan beats product beats greeting.');
   L.push('A message that opens with a greeting and then says something is NOT greeting - classify what comes after the greeting.');
   L.push('Naming bike models does NOT make it product when the customer is handing US a bike.');
+  // 2026-09-21, and it is the THIRD time this boundary has cost TM a lead. Harith reported it in
+  // the project group: "auto bot salah assign kepada admin". Measured on the exact message, 12/12
+  // at temperature 0 -> `admin`, so it was never a flake and it would have repeated on every
+  // customer who asks what a PURCHASE needs. The sheet already said "Paperwork ONLY ... Never
+  // anything about buying or selling a bike" in the meaning column and gpt-4o still chose admin:
+  // a description of the type is not a rule about which type WINS. Only the priority lines are.
+  // 🔑 Why it lives in code and not on the sheet: the keyword layer already routes pure paperwork
+  // deterministically (tukar nama / roadtax / geran / jpj / insurance), so the AI is only ever
+  // consulted on the MIXED messages - exactly the ones this rule decides. Measured both ways: the
+  // rule alone fixes it 12/12, TM pasting the sentence into the admin row's X column alone does
+  // NOT (it stayed admin). A fix that only works while a client's cell survives is not a fix.
+  L.push('admin means the customer ALREADY owns the bike and only needs paperwork done on it. Anything to do with BUYING a bike from us is product, never admin - including what documents are needed to buy, and whether they can keep or transfer a plate number onto the new bike they are buying.');
   return L.join('\n');
 }
 

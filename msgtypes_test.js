@@ -62,6 +62,18 @@ ok('carries the real examples', /Lambretta x250 berapa/.test(prompt));
 ok('carries the ❌ examples as NOT-this-type', /NOT admin \(these were classified wrongly before\)/.test(prompt));
 ok('keeps the sell-beats-loan rule in CODE', /sell beats loan beats product/.test(prompt));
 ok('keeps the greeting rule in CODE', /opens with a greeting/.test(prompt));
+// 2026-09-21 — Harith: "auto bot salah assign kepada admin". A customer buying a NEW bike who
+// asked what documents he needed to keep his own plate number was classified `admin` 12/12 at
+// temperature 0 and was told "admin will contact you" instead of reaching a salesperson.
+// The admin row's MEANING column already said "Never anything about buying or selling a bike" and
+// the model still chose admin — a description of a type is not a rule about which type WINS.
+// This rule must stay in CODE: TM can edit every row on that sheet, and a sheet with no admin row
+// at all still has to route a buyer to a salesperson.
+ok('\u{1F6A8} keeps the buying-beats-paperwork rule in CODE',
+   /Anything to do with BUYING a bike from us is product, never admin/.test(prompt));
+ok('the rule survives a sheet that says the opposite in its meaning column',
+   /Anything to do with BUYING a bike from us is product, never admin/.test(
+     mt.buildPrompt(mt.parseTypes([['admin', 'everything about bikes, buying included', '', '', '']]), BUILTIN)));
 
 console.log('\n-- an unreadable sheet must never blank the prompt --');
 ok('empty rows → built-in prompt', mt.buildPrompt(mt.parseTypes([]), BUILTIN) === BUILTIN);

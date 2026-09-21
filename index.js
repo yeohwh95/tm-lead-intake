@@ -732,7 +732,8 @@ Answer with EXACTLY one word from: sell, loan, testride, product, admin, greetin
 - admin = paperwork / ownership / insurance, NOT buying a bike and NOT workshop work: tukar nama (ownership transfer), geran, JPJ, roadtax, insurance, loan settlement letter, puspakom.
 - skip = automated vendor/OTP/verification messages, or long text unrelated to motorcycles.
 Priority for mixed messages: sell beats loan beats product beats greeting.
-Naming bike models does NOT make it product when the customer also wants to trade in or sell one — "Cbr650r / Mt25 / Trade in mt25 2024 mileage 25k" is sell, because they are handing us a bike.`;
+Naming bike models does NOT make it product when the customer also wants to trade in or sell one — "Cbr650r / Mt25 / Trade in mt25 2024 mileage 25k" is sell, because they are handing us a bike.
+admin means the customer ALREADY owns the bike and only needs paperwork done on it. Anything to do with BUYING a bike from us is product, never admin - including what documents are needed to buy, and whether they can keep or transfer a plate number onto the new bike they are buying.`;
 // Read a picture a CUSTOMER sent us and say whether it is someone wanting to BUY or to SELL.
 // Exists because TM advertises FOR STOCK ("nak jual motor tapi ada baki hutang lagi?!"), so a
 // customer replying to an ad with the ad itself is very often a seller — and every image was being
