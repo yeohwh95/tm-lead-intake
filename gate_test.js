@@ -243,6 +243,59 @@ const LIDD = '206218996011144';
   ok('\u{1F6A8} a username is heard too', assigned.length === 1
      && /keekzy77/i.test(JSON.stringify(assigned)));
 
+  // ── 8c. THE 2026-09-21 BUG: the SWEEP believed the bot's own echo ──────────
+  // 8b fixed the inbound side (`onMessage` exempts mid-flow chats). The SWEEP never got that
+  // exemption, and the sweep is where the lead is destroyed: it deletes the hold AND the qualify
+  // entry, records `human_takeover`, and creates nothing. Since WaSender echoes our own sends back
+  // as fromMe, EVERY gated chat was flagged the moment the bot asked for the number — so the
+  // "human" it backed off for was itself.
+  // Measured on production before the fix: 22 of 144 holds ended this way. For the two still inside
+  // the box-66 capture window, the only outbound messages in the whole hold window were the bot's
+  // own templates. One is the AVETA customer of 2026-09-21 (held 13:50, dropped 14:00:58, no Lark
+  // row); TM found him 90 minutes later by reading the inbox, which is not a system.
+  console.log('\n8c. The bot\'s own echo must not be mistaken for a human taking over');
+  // ⚠️ Fresh jids, and never one another case uses: `humanTouched` is module-level and
+  // reset() does NOT clear it, so a jid flagged here would stay flagged for whoever reuses it.
+  // Caught by this suite the first time it ran — 444/555 collide with case 10's LID_D/LID_E.
+  const LID_ECHO = '440044004400440@lid', LID_REAL = '550055005500550@lid';
+  reset();
+  fr.onMessage({ jid: LID_ECHO, phone: '', kind: 'text', text: 'nak tanya harga Zontes' });
+  await wait(80);
+  const askText = sent.at(-1) && sent.at(-1).text;      // the gate ask the bot really just sent
+  ok('the bot did ask for a number', /nombor telefon|phone number/i.test(askText || ''));
+  // Exactly what production does: register the outbound, then receive it back as a fromMe echo.
+  fr.noteBotSend(askText);
+  fr.noteBotMsgId('MSGID-OURS-1');
+  fr.markHuman(LID_ECHO, { id: 'MSGID-OURS-1', text: askText });
+  fr._state().awaitingPhone[LID_ECHO].ts = Date.now() - 61000;
+  sent = []; assigned = [];
+  const echoTakeoversBefore = fr.gateReadEvents(500).filter(e => e.kind === 'human_takeover').length;
+  await fr.gateSweep();
+  ok('\u{1F6A8} the lead is RELEASED, not deleted', assigned.length === 1);
+  ok('\u{1F6A8} NOT recorded as a human takeover',
+     fr.gateReadEvents(500).filter(e => e.kind === 'human_takeover').length === echoTakeoversBefore);
+  ok('the hold is closed either way', fr.gateStatus().length === 0);
+  // Matching on the id alone would lose a race the HTTP response can lose; matching on text alone
+  // covers it. Both are pinned so neither half can be dropped as "redundant".
+  ok('text alone identifies our own words', fr._isOwnEcho({ text: askText }) === true);
+  ok('id alone identifies our own send', fr._isOwnEcho({ id: 'MSGID-OURS-1', text: 'anything else' }) === true);
+
+  // The other direction still has to work, or this fix trades one silent loss for another: a rep
+  // who really types into the chat must still stop the bot assigning over her.
+  reset();
+  fr.onMessage({ jid: LID_REAL, phone: '', kind: 'text', text: 'nak tanya harga Zontes' });
+  await wait(80);
+  fr.markHuman(LID_REAL, { id: 'MSGID-THEIRS', text: 'hi bos, saya Amir. boleh call sekarang?' });
+  fr._state().awaitingPhone[LID_REAL].ts = Date.now() - 61000;
+  assigned = [];
+  const realBefore = fr.gateReadEvents(500).filter(e => e.kind === 'human_takeover').length;
+  await fr.gateSweep();
+  ok('\u{1F6A8} a REAL human still stops the bot', assigned.length === 0);
+  ok('and is still recorded as a takeover',
+     fr.gateReadEvents(500).filter(e => e.kind === 'human_takeover').length === realBefore + 1);
+  // An outbound the parser could not read has no text and no known id — it must stay a human,
+  // because assigning over a rep who is mid-conversation is the more expensive mistake.
+  ok('an unreadable outbound is still treated as a human', fr._isOwnEcho({ id: '', text: '' }) === false);
   // Leave a fresh hold on LID for case 9, which expects one.
   reset();
   fr.onMessage({ jid: LID, phone: '', kind: 'text', text: 'nak tanya harga Zontes' });

@@ -1553,9 +1553,59 @@ function onMessage(info){
   } catch(e){ D.log && D.log('FR onMessage err', String(e.message||e)); }
 }
 
+// ---------- The bot's own echo is not a human (2026-09-21) --------------------------------------
+// 🚨 WaSenderAPI echoes everything WE send back as a `messages.upsert` with fromMe=true, so
+// `markHuman` fired on the bot's OWN replies and flagged the chat human-owned the instant the bot
+// spoke. `onMessage` worked around it with the `midFlow` exemption; the two SWEEPS never got one,
+// and they are where the lead is thrown away:
+//   gateSweep   -> deletes the hold + the qualify entry, logs `human_takeover`, NO lead is created
+//   intentSweep -> same shape, logs `human_owned` / intent_human_takeover
+// Measured on production, not reasoned: 22 of 144 gated holds ended as `human_takeover`, and for
+// the two still inside the box-66 capture window the ONLY outbound messages in the entire hold
+// window were the bot's own templates — no human had touched either chat. The 2026-09-21 AVETA
+// customer (118588392341635@lid, held 13:50 MYT) is one of them: dropped at 14:00:58 with no Lark
+// row, and TM only found him because someone happened to read the inbox 90 minutes later. That is
+// the 2026-08-05 bug again, one caller over.
+//
+// 🔑 Matched on the message id AND on the exact text, deliberately both:
+//   - the id is exact, but it only exists AFTER WaSender answers our send, so an echo that
+//     overtook the HTTP response would miss it. This file already carries one race held shut by
+//     timing arithmetic alone; it does not need a second.
+//   - the text is known BEFORE the send leaves, so it cannot lose that race. Keyed on text alone,
+//     not jid+text: we send to the customer's PHONE while the echo arrives on their @lid, so a
+//     jid key would never match. A human who types one of our templates verbatim is saying exactly
+//     what the bot said, so reading it as ours costs nothing.
+const botMsgIds = new Set();      // ids WaSender gave back for our own sends
+const botSentText = new Set();    // the exact text of our own sends, registered before sending
+const normSend = t => String(t == null ? '' : t).replace(/\s+/g, ' ').trim();
+function noteBotSend(text){
+  const t = normSend(text);
+  if (!t) return;
+  botSentText.add(t);
+  if (botSentText.size > 3000) botSentText.clear();
+}
+function noteBotMsgId(id){
+  const s = String(id == null ? '' : id).trim();
+  if (!s) return;
+  botMsgIds.add(s);
+  if (botMsgIds.size > 3000) botMsgIds.clear();
+}
+function isOwnEcho(meta){
+  if (!meta) return false;
+  if (meta.id && botMsgIds.has(String(meta.id).trim())) return true;
+  const t = normSend(meta.text);
+  return !!t && botSentText.has(t);
+}
+
 // called for every fromMe personal message (via messages.upsert capture) — humans own that chat.
-function markHuman(jid){
+// `meta` is {id, text} off the echoed message; called without it the old behaviour is unchanged,
+// so an outbound the parser could not read still counts as a human — the safe direction.
+function markHuman(jid, meta){
   if (!jid || jid.endsWith('@g.us')) return;
+  if (isOwnEcho(meta)){
+    D.log && D.log(`FR 🔇 own echo, not a human takeover (${String(jid).slice(0,22)})`);
+    return;
+  }
   humanTouched.add(jid);
   if (humanTouched.size > 5000) humanTouched.clear();
 }
@@ -1583,7 +1633,7 @@ function clearQualify(jid){
 }
 
 function init(deps){ D = deps; D.log('firstresponse init — ON:', ON(), 'debounce:', DEBOUNCE_MS + 'ms'); }
-module.exports = { init, setConfig, onMessage, markHuman, rehydrateGreeted, gateSweep, gateReadEvents, gateLogParked, readFrEvents, clearQualify,
+module.exports = { init, setConfig, onMessage, markHuman, noteBotSend, noteBotMsgId, rehydrateGreeted, gateSweep, gateReadEvents, gateLogParked, readFrEvents, clearQualify,
   gateStatus: () => Object.entries(state.awaitingPhone || {}).map(([jid, h]) => ({
     jid, cat: h.cat, asks: h.asks, note: h.note || '',
     waitingMin: Math.round((Date.now() - (h.ts || Date.now())) / 60000),
@@ -1596,4 +1646,5 @@ module.exports = { init, setConfig, onMessage, markHuman, rehydrateGreeted, gate
   _gateParsePhone: gateParsePhone, _classify: classify, _classifySmart: classifySmart,
   _tpl: tpl, _isEnglish: isEnglish, _state: () => state, _stockLineFor: stockLineFor,
   _qualifyAsk: qualifyAsk, _closingLine: closingLine,
-  _frLogEvent: frLogEvent, _eventsFile: () => FR_EVENTS_FILE, RE_BIKE };
+  _frLogEvent: frLogEvent, _eventsFile: () => FR_EVENTS_FILE, RE_BIKE,
+  _isOwnEcho: isOwnEcho };

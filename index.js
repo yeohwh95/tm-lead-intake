@@ -545,6 +545,10 @@ function waSend(to, text, imageUrl){
 }
 
 function waSendNow(to, text, imageUrl){
+  // Registered BEFORE the send so the echo can never overtake it. See the own-echo block in
+  // firstresponse.js: without this the bot's own reply marks the chat human-owned and the two
+  // sweeps delete the lead.
+  try { firstresponse.noteBotSend(text); } catch {}
   _sendChain = _sendChain.then(async () => {
     if (!WASENDER_TOKEN) { log('waSend skipped — no token'); return null; }
     const wait = SEND_GAP - (Date.now() - _lastSend);
@@ -561,6 +565,7 @@ function waSendNow(to, text, imageUrl){
     });
     _lastSend = Date.now();
     if (!res.ok) alertSendFailure(to, text, res);
+    try { firstresponse.noteBotMsgId(res.msgId); } catch {}
     return res.msgId;   // unchanged contract: msgId on success, null on failure (SLA deletes it on reassign)
   }).catch(e => log('send chain err', String(e.message || e)));
   return _sendChain;
@@ -2601,7 +2606,15 @@ async function handle(payload){
   // original messages-group.received / messages-personal.received delivery.
   if (payload.event === 'messages.upsert') {
     // first-response: a human (or bot) outbound marks the chat as owned — bot stays out of it
-    try { const mm0 = pickMessages(payload.data || {}); if (mm0.key && mm0.key.fromMe) firstresponse.markHuman(mm0.key.remoteJid || ''); } catch {}
+    try {
+      const mm0 = pickMessages(payload.data || {});
+      if (mm0.key && mm0.key.fromMe){
+        const um = unwrap(mm0.message || {});
+        const echoText = um.conversation || (um.extendedTextMessage && um.extendedTextMessage.text)
+          || (um.imageMessage && um.imageMessage.caption) || (um.videoMessage && um.videoMessage.caption) || '';
+        firstresponse.markHuman(mm0.key.remoteJid || '', { id: mm0.key.id, text: echoText });
+      }
+    } catch {}
     return;
   }
   const info = extract(payload);
