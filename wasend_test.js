@@ -68,12 +68,30 @@ const OK = { status: 200, body: JSON.stringify({ data: { msgId: 'M1' } }) };
     ok(`HTTP ${st} → single attempt, no retry`, r.ok === false && calls.length === 1 && r.status === st);
   }
 
-  console.log('\n--- TIMEOUT: a hung request must not stall the shared send chain ---');
+  console.log('\n--- TIMEOUT: no answer is UNKNOWN, not failed — it must NOT be resent ---');
+  // ⚠️ This block previously asserted the OPPOSITE: "hung request aborts and retries → delivered".
+  // That looked obviously right and was measured wrong on 21 Sep 2026 in TM's intake group —
+  // WaSenderAPI was slow to ANSWER, not slow to send, so all three attempts were delivered and the
+  // same lead card appeared three times before the bot alarmed "Message NOT delivered".
+  // The staff member re-dropped the screenshot five times because nothing told him what had worked,
+  // and that customer ended up with two rows in Lark. Keeping the old assertion would re-ship it.
   ({ r, calls } = await run([{ hang: true }, OK], { timeoutMs: 30 }));
-  ok('hung request aborts and retries → delivered', r.ok === true && calls.length === 2);
+  ok('🚨 no answer → sent ONCE, never resent', calls.length === 1);
+  ok('🚨 reported as unconfirmed, not as failed', r.ok === false && r.unconfirmed === true);
+  ok('the error says nobody answered, not that it failed', /no answer/.test(r.error));
   ok('an AbortSignal was passed to fetch', !!calls[0].signal);
   ({ r, calls } = await run([{ hang: true }], { timeoutMs: 30 }));
-  ok('always hanging → gives up, reports timeout', r.ok === false && /timeout/.test(r.error));
+  ok('a single hang behaves the same way', calls.length === 1 && r.unconfirmed === true);
+
+  console.log('\n--- but a server that ANSWERS "no" is still retried: that message did NOT go ---');
+  // The distinction the fix rests on. A 520 or a 429 is WaSenderAPI refusing, so resending is
+  // correct and is why this retry exists at all (a customer's reply was dropped on 2026-07-30).
+  ({ r, calls } = await run([{ status: 520, body: 'bad gateway' }, OK], { backoffMs: [1, 1] }));
+  ok('🚨 HTTP 520 still retries and delivers', r.ok === true && calls.length === 2);
+  ok('and is NOT marked unconfirmed', !r.unconfirmed);
+  ({ r, calls } = await run([{ throw: 'getaddrinfo ENOTFOUND' }, OK], { backoffMs: [1, 1] }));
+  ok('🚨 a connection that never reached WaSender still retries', r.ok === true && calls.length === 2);
+  ok('and is NOT marked unconfirmed either', !r.unconfirmed);
 
   console.log('\n--- happy path unchanged ---');
   ({ r, calls } = await run([OK]));

@@ -561,7 +561,7 @@ function waSendNow(to, text, imageUrl){
       fetchImpl: fetch, base: WASENDER_BASE, token: WASENDER_TOKEN, ua: UA,
       to, text, imageUrl, log,
       attempts:  Number(process.env.SEND_ATTEMPTS   || 3),
-      timeoutMs: Number(process.env.SEND_TIMEOUT_MS || 20000),
+      timeoutMs: Number(process.env.SEND_TIMEOUT_MS || 45000),
     });
     _lastSend = Date.now();
     if (!res.ok) alertSendFailure(to, text, res);
@@ -578,7 +578,12 @@ function waSendNow(to, text, imageUrl){
 let _sendFailAlertAt = 0, _sendFailSuppressed = 0;
 function alertSendFailure(to, text, res){
   const who = String(to || '').replace(/\D/g, '') || String(to || '?');
-  log(`waSend ❌ UNDELIVERED to ${who} after ${res.attempts} attempt(s) — ${res.error}`);
+  // 🚨 "NOT delivered" was a lie whenever WaSender simply did not answer in time — on 21 Sep the
+  // same lead card was posted three times and then alarmed as undelivered. The alert now says which
+  // of the two things happened, because they need OPPOSITE actions from the person reading it:
+  // a refusal means send it again, no answer means LOOK FIRST or you create a duplicate.
+  const unconfirmed = !!res.unconfirmed;
+  log(`waSend ${unconfirmed ? '❓ UNCONFIRMED' : '❌ UNDELIVERED'} to ${who} after ${res.attempts} attempt(s) — ${res.error}`);
   const now = Date.now();
   if (now - _sendFailAlertAt < 5 * 60 * 1000) { _sendFailSuppressed++; return; }
   const extra = _sendFailSuppressed ? `\n\n(+${_sendFailSuppressed} more suppressed in the last 5 min)` : '';
@@ -587,8 +592,15 @@ function alertSendFailure(to, text, res){
   // category reads this. Deliberately NOT a second detector: this is the only place that knows
   // a send was finally given up on. Rides the existing durable digest store (now on /data).
   try { digestPush({ type: 'undelivered', to: who, err: String(res.error || '').slice(0, 80),
-    attempts: res.attempts, text: String(text || '').slice(0, 120) }); } catch {}
-  alertReview(`🚨 *Message NOT delivered*\n👤 ${who}\n⚠️ ${res.error} — gave up after ${res.attempts} attempt(s)\n\n📝 ${String(text || '').slice(0, 180)}\n\n👉 Please follow up manually — the bot will NOT retry this one.${extra}`)
+    attempts: res.attempts, unconfirmed, text: String(text || '').slice(0, 120) }); } catch {}
+  const head = unconfirmed
+    ? `❓ *Delivery not confirmed*\n👤 ${who}\n⚠️ WhatsApp did not answer in time (${res.error})`
+      + `\n\n📝 ${String(text || '').slice(0, 180)}`
+      + `\n\n👉 It may already have gone out. *Check the chat before sending it again* — sending twice is what creates duplicate leads.`
+    : `🚨 *Message NOT delivered*\n👤 ${who}\n⚠️ ${res.error} — gave up after ${res.attempts} attempt(s)`
+      + `\n\n📝 ${String(text || '').slice(0, 180)}`
+      + `\n\n👉 Please follow up manually — the bot will NOT retry this one.`;
+  alertReview(head + extra)
     .catch(e => log('send-failure alert err', String(e.message || e)));
 }
 // delete a previously-sent WhatsApp message (used by SLA on reassign). Confirmed: DELETE /messages/{id}

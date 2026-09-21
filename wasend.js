@@ -36,7 +36,7 @@ async function sendWithRetry(opts) {
     fetchImpl, base, token, ua, to, text, imageUrl,
     log = () => {},
     attempts = 3,
-    timeoutMs = 20000,
+    timeoutMs = 45000,
     backoffMs = DEFAULT_BACKOFF_MS,
     sleep = (ms) => new Promise(r => setTimeout(r, ms)),
     onAttempt,                    // test hook
@@ -64,10 +64,34 @@ async function sendWithRetry(opts) {
       clearTimeout(timer);
     }
 
-    // --- network error or timeout → transient, retry ---
+    // --- our own timeout → UNKNOWN, not failed. Do NOT retry. (2026-09-21) ---------------------
+    // 🚨 Measured in TM's intake group, 21 Sep 16:44–16:51. WaSenderAPI was slow to ANSWER, not slow
+    // to send: every attempt was delivered, we gave up waiting after 20s, retried, and the same lead
+    // card was posted three times — then we alarmed "Message NOT delivered, follow up manually".
+    //   16:44:28 ✅ 1 LEAD — paoloxcoba …
+    //   16:44:51 ✅ 1 LEAD — paoloxcoba …   (+23s = 20s timeout + 3s backoff)
+    //   16:45:18 ✅ 1 LEAD — paoloxcoba …   (+27s)
+    // The staff member then re-dropped the same screenshot five times because he could not tell what
+    // had worked, which is how that customer ended up with TWO rows in Lark.
+    // 🔑 The distinction that matters: WE RETRY WHEN THE SERVER TOLD US IT FAILED, AND NOT WHEN THE
+    // SERVER TOLD US NOTHING. A 429 or a 520 is the server answering "no" — the message did not go,
+    // so sending it again is correct and stays exactly as it was. An abort is OUR clock running out
+    // with no answer at all; the message may well be on its way, and a retry is a coin flip between
+    // a duplicate and a delivery.
+    // ⚠️ Deliberately ONLY a true AbortError. A DNS failure or a refused connection never reached
+    // WaSender at all, so those keep retrying as before — narrowing this to the one ambiguous case
+    // is the whole point.
+    // ⚠️ This is only safe because an unsent message is no longer invisible: alertSendFailure() tells
+    // a human either way. Before that existed (2026-07-30) not retrying would have been silent loss.
+    if (threw && (threw.name === 'AbortError' || /abort/i.test(String(threw.message || '')))) {
+      log(`waSend no answer in ${timeoutMs}ms → NOT retrying (it may already be delivered) to ${to}`);
+      return { ok: false, msgId: null, status: 0, unconfirmed: true,
+               error: `no answer in ${timeoutMs}ms`, attempts: attempt, retried: attempt > 1 };
+    }
+
+    // --- network error (DNS / refused / reset) → never reached WaSender, retry ---
     if (threw) {
-      const aborted = threw && (threw.name === 'AbortError' || /abort/i.test(String(threw.message || '')));
-      last = { ok: false, msgId: null, status: 0, error: aborted ? `timeout after ${timeoutMs}ms` : String(threw.message || threw), attempts: attempt, retried: attempt > 1 };
+      last = { ok: false, msgId: null, status: 0, error: String(threw.message || threw), attempts: attempt, retried: attempt > 1 };
       if (attempt < attempts) {
         const wait = backoffMs[Math.min(attempt - 1, backoffMs.length - 1)];
         log(`waSend ${last.error} → retry in ${Math.round(wait / 1000)}s (attempt ${attempt}/${attempts}) to ${to}`);
