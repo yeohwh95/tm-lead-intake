@@ -2,6 +2,104 @@
 
 WhatsApp lead → AI extract → Lark CRM + notify the assigned salesperson. **LIVE.**
 
+## 🚨 TWO FIXES, 21 Sep — one Harith reported, one nobody could see
+
+Harith in the project group: *"auto bot salah assign kepada admin"*. The reported bug was real. The
+one found next to it costs more.
+
+### 1. A buyer was read as paperwork — REPORTED, REAL, 12/12 reproducible
+
++60 (hidden, `118588392341635@lid`), 13:49 MYT: *"Kalau beli motor baru under name sendiri, nak guna
+existing registered nombor plate sendiri, nak dokumen apa ye?"* — a man buying a NEW bike asking
+what he needs to keep his own plate. He was told **admin** would contact him, and admin was sent a
+card for a sale.
+
+Not a flake, and not a sheet keyword: the log says `FR 🧠 ai overrides regex product→admin`, so the
+regex had it right and the model overruled it. Rebuilding TM's live prompt byte-identically from
+their own sheet (3067 chars, matches `/panel`), the exact sentence returns `admin` **12/12 at
+temperature 0**. It would have repeated on every customer who asks what a purchase needs.
+
+🔑 **The admin row already SAID the right thing and it did not help.** Its meaning column reads
+"Paperwork ONLY … Never anything about buying or selling a bike", and TM's own note quotes Harith
+on 18 Sep saying the same. **A description of a type is not a rule about which type WINS** — only
+the priority lines are, and `admin` was never in that chain.
+
+Both levers were measured before one was picked:
+
+| Lever | Result on the real message |
+|---|---|
+| Priority rule in `buildPrompt()` (code) | **product 12/12** ✅ |
+| TM pasting the sentence into the admin row's ❌ column | **still admin** ❌ |
+
+So it lives in code, beside the two rules already kept there. ⚠️ **A fix that only works while a
+client's spreadsheet cell survives is not a fix** — and the ❌ column is the thing we tell TM to
+edit, so it is the thing most likely to be edited away. Pinned by a test that feeds `buildPrompt` a
+sheet whose admin row says the OPPOSITE and asserts the rule still ships.
+
+Full 21-case set (10 true-admin, 4 mixed buyer-paperwork, 7 other types) × 3 runs: **19/21 → 21/21**,
+no other type moved.
+
+### 2. 🚨 The bot's own reply was read as a human, and the sweeps deleted their own leads
+
+**Nobody reported this. It is the expensive one.** WaSenderAPI echoes everything we send back as a
+`messages.upsert` with `fromMe=true`, so `markHuman` fired on the bot's OWN replies and flagged the
+chat human-owned **the instant the bot spoke**. `onMessage` has carried the `midFlow` workaround for
+this since 2026-08-05. **The two sweeps never got one — and the sweeps are where the lead dies:**
+
+- `gateSweep` → deletes the hold **and** the qualify entry, records `human_takeover`, **no Lark row,
+  nobody told**
+- `intentSweep` → same shape, `intent_human_takeover`
+
+So the "human" the bot backed off for was **itself**, in every chat where it had asked for a phone
+number — which is every gated chat.
+
+**Measured, not reasoned.** `/gate-status`: **22 of 144 holds** ended as `human_takeover`. For the
+two still inside the box-66 capture window, the only outbound messages in the *entire* hold window
+were the bot's own templates — no human had touched either chat. The AVETA customer above is one:
+held as `product` 13:50:17, dropped **14:00:58**, no Lark row. TM found him at 15:22 because someone
+happened to read the inbox. That is not a system.
+
+🔑 **Fixed at the root, not at the two call sites**, so every future consumer of `humanTouched` gets
+it: the bot registers its own sends and `markHuman` ignores its own echo. Matched on the message id
+**and** on the exact text, deliberately both — the id is exact but only exists *after* WaSender
+answers our send, while the text is known *before* the send leaves and so cannot lose that race.
+⚠️ This file already carries one race held shut by timing arithmetic alone; it does not need a second.
+
+⚪ **Kept on purpose:** an outbound the parser cannot read still counts as a human. Assigning over a
+rep who is mid-conversation is the more expensive mistake.
+
+⚠️ **NEEDS A HUMAN — the code stops the next one, it does not undo these.** Seven were dropped this
+way since 1 Sep, and **three are trade-ins**, which go to the purchaser and are the ones that cost
+TM a bike:
+
+| Dropped | Chat | Read as | What they had said |
+|---|---|---|---|
+| 08 Sep 12:26 | `86646754177203@lid` | product | "Hi ER6n ni masih available?" |
+| 08 Sep 14:11 | `150761958809759@lid` | **sell** | "sell motor" |
+| 12 Sep 13:32 | `251393059385485@lid` | **sell** | "Hi, nak tanya untuk trade in motor masih ada loan macam mana" |
+| 15 Sep 17:02 | `267035397325028@lid` | product | "hi / Moca bike got ready stock?" |
+| 15 Sep 18:54 | `234784404058225@lid` | product | "Z650rs 2nd \| qualified: Loan" |
+| 20 Sep 18:24 | `253819749458146@lid` | **sell** | "Klau nk trade in motor boleh ke ?" |
+| 21 Sep 14:00 | `118588392341635@lid` | product | "NEW AVETA RANGER MAX 130. Yang ini" |
+
+⚠️ All seven are `@lid` — **no phone number**, so they can only be reached by opening that chat in
+TM's WhatsApp inbox. Per this file's never-delete rule, recovering them is a deliberate human act.
+
+**Tests:** gate_test **127 → 136**; suite **1282** across 26 files, all green. Section 8c fails 3
+assertions against the pre-fix file, including `🚨 the lead is RELEASED, not deleted`.
+⚠️ The first run of 8c broke two LATER cases — `humanTouched` is module-level and `reset()` does not
+clear it, so the jids it flags stay flagged. The suite caught it. Use fresh jids.
+
+### ⚪ Noticed, NOT changed
+- The `product` row carries the keyword **`ada`**, while the same sheet's own instructions say
+  *"'ada' would match almost everything"*. Keywords are deterministic and beat the model. It is
+  survivable today only because the longest keyword wins, and every competing type happens to have a
+  longer one. **Nothing enforces that.** The `MAX_EXAMPLES`-style guard rejects keywords under 3
+  characters; `ada` is exactly 3.
+- The customer got the admin hand-off **and then** the sales ack 44 seconds later. That is the
+  2026-09-08 design working as intended (an admin question must not close the qualify flow), and
+  with fix 1 this message never reaches the admin branch at all. Left alone deliberately.
+
 ## 🔍 AUDIT: I went looking for more of the same, and found two — 2026-09-08
 
 After the two incidents below, Benjamin asked whether anything else carried the same risk. Both
