@@ -61,7 +61,12 @@ function plan(leave, avail, today) {
       // pick the booking that is already stamped, so a prior value captured on day 1 survives
       const stamped = active.find(l => STAMP.test(l.status));
       const lead = stamped || active[0];
-      const prior = stamped ? STAMP.exec(stamped.status)[1].toUpperCase() : cur;
+      // Benjamin, 2026-09-25: "it should automatically turn on when he is back". Coming back from
+      // leave ALWAYS means ON. The old rule restored whatever the switch said before the leave, so
+      // someone already switched OFF by hand for that leave (Amirul, 22 Sep) would have stayed OFF
+      // forever. A leaver is parked by blanking their Branch, which keeps them out of rotation
+      // whatever this switch says — so there is no case left that "stay OFF" was protecting.
+      const prior = 'YES';
 
       if (cur !== 'NO') {
         writes.push({ row: person.row, value: 'NO', name: person.name });
@@ -71,16 +76,8 @@ function plan(leave, avail, today) {
           // 5 minutes is how a control panel loses trust.
           alerts.push(`🔄 *Planned Leave*: ${person.name} was set to YES but the page says they are off until ${lead.to} — set back to NO. If they are back early, change "Leave until" on the Planned Leave rows.`);
         } else {
-          alerts.push(`🌴 *Planned Leave*: ${person.name} is off ${lead.from} → ${lead.to}${lead.reason ? ` (${lead.reason})` : ''} — switched OFF, no new leads. Will go back to ${prior} on ${nextDay(lead.to)}.`);
+          alerts.push(`🌴 *Planned Leave*: ${person.name} is off ${lead.from} → ${lead.to}${lead.reason ? ` (${lead.reason})` : ''} — switched OFF, no new leads. Back ON on ${nextDay(lead.to)}.`);
         }
-      } else if (!stamped && prior === 'NO') {
-        // AMBIGUOUS, and it must not be guessed at: they are already OFF on day one of their leave.
-        // Either a human switched them off FOR this leave (so they should come back ON), or they are
-        // off for an unrelated reason such as a resignation (so they must stay OFF). Recording
-        // "was NO" is the safe choice, but silently leaving somebody switched off after they return
-        // is the failure this feature exists to prevent - so say it now, while there is time to fix
-        // it, not on the return date.
-        alerts.push(`⚠️ *Planned Leave*: ${person.name} is booked off ${lead.from} → ${lead.to}, but Available? is ALREADY NO.\n\nSo on ${nextDay(lead.to)} they will stay OFF, not come back.\nIf they should come back: set ${person.name} to *YES* on the Salesman Availability tab now — the bot will switch them off again within 5 minutes and remember YES as the value to restore.`);
       }
       const want = `on leave until ${lead.to} (was ${prior})`;
       if (lead.status !== want) statuses.push({ row: lead.row, value: want });
@@ -98,7 +95,7 @@ function plan(leave, avail, today) {
       const last = ended.reduce((a, b) => (b.to > a.to ? b : a));
       const m = STAMP.exec(last.status);
       if (m) {
-        const prior = m[1].toUpperCase();
+        const prior = 'YES';   // back from leave = ON, whatever an older stamp says (see above)
         if (cur !== prior) writes.push({ row: person.row, value: prior, name: person.name });
         const want = `returned ${nextDay(last.to)}`;
         // Announce on the TRANSITION, not on the write. Someone who was already OFF before their
@@ -106,9 +103,7 @@ function plan(leave, avail, today) {
         // forgot to switch me back on", which is the one promise this feature makes.
         if (last.status !== want) {
           statuses.push({ row: last.row, value: want });
-          alerts.push(prior === 'YES'
-            ? `✅ *Planned Leave*: ${person.name} is back from leave (ended ${last.to}) — switched back ON.`
-            : `ℹ️ *Planned Leave*: ${person.name}'s leave ended ${last.to}. They were already OFF before the leave, so they stay OFF — flip them to YES by hand if that is wrong.`);
+          alerts.push(`✅ *Planned Leave*: ${person.name} is back from leave (ended ${last.to}) — switched back ON.`);
         }
         notes.push(`${person.name}: returned, restored to ${prior}`);
       } else if (!/^returned/i.test(last.status)) {
