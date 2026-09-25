@@ -26,6 +26,13 @@ function plan(leave, avail, today) {
   const alerts = [];        // human-readable, for the internal group
   const notes = [];         // log lines
 
+  // 🚨 An EMPTY availability tab is a failed read, never a real roster (index.js readAvailRows
+  // returns [] when Lark answers with an error body). Planning against it declared everybody on
+  // leave "not on the tab", overwrote their "(was YES)" stamp, and — if that tick fell on or after
+  // the return day — left them OFF for good as "never activated", with no alert. Do nothing; the
+  // next 5-minute read decides. (stress test, 2026-09-25)
+  if (!(avail || []).length) return { writes, statuses, alerts, notes: ['availability read returned no rows — leave not planned this tick'] };
+
   const byName = new Map();
   for (const a of avail || []) {
     const k = norm(a.name);
@@ -46,7 +53,11 @@ function plan(leave, avail, today) {
       // NEVER fuzzy-match a name onto a real person's lead allocation. Guessing "megat" → "jebat"
       // once already cost leads; here a wrong guess would switch off somebody who is working.
       for (const l of rows) {
-        const want = `⚠️ name not found on the Salesman Availability tab — check the spelling`;
+        // Keep an existing "(was X)" stamp inside the warning: it is the only record of what to
+        // restore, and a name that goes missing for one read (renamed, partial read) must not turn
+        // a real leave into "never activated" when it comes back.
+        const keep = STAMP.test(l.status) ? ` · ${l.status.replace(/^⚠️ name not found[^·]*· /, '')}` : '';
+        const want = `⚠️ name not found on the Salesman Availability tab — check the spelling${keep}`;
         if (l.status !== want) statuses.push({ row: l.row, value: want });
       }
       alerts.push(`⚠️ *Planned Leave*: "${rows[0].name}" is not on the Salesman Availability tab, so their leave cannot be applied. Check the spelling — it must match column A exactly.`);

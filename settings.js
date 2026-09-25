@@ -77,12 +77,15 @@ function isDate(s) {
 // The serial is unambiguous whatever the cell's display format (m/d/yyyy, d/m/yyyy…), so convert it
 // (epoch 1899-12-30, same as Excel). Typed TEXT like "9/10/2026" stays rejected + warned: that one
 // really is ambiguous (9 Oct or 10 Sep) and a guessed leave switches the wrong days off.
-const SERIAL_RE = /^\d{5}$/;                 // 40000–60000 ≈ 2009–2064; anything else is not a date
+// A cell formatted as date+TIME arrives as a fractional serial (46287.5 = 22 Sep 12:00). Leave is
+// whole days, so the time is dropped. Without this a date-time cell vanished with NO warning
+// (stress test, 2026-09-25): "46287.5" matched neither the serial rule nor DATEISH.
+const SERIAL_RE = /^\d{5}(\.\d+)?$/;         // 40000–60000 ≈ 2009–2064; anything else is not a date
 function leaveDate(s) {
   const t = String(s == null ? '' : s).trim();
   if (isDate(t)) return t;
   if (SERIAL_RE.test(t) && +t >= 40000 && +t <= 60000)
-    return new Date(Date.UTC(1899, 11, 30) + (+t) * 86400000).toISOString().slice(0, 10);
+    return new Date(Date.UTC(1899, 11, 30) + Math.floor(+t) * 86400000).toISOString().slice(0, 10);
   return '';
 }
 
@@ -222,7 +225,7 @@ function parseLeave(rows) {
       // two false warnings would have been WhatsApp'd to the group on every change — the fastest
       // way to teach the team to ignore this alert.
       // A bare number counts as a date attempt too — that is what a Lark date cell looks like here.
-      if ([rawFrom, rawTo].some(x => DATEISH.test(x) || /^\d+$/.test(x))) warnings.push(`planned leave for "${name}" (${at}): "${rawFrom}" - "${rawTo}" is not a valid date pair. Pick the date from the calendar, or type YYYY-MM-DD. This leave is IGNORED.`);
+      if ([rawFrom, rawTo].some(x => DATEISH.test(x) || /^-?\d+(\.\d+)?$/.test(x))) warnings.push(`planned leave for "${name}" (${at}): "${rawFrom}" - "${rawTo}" is not a valid date pair. Pick the date from the calendar, or type YYYY-MM-DD. This leave is IGNORED.`);
       return;
     }
     if (to < from) { warnings.push(`planned leave for "${name}" (${at}): "Leave until" (${to}) is BEFORE "Leave from" (${from}) — IGNORED. Swap them.`); return; }

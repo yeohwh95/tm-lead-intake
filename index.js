@@ -1257,6 +1257,9 @@ const flatRows = rows => rows.map(r => (r || []).map(flat));
 async function readAvailRows(tok){
   const sid = await availSheetId(tok);
   const v = await (await fetch(`${LARK_BASE}/sheets/v2/spreadsheets/${AVAIL_SHEET}/values/${sid}!A1:B60`, { headers: { 'Authorization': 'Bearer ' + tok } })).json();
+  // Lark refuses with HTTP 200 + a non-zero code (e.g. 90215, or a rate limit). Returning [] made a
+  // failed read look like an empty roster to Planned Leave. Throw, so the tick is skipped and logged.
+  if (v && v.code) throw new Error(`availability read refused: code ${v.code} ${String(v.msg || '').slice(0, 80)}`);
   const rows = (v.data && v.data.valueRange && v.data.valueRange.values) || [];
   const out = [];
   rows.forEach((r, i) => { const name = flat(r && r[0]).trim(); if (name) out.push({ name, value: flat(r && r[1]).trim(), row: i + 1 }); });
