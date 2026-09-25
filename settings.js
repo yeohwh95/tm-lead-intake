@@ -70,6 +70,22 @@ function isDate(s) {
   return dt.getUTCFullYear() === y && dt.getUTCMonth() === mo - 1 && dt.getUTCDate() === d;
 }
 
+// A leave cell as the sheet API hands it over → 'YYYY-MM-DD', or '' when it cannot be read safely.
+// 🚨 2026-09-25: when staff type a date, Lark converts the cell to a DATE and the v2 values API
+// returns its serial day number (46287), not text. Amirul's 22–30 Sep leave arrived as
+// 46287 / 46295 and was dropped with no warning — DATEISH needs a separator, a bare number has none.
+// The serial is unambiguous whatever the cell's display format (m/d/yyyy, d/m/yyyy…), so convert it
+// (epoch 1899-12-30, same as Excel). Typed TEXT like "9/10/2026" stays rejected + warned: that one
+// really is ambiguous (9 Oct or 10 Sep) and a guessed leave switches the wrong days off.
+const SERIAL_RE = /^\d{5}$/;                 // 40000–60000 ≈ 2009–2064; anything else is not a date
+function leaveDate(s) {
+  const t = String(s == null ? '' : s).trim();
+  if (isDate(t)) return t;
+  if (SERIAL_RE.test(t) && +t >= 40000 && +t <= 60000)
+    return new Date(Date.UTC(1899, 11, 30) + (+t) * 86400000).toISOString().slice(0, 10);
+  return '';
+}
+
 // "Mon-Sat" / "mon - fri" / "Mon,Tue,Wed" / "1,2,3,4,5,6" → [1..6].
 function parseDays(raw) {
   const s = norm(raw);
@@ -195,16 +211,18 @@ function parseLeave(rows) {
   (rows || []).forEach((row, i) => {
     const name = String((row && row[0]) == null ? '' : row[0]).trim();
     if (!name || BY_LABEL.has(norm(name))) return;                // a setting row, not leave
-    const from = String((row[1] == null ? '' : row[1])).trim();
-    const to = String((row[2] == null ? '' : row[2])).trim();
+    const rawFrom = String((row[1] == null ? '' : row[1])).trim();
+    const rawTo = String((row[2] == null ? '' : row[2])).trim();
     const at = `row ${i + 1}`;
-    if (!from && !to) return;                                     // blank leave row, or some other text row
-    if (!isDate(from) || !isDate(to)) {
+    if (!rawFrom && !rawTo) return;                               // blank leave row, or some other text row
+    const from = leaveDate(rawFrom), to = leaveDate(rawTo);
+    if (!from || !to) {
       // Only complain when the cell LOOKS like a date attempt. "contains a digit" was too loose:
       // the page's own pointer rows ("Written by the bot every 15 minutes") tripped it, and those
       // two false warnings would have been WhatsApp'd to the group on every change — the fastest
       // way to teach the team to ignore this alert.
-      if (DATEISH.test(from) || DATEISH.test(to)) warnings.push(`planned leave for "${name}" (${at}): "${from}" - "${to}" is not a valid date pair. Use YYYY-MM-DD in both cells. This leave is IGNORED.`);
+      // A bare number counts as a date attempt too — that is what a Lark date cell looks like here.
+      if ([rawFrom, rawTo].some(x => DATEISH.test(x) || /^\d+$/.test(x))) warnings.push(`planned leave for "${name}" (${at}): "${rawFrom}" - "${rawTo}" is not a valid date pair. Pick the date from the calendar, or type YYYY-MM-DD. This leave is IGNORED.`);
       return;
     }
     if (to < from) { warnings.push(`planned leave for "${name}" (${at}): "Leave until" (${to}) is BEFORE "Leave from" (${from}) — IGNORED. Swap them.`); return; }
@@ -222,4 +240,4 @@ function a1Range(a1){
   return s.includes(':') ? s : `${s}:${s}`;
 }
 
-module.exports = { norm, isDate, parseDays, parseSettings, parseCampaigns, parseLeave, a1Range, LABELS, DEFAULTS };
+module.exports = { norm, isDate, leaveDate, parseDays, parseSettings, parseCampaigns, parseLeave, a1Range, LABELS, DEFAULTS };

@@ -117,6 +117,15 @@ ok('the page\u2019s own pointer rows are NOT read as leave', lptr.leave.length =
 ok('and produce ZERO warnings', lptr.warnings.length === 0 || (console.log('     ' + lptr.warnings.join('\n     ')), false));
 ok('a real date typo IS still caught', s.parseLeave([['AMIR', '18/09/2026', '21/09/2026']]).warnings.some(w => /not a valid date pair/.test(w)));
 
+// 2026-09-25: a date Lark converted to a DATE cell arrives as its serial number. Amirul's real
+// 22–30 Sep leave came in as 46287 / 46295 and was dropped with NO warning.
+const lser = s.parseLeave([['AMIRUL', 46287, 46295, 'CUTI KAHWIN', '']].map(r => r.map(c => c == null ? '' : String(c))));
+ok('Lark date cells (serials) are read as dates', lser.leave.length === 1 && lser.leave[0].from === '2026-09-22' && lser.leave[0].to === '2026-09-30' && !lser.warnings.length);
+ok('serial + typed ISO can be mixed in one row', s.parseLeave([['JUE', '46287', '2026-09-23']]).leave[0].to === '2026-09-23');
+ok('a bare number that is not a date is WARNED, never silently dropped', s.parseLeave([['JUE', '123', '46295']]).warnings.some(w => /not a valid date pair/.test(w)));
+ok('ambiguous typed text 9/10/2026 is still refused + warned', s.parseLeave([['JUE', '9/10/2026', '9/12/2026']]).warnings.some(w => /not a valid date pair/.test(w)));
+ok('leaveDate edge: serial 46023 = 2026-01-01 (Lark shows it that way)', s.leaveDate('46023') === '2026-01-01');
+
 console.log('\n-- a1Range: Lark rejects a single-cell range --');
 // REGRESSION 2026-09-18: sheetWrite sent "E47" and Lark answered code=90202 "wrong range". The
 // Planned-Leave status write failed silently on its first armed run, and the Available? write - the
