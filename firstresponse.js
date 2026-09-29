@@ -1305,10 +1305,22 @@ async function flush(jid){
     try { await D.waSend(sendTarget(jid, b.phone), chaseAck(lang)); }
     catch(e){ D.log('FR chase ack send err:', String(e.message||e).slice(0,60)); }
     const who = b.phone ? ('+' + b.phone) : jid.slice(0, 22);
+    // WHO has this customer (Benjamin, 29 Sep) — so the group knows exactly who to chase. Capped at
+    // 5s and never fatal: a slow or failed Lark read must not stop the alert.
+    let own = null;
+    if (D.leadOwner && b.phone){
+      try { own = await Promise.race([D.leadOwner(b.phone), new Promise(r => setTimeout(() => r(null), 5000))]); }
+      catch(e){ D.log('FR chase owner lookup err:', String(e.message||e).slice(0,60)); }
+    }
+    const since = own && own.at ? new Date(own.at + 8 * 3600 * 1000).toISOString().slice(11, 16) : '';
+    const ownerLine = own
+      ? `\u{1F454} Assigned to: *${own.name}*${own.phone ? ' (' + own.phone.replace(/^\+?60/, '0') + ')' : ''}${since ? ' since ' + since : ''}\n`
+      : (D.leadOwner && b.phone ? `\u{1F454} Assigned to: _not found in Lark_\n` : '');
     try {
       await D.alertReview(`\u{23F0} *Customer is chasing us*\n\u{1F464} ${who}\n\u{1F4AC} "${String(text).slice(0,120)}"\n`
         + (b.phone ? `\u{1F449} https://wa.me/${b.phone}\n` : '')
-        + `\nThey say nobody has contacted them yet. Whoever has this lead needs to call them today.`);
+        + ownerLine
+        + (own ? `\n${own.name} needs to contact them today.` : `\nThey say nobody has contacted them yet. Whoever has this lead needs to call them today.`));
     } catch(e){ D.log('FR chase alert err:', String(e.message||e).slice(0,60)); }
     frLogEvent('chasing', jid, { has_phone: !!b.phone, cat: 'chasing', phone: b.phone || '',
       want: String(text).slice(0, 120), recordId: null });

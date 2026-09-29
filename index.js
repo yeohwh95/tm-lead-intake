@@ -1711,6 +1711,27 @@ async function larkSearch(body){
   if (j.code !== 0) throw new Error('lark search ' + j.code + ' ' + (j.msg || ''));
   return j.data?.items || [];
 }
+// Who holds this customer RIGHT NOW (Benjamin, 29 Sep: "add assigned sales person is who" on the
+// chasing alert). Newest Lark row for the phone's last 9 digits that has a Salesman. Returns null on
+// no row / no owner / any error — the alert must still go out without it.
+async function leadOwnerByPhone(phone){
+  const d9 = String(phone || '').replace(/\D/g, '').slice(-9);
+  if (d9.length < 9) return null;
+  const items = await larkSearch({
+    filter: { conjunction: 'and', conditions: [{ field_name: 'Phone number', operator: 'contains', value: [d9] }] },
+    sort: [{ field_name: 'Created on', desc: true }],
+  });
+  for (const it of items){
+    const f = it.fields || {};
+    const sm = Array.isArray(f['Salesman']) ? f['Salesman'][0] : null;
+    if (!sm) continue;
+    const staff = STAFF_BY_OPENID[sm.id || ''];
+    const name = staff ? staff.name : repname.canonical(sm.name || '', STAFF_KEYS).name;
+    const at = parseInt(slaFieldText(f['SLA Reassigned At']) || slaFieldText(f['SLA Assigned At']), 10) || 0;
+    return { name, phone: staff ? staff.phone : '', at, status: slaFieldText(f['SLA Status']) };
+  }
+  return null;
+}
 async function slaSweep(){
   if (!sla || !SLA_SWEEP_FROM) return;             // disabled unless a cutoff is set
   const now = Date.now();
@@ -2496,7 +2517,7 @@ setInterval(() => { firstresponse.gateSweep().catch(e => log('FR gate sweep err'
   // boot: a snapshot would keep treating a departed rep as staff, and would treat a NEWLY added rep's
   // own messages as customer leads, until the next deploy.
   const isStaffPhone = p => { const d = String(p || '').replace(/\D/g, ''); return !!d && (!!identity.nameByPhone(STAFF_BY_LAST9, d) || FR_EXTRA_INTERNAL.has(d)); };
-  firstresponse.init({ waSend, assignLeads, larkWriteLead, notifyStaff, sla, getUnavailable, log, isStaffPhone, wooCheckStock, aiClassify, aiClassifyImage, fetchUsername, alertReview, inDistHours: inFRDistHours, inOpenHours: inFROpenHours, deferStaffNotify, hoursLabel,
+  firstresponse.init({ waSend, assignLeads, larkWriteLead, notifyStaff, sla, getUnavailable, log, isStaffPhone, wooCheckStock, aiClassify, aiClassifyImage, fetchUsername, alertReview, leadOwner: leadOwnerByPhone, inDistHours: inFRDistHours, inOpenHours: inFROpenHours, deferStaffNotify, hoursLabel,
     // WHEN a rep will actually pick the lead up, derived from the DISTRIBUTION window — never the
     // operating hours, and never hardcoded (2026-07-30). Tests inject their own.
     nextWindowLabel: () => require('./hours').nextWindowLabel(Date.now(), FR_DIST_DAYS, FR_DIST_START, FR_DIST_END),
