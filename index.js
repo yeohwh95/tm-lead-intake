@@ -16,15 +16,37 @@ const REVIEW_TOKEN     = process.env.REVIEW_TOKEN || '';         // PA WaSender 
 // Returns TRUE only when the group actually received it. The summary window marker advances on
 // that boolean and nothing else: a failed send must leave the window open so the NEXT card
 // absorbs the span, instead of silently skipping it (2026-08-15).
-async function alertReview(text){
+// 🚨 2026-09-29: a customer asking "Boleh dapatkn no SA yg lain?" (4h unanswered) was escalated to the
+// group at 14:29 and LOST to a WaSender 429 — alertReview tried once and gave up, like the 09:32
+// "Anis → OFF" announce the same morning. The TM session is busiest exactly when these alerts matter.
+// Now: one attempt inline (callers are never held up), and a failed one is retried IN THE BACKGROUND
+// at 15s / 45s / 105s. `opts.noRetry` is for callers that run their own retry loop (the announcer),
+// so a message is never sent twice.
+async function _alertReviewOnce(text){
+  const r = await fetch(WASENDER_BASE + '/send-message', { method:'POST',
+    headers:{ 'Authorization':'Bearer '+REVIEW_TOKEN, 'Content-Type':'application/json', 'User-Agent':UA },
+    body: JSON.stringify({ to: REVIEW_GROUP_JID, text }) });
+  if (!r.ok) log('alertReview HTTP ' + r.status);
+  return r;
+}
+async function alertReview(text, opts){
   if (!REVIEW_GROUP_JID || !REVIEW_TOKEN) return false;
-  try {
-    const r = await fetch(WASENDER_BASE + '/send-message', { method:'POST',
-      headers:{ 'Authorization':'Bearer '+REVIEW_TOKEN, 'Content-Type':'application/json', 'User-Agent':UA },
-      body: JSON.stringify({ to: REVIEW_GROUP_JID, text }) });
-    if (!r.ok) log('alertReview HTTP ' + r.status);
-    return !!r.ok;
-  } catch (e) { log('alertReview failed', String(e.message||e)); return false; }
+  let r = null;
+  try { r = await _alertReviewOnce(text); if (r.ok) return true; }
+  catch (e) { log('alertReview failed', String(e.message||e)); }
+  const retryable = !r || r.status === 429 || r.status >= 500;
+  if (retryable && !(opts && opts.noRetry)){
+    const head = String(text).split('\n')[0].slice(0, 60);
+    (async () => {
+      for (const ms of [15000, 30000, 60000]){
+        await new Promise(res => setTimeout(res, ms));
+        try { const x = await _alertReviewOnce(text); if (x.ok){ log('alertReview delivered on retry: ' + head); return; } }
+        catch (e) { log('alertReview retry failed', String(e.message||e)); }
+      }
+      log('🚨 alertReview NOT delivered after 4 tries: ' + head);
+    })();
+  }
+  return false;
 }
 // ---- SLA group digest: buffer routine notices → ONE summary at 12PM + 6PM MYT (no more 1-by-1 spam) ----
 const _fs = require('fs'), _path = require('path');
@@ -312,7 +334,7 @@ async function digestTick(){
       try {
         if (kind === 'summary'){
           const { text, win, backlog } = await buildSummaryCard(hr);
-          const ok = await alertReview(text);
+          const ok = await alertReview(text, { noRetry: true });   // marker logic below owns the retry
           // 🚨 THE MARKER MOVES ONLY ON A CONFIRMED SEND. If the group never received the card,
           // the window stays open and the NEXT report absorbs it. A failed send must never be
           // able to skip a window — that is the whole point of anchoring on the send.
@@ -1187,7 +1209,7 @@ async function sheetAnnounceTick(){
     // logged "announced". TM saw leads keep arriving and no confirmation she was off. Retry with
     // backoff long enough to clear a rate limit, and record the real outcome.
     const text = msg + (availLines.length ? (off.length ? `\n\nCurrently OFF: ${off.join(', ')}` : '\n\nEveryone available ✅') : '');
-    const sent = await cardsched.sendWithRetry(() => alertReview(text), { tries: 4, delays: [15000, 30000, 60000] });
+    const sent = await cardsched.sendWithRetry(() => alertReview(text, { noRetry: true }), { tries: 4, delays: [15000, 30000, 60000] });
     _lastAnnounce = { at: new Date().toISOString(), outcome: sent.ok ? 'announced' : `NOT DELIVERED after ${sent.attempts} tries`, attempts: sent.attempts, avail: availLines.map(x => x.line), settings: settingLines };
     log(sent.ok ? 'sheet change announced:' : '🚨 sheet change NOT delivered after ' + sent.attempts + ' tries:', (availLines.map(x => x.name).join(',') || '-') + ' | settings ' + settingLines.length);
   } catch (e){ log('sheetAnnounceTick err', String(e.message || e).slice(0, 120)); }
