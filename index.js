@@ -1182,9 +1182,14 @@ async function sheetAnnounceTick(){
       log('sheet edits cancelled out — nothing announced'); return;
     }
     const off = Object.keys(availNow || {}).filter(n => availNow[n] === 'NO');
-    await alertReview(msg + (availLines.length ? (off.length ? `\n\nCurrently OFF: ${off.join(', ')}` : '\n\nEveryone available ✅') : ''));
-    _lastAnnounce = { at: new Date().toISOString(), outcome: 'announced', avail: availLines.map(x => x.line), settings: settingLines };
-    log('sheet change announced:', (availLines.map(x => x.name).join(',') || '-') + ' | settings ' + settingLines.length);
+    // 🚨 2026-09-29: "Anis → OFF" was LOST. The 09:32 announce hit WaSender 429 (the same session was
+    // mid-way through the 9am lead DMs) and alertReview gave up after ONE try, while this line still
+    // logged "announced". TM saw leads keep arriving and no confirmation she was off. Retry with
+    // backoff long enough to clear a rate limit, and record the real outcome.
+    const text = msg + (availLines.length ? (off.length ? `\n\nCurrently OFF: ${off.join(', ')}` : '\n\nEveryone available ✅') : '');
+    const sent = await cardsched.sendWithRetry(() => alertReview(text), { tries: 4, delays: [15000, 30000, 60000] });
+    _lastAnnounce = { at: new Date().toISOString(), outcome: sent.ok ? 'announced' : `NOT DELIVERED after ${sent.attempts} tries`, attempts: sent.attempts, avail: availLines.map(x => x.line), settings: settingLines };
+    log(sent.ok ? 'sheet change announced:' : '🚨 sheet change NOT delivered after ' + sent.attempts + ' tries:', (availLines.map(x => x.name).join(',') || '-') + ' | settings ' + settingLines.length);
   } catch (e){ log('sheetAnnounceTick err', String(e.message || e).slice(0, 120)); }
 }
 setInterval(pollAvailability, 2 * 60 * 1000);
