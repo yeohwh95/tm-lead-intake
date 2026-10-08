@@ -60,7 +60,7 @@ const WHY = {
   awaiting_model: 'greeted, waiting for them to say which bike',
   chasing:        '🚨 already our customer, chasing a salesperson who never contacted them',
   hiring:         'job enquiry, passed to the group (no HR number set up yet)',
-  workshop:       'parts/service enquiry, passed to the group (no workshop number set up yet)',
+  workshop:       'parts/service enquiry, given the 3 workshop numbers',
   other:          'unrecognised outcome (see ⚠️ above)',
 };
 

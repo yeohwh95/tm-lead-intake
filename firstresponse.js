@@ -1100,22 +1100,45 @@ const ADMIN_COOLDOWN_MS = Number(process.env.TM_ADMIN_COOLDOWN_MS || 24 * 3600 *
 // Root cause: the workshop/admin branches return BEFORE `state.greeted` is stamped, so the very next
 // message was a brand-new conversation. Stamping `greeted` is NOT the fix — that turns on the 7-day
 // one-touch guard and would swallow the same customer saying "nak beli motor baru" tomorrow.
-// So a separate, narrow memory: for HANDOFF_QUIET_MS after a hand-off, a thank-you / ok / emoji, or
-// (after a workshop hand-off) another service question, gets silence. Anything with a buying,
-// selling, loan or test-ride signal goes through the normal flow exactly as before — never lose a buyer.
+// So a separate, narrow memory: for HANDOFF_QUIET_MS after a hand-off, a PURE acknowledgement
+// ("Tq", "ok bos", 🙏) gets silence. Nothing else is silenced — every other line goes through the
+// normal flow exactly as it would for any customer. A repeat WORKSHOP verdict does not resend the
+// links; it tells the group once per hand-off (see the workshop branch).
+// 🚨 v1 of this (same day) also silenced "more service talk" via a service-word list plus a buy-word
+// allowlist. The attack round broke it with 74 phrasings: "boleh walk in tengok motor?", "motor lama
+// saya dah rosak, nak ganti", "nak ambil xmax" — buyers and trade-ins with no word on the allowlist
+// went silent, no reply, no Lark row. Malay buying talk has no closed vocabulary. Losing a buyer
+// costs more than one extra reply, so the window is acknowledgements ONLY. Do not re-add word lists.
 const HANDOFF_QUIET_MS = Number(process.env.TM_HANDOFF_QUIET_MS || 24 * 3600 * 1000);
-const RE_ACK_ONLY = /^[\s!.,~?🙏👍😊🙂👌❤️♥️🤝😁😀🫡]*(?:(?:ok(?:ay|ey|k|ie)?|noted|tq(?:vm|sm)?|ty|thx|thanks?(?:\s*(?:you|u))?|terima\s*kasih|trima\s*kasih|tenkiu|tengkiu|baik(?:lah)?|alright|orait|sure|set|mantap|nice|good|sip|ya|ye|yes|yup|okla|ok\s*la|noted\s*with\s*thanks|bos+|boss|bro|bang|tuan|sis|banyak(?:2|\s*banyak)?|sangat|ya+)[\s!.,~?🙏👍😊🙂👌❤️♥️🤝😁😀🫡]*)+$/i;
-const RE_WORKSHOP_WORDS = /servis|service|repair|baiki|bengkel|workshop|spare\s?parts?|\bparts?\b|minyak\s*hitam|tukar\s*minyak|oil\s*change|tayar|tyre|tire|brek|brake|walk\s*-?\s*in|rosak|problem\s*enjin|enjin|chain|rantai/i;
-const RE_BUY_SIGNAL = /\bbeli\b|\bbuy\b|harga|price|berapa|\bbrp\b|how much|stok|stock|ready|available|ansuran|bulanan|deposit|\bdp\b|loan|jual|sell|trade|tukar\s*motor|test\s*ride|booking|book\b|baru|new\s+bike/i;
+// An ack must contain a real ack word; honorifics may ride along ("ok bos", "tq bang") but alone
+// ("bro", "boss??") they are a ping, not a thank-you. Any "?" means a question — never silenced.
+const ACK_WORD = /^(?:o+k+(?:a+y+|e+y*|i+e|la+h?)?|k+|noted|tq+(?:vm|sm)?|ty|thx|thanks?|thank|terima|trima|kasih|tenkiu|tengkiu|baik(?:lah)?|alright|orait|sure|mantap|nice|good|sip|ya+|ye+|yes+|yup)$/i;
+// Words that may ride along with an ack word but never stand alone: honorifics, intensifiers, and
+// the closed "I'll contact them myself" filler ("Tq boss, nanti saya call", "ok sy wasap dorang").
+// 🚨 Closed list on purpose: ANY word not here sends the line through the normal flow.
+const ACK_FILLER = /^(?:bos+|boss|bro|bang|tuan|sis|abg|abang|kak|cik|encik|you|u|very|much|so|a|lot|banyak(?:2)?|sangat|with|nanti|saya|sy|aku|i|will|call|calls|wasap|whatsapp|wassap|ws|contact|text|dorang|diorang|depa|mereka|them|je|jer|la|lah|dulu|ya|ye)$/i;
+function isPureAck(text){
+  const t = String(text || '').trim();
+  if (!t) return true;
+  if (t.includes('?')) return false;
+  const words = t.replace(/[\p{Extended_Pictographic}\p{Emoji_Modifier}\uFE0F\u200D\s!.,~]+/gu, ' ').trim().split(/\s+/).filter(Boolean);
+  if (!words.length) return true;                                   // emoji / punctuation only
+  if (words.length > 8) return false;
+  let ack = 0;
+  for (const w of words){ if (ACK_WORD.test(w)) ack++; else if (!ACK_FILLER.test(w)) return false; }
+  return ack > 0;
+}
 function handoffQuiet(jid, cat, text, hasImage, now){
   const h = (state.handoff || {})[jid];
   if (!h || now - (h.ts || 0) >= HANDOFF_QUIET_MS || hasImage) return false;
   if (cat === 'sell' || cat === 'loan' || cat === 'testride' || cat === 'chasing' || cat === 'hiring') return false;
-  const t = String(text || '').trim();
-  if (RE_BUY_SIGNAL.test(t)) return false;
-  if (!t || RE_ACK_ONLY.test(t)) return true;                       // "Tq" / "ok bos" / 🙏
-  if (h.kind === 'workshop' && (cat === 'workshop' || RE_WORKSHOP_WORDS.test(t))) return true;   // "Nk servis"
-  return false;
+  return isPureAck(text);
+}
+// A repeat workshop question inside the window: the customer already has the links. Returns the
+// hand-off record when that applies (caller alerts the group once), else null.
+function repeatWorkshop(jid, now){
+  const h = (state.handoff || {})[jid];
+  return (h && h.kind === 'workshop' && now - (h.ts || 0) < HANDOFF_QUIET_MS) ? h : null;
 }
 function markHandoff(jid, kind, now){
   state.handoff = state.handoff || {};
@@ -1133,7 +1156,8 @@ const hiringAck = (lang) => lang === 'en'
   : `Terima kasih kerana berminat untuk sertai kami! \u{1F64F} Saya dah hantar mesej tuan kepada team kami, mereka akan hubungi tuan.`;
 // The three workshops, in TM's own names. Env-overridable (`TM_WORKSHOP_KAPAR` etc.) so a changed
 // number never needs a code change; the defaults are what TM posted on 8 Oct.
-const waDigits = (v, d) => String(v || d).replace(/\D/g, '');
+// Env override: digits only, a leading 0 becomes 60, anything under 10 digits falls back to the default.
+const waDigits = (v, d) => { let x = String(v || '').replace(/\D/g, ''); if (x.startsWith('0')) x = '6' + x; return x.length >= 10 ? x : d; };
 const WORKSHOPS = [
   { key: 'kapar', name: 'WORKSHOP TMM KAPAR',             phone: waDigits(process.env.TM_WORKSHOP_KAPAR, '60105491324') },
   { key: 'klang', name: 'WORKSHOP TMM KLANG',             phone: waDigits(process.env.TM_WORKSHOP_KLANG, '60127974828') },
@@ -1141,7 +1165,7 @@ const WORKSHOPS = [
 ];
 // "Is this a Honda?" — the brand, or a model name that is only ever a Honda. Deliberately NOT the
 // ambiguous ones (`beat`, `dash`, `wave` alone are ordinary words).
-const RE_HONDA = /\bhonda\b|\brs\s?150|\brsx\b|\badv\s?1[56]0|\bvario\b|\bpcx\b|\bcbr|\bcrf|\bnss\b|\bforza\b|\bex\s?5\b|\bwave\s?\d|\bcb\s?\d{3}|\bdash\s?125|\bbeat\s?110|\bicon\b|\bscoopy\b|\bstylo\b/i;
+const RE_HONDA = /\bhonda(?![a-z])|\brs-?x(?:150)?(?![a-z])|\brs\s?150r?(?![a-z])|\bx-?adv(?![a-z])|\badv\s?(?:1[56]0|350)(?![a-z])|\bvario(?:\s?1[26]0)?(?![a-z])|\bpcx(?:\s?1[56]0)?(?![a-z])|\bcbr|\bcrf|\bnss(?![a-z])|\bforza(?![a-z])|\bex-?\s?5(?![a-z0-9])|\bwave\s?(?:\d|alpha)|\bcb\s?\d{3}|\bdash\s?125|\bbeat\s?110|\bicon(?![a-z])|\bscoopy(?![a-z])|\bstylo(?![a-z])|\bfuture\s?125|\bsuper\s?cub|\bcub\s?1[12]0|\brebel(?![a-z])/i;
 const workshopOrder = (text) => RE_HONDA.test(String(text || ''))
   ? [WORKSHOPS[2], WORKSHOPS[0], WORKSHOPS[1]] : WORKSHOPS.slice();
 const workshopList = (text) => workshopOrder(text).map(w => `\u{1F527} ${w.name}\n\u{1F517} https://wa.me/${w.phone}`).join('\n\n');
@@ -1244,15 +1268,15 @@ async function flush(jid){
   // bike?" is not a bike — it used to be collapsed into `product` and assigned a SALES rep.
   const notAnAnswer = (cat === 'admin' || cat === 'workshop');
 
-  // After a hand-off, a thank-you or another service line gets silence — BEFORE the qualify block,
-  // because inside it a "Tq" counts as a vague answer and triggers the buy-or-sell question.
+  // After a hand-off, a pure thank-you gets silence — BEFORE the qualify block, because inside it a
+  // "Tq" counts as a vague answer and triggers the buy-or-sell question.
   if (handoffQuiet(jid, cat, text, b.hasImage, now)){
     const h = state.handoff[jid];
-    D.log(`FR 🤫 after ${h.kind} hand-off, staying quiet: "${String(text).slice(0, 40)}" (${jid.slice(0,22)})`);
-    if (h.kind === 'workshop' && cat === 'workshop')
-      frLogEvent('workshop', jid, { has_phone: !!b.phone, cat, phone: b.phone || '', want: String(text).slice(0, 120), recordId: null, note: 'repeat_after_handoff' });
-    else
-      frLogEvent('repeat', jid, { has_phone: !!b.phone, cat, phone: b.phone || '', want: String(text).slice(0, 120), recordId: null, note: 'after_handoff' });
+    D.log(`FR 🤫 after ${h.kind} hand-off, ack only, staying quiet: "${String(text).slice(0, 40)}" (${jid.slice(0,22)})`);
+    // Logged under the hand-off's own outcome (two LITERAL calls — leadsummary_test greps them), so
+    // the chat stays in the workshop/admin bucket instead of "came back, got silence".
+    if (h.kind === 'workshop') frLogEvent('workshop', jid, { has_phone: !!b.phone, cat, phone: b.phone || '', want: String(text).slice(0, 120), recordId: null, note: 'after_handoff' });
+    else                       frLogEvent('admin_handoff', jid, { has_phone: !!b.phone, cat, phone: b.phone || '', want: String(text).slice(0, 120), recordId: null, note: 'after_handoff' });
     return;
   }
   if (q && !notAnAnswer && now - q.ts < PENDING_MODEL_MS){
@@ -1392,6 +1416,23 @@ async function flush(jid){
   // call). Nobody is DM'd; the group still sees it. The chat is then remembered as handed off so a
   // "Tq" does not restart the sales funnel — see handoffQuiet().
   if (cat === 'hiring' || cat === 'workshop'){
+    const again = cat === 'workshop' ? repeatWorkshop(jid, now) : null;
+    if (again){
+      // Already has the 3 links. Don't send them again; make sure a human sees it ONCE per hand-off —
+      // "dah call workshop takde orang angkat" must reach someone, not vanish.
+      D.log(`FR 🔧 repeat workshop question within window — links not resent (${jid.slice(0,22)})`);
+      if (!again.repeatAlerted){
+        again.repeatAlerted = true; persist();                     // BEFORE the await
+        const who0 = b.phone ? ('+' + b.phone) : jid.slice(0, 22);
+        try {
+          await D.alertReview(`\u{1F527} *Customer is still asking about service*\n\u{1F464} ${who0}\n`
+            + `\u{1F4AC} "${String(text).slice(0,120)}"\n` + (b.phone ? `\u{1F449} https://wa.me/${b.phone}\n` : '')
+            + `\nThey were already given the 3 workshop numbers. Please check they have been helped.`);
+        } catch(e){ D.log('FR workshop repeat alert err:', String(e.message||e).slice(0,60)); }
+      }
+      frLogEvent('workshop', jid, { has_phone: !!b.phone, cat, phone: b.phone || '', want: String(text).slice(0, 120), recordId: null, note: 'repeat_after_handoff' });
+      return;
+    }
     if (cat === 'workshop'){ markHandoff(jid, 'workshop', now); persist(); }   // BEFORE any await
     try { await D.waSend(sendTarget(jid, b.phone), cat === 'hiring' ? hiringAck(lang) : workshopAck(lang, text)); }
     catch(e){ D.log('FR ' + cat + ' ack send err:', String(e.message||e).slice(0,60)); }
