@@ -1116,7 +1116,12 @@ const ACK_WORD = /^(?:o+k+(?:a+y+|e+y*|i+e|la+h?)?|k+|noted|tq+(?:vm|sm)?|ty|thx
 // Words that may ride along with an ack word but never stand alone: honorifics, intensifiers, and
 // the closed "I'll contact them myself" filler ("Tq boss, nanti saya call", "ok sy wasap dorang").
 // 🚨 Closed list on purpose: ANY word not here sends the line through the normal flow.
-const ACK_FILLER = /^(?:bos+|boss|bro|bang|tuan|sis|abg|abang|kak|cik|encik|you|u|very|much|so|a|lot|banyak(?:2)?|sangat|with|nanti|saya|sy|aku|i|will|call|calls|wasap|whatsapp|wassap|ws|contact|text|dorang|diorang|depa|mereka|them|je|jer|la|lah|dulu|ya|ye)$/i;
+const ACK_FILLER = /^(?:bos+|boss|bro|bang|tuan|sis|abg|abang|kak|cik|encik|you|u|very|much|so|a|lot|banyak(?:2)?|sangat|with|nanti|i|will|dorang|diorang|depa|mereka|them|workshop|admin|je|jer|la|lah|dulu|ya|ye)$/i;
+// Contact verbs / first person only count when the customer says THEY will contact the workshop
+// ("ok sy wasap dorang"). "ok call saya" / "ok you call" is a request to US — normal flow.
+const ACK_CONTACT = /^(?:saya|sy|aku|call|calls|wasap|whatsapp|wassap|ws|contact|text)$/i;
+const ACK_THEM = /^(?:dorang|diorang|depa|mereka|them|workshop|admin)$/i;
+const ACK_TO_US = /^(?:me|you|u|kami|kitorang)$/i;
 function isPureAck(text){
   const t = String(text || '').trim();
   if (!t) return true;
@@ -1124,10 +1129,21 @@ function isPureAck(text){
   const words = t.replace(/[\p{Extended_Pictographic}\p{Emoji_Modifier}\uFE0F\u200D\s!.,~]+/gu, ' ').trim().split(/\s+/).filter(Boolean);
   if (!words.length) return true;                                   // emoji / punctuation only
   if (words.length > 8) return false;
-  let ack = 0;
-  for (const w of words){ if (ACK_WORD.test(w)) ack++; else if (!ACK_FILLER.test(w)) return false; }
+  let ack = 0, contact = false, them = false;
+  for (const w of words){
+    if (ACK_WORD.test(w)) ack++;
+    else if (ACK_CONTACT.test(w)) contact = true;
+    else if (ACK_THEM.test(w)) them = true;
+    else if (ACK_FILLER.test(w)) continue;
+    else return false;
+  }
+  // "you"/"u" are fine in "thank you" but not next to a contact verb ("ok you call").
+  if (contact && (!them || words.some(w => ACK_TO_US.test(w) && !/^(?:thank|thanks)$/i.test(words[words.indexOf(w) - 1] || '')))) return false;
   return ack > 0;
 }
+const PING_WORD = /^(?:h+i+|hai|h?e+l+o+|halo|helo|hey|salam|assalamu?alaikum|pagi|morning|petang|boss?|bro|tuan|sis|bang)$/i;
+const isPing = t => { const w = String(t || '').replace(/[\p{Extended_Pictographic}\p{Emoji_Modifier}\uFE0F\u200D\s!.,?~]+/gu, ' ').trim().split(/\s+/).filter(Boolean);
+  return w.length > 0 && w.length <= 3 && w.every(x => PING_WORD.test(x)); };
 function handoffQuiet(jid, cat, text, hasImage, now){
   const h = (state.handoff || {})[jid];
   if (!h || now - (h.ts || 0) >= HANDOFF_QUIET_MS || hasImage) return false;
@@ -1287,7 +1303,11 @@ async function flush(jid){
     else                       frLogEvent('admin_handoff', jid, { has_phone: !!b.phone, cat, phone: b.phone || '', want: String(text).slice(0, 120), recordId: null, note: 'after_handoff' });
     return;
   }
-  const vagueAfterHandoff = !!(q && q.afterHandoff && VAGUE(text) && !b.hasImage);
+  // Only a closed PING list ("Hello?", "Hi", "salam boss"), only inside the 24h hand-off window.
+  // 🚨 Not VAGUE(): that treats any short line without a known bike word as a greeting, and the
+  // round-2 attack silenced 19/23 short real answers with it ("R15", "368", "harga berapa?", "Cash").
+  const hq = (state.handoff || {})[jid];
+  const vagueAfterHandoff = !!(q && q.afterHandoff && hq && now - (hq.ts || 0) < HANDOFF_QUIET_MS && isPing(text) && !b.hasImage);
   if (q && !notAnAnswer && !vagueAfterHandoff && now - q.ts < PENDING_MODEL_MS){
     // ── They answered something we asked for ──────────────────────────────────────────────────
     // phase 'detail' = the off-hours qualification (model + cash/loan), lead ALREADY parked.

@@ -151,7 +151,7 @@ const SALES = /berminat motor apa|Which bike are you interested|nak \*beli\* mot
 
   console.log('\npure acks stay silent, pings do not');
   for (const a of ['ok bos', 'terima kasih tuan 🙏', '👍', 'noted with thanks', 'yes', 'Thank you very much', 'thank u so much',
-                   'thanks a lot', 'Tq 🙏🏻', '👍🏻', 'Okeyy', 'k', 'Tq boss, nanti saya call', 'ok sy wasap dorang']){
+                   'thanks a lot', 'Tq 🙏🏻', '👍🏻', 'Okeyy', 'k', 'ok sy wasap dorang', 'ok nanti call workshop']){
     c = fresh(); await say(c, 'Morning boss, klu nk service zontes boleh walk in?');
     await say(c, a); ok(`"${a}" after hand-off → silent`, sent.length === 0 && reviewed.length === 0);
   }
@@ -201,6 +201,31 @@ const SALES = /berminat motor apa|Which bike are you interested|nak \*beli\* mot
   r = await say(c, 'nak ambik xmax');
   ok('a bike named after admin → still a lead', larkRows.length === 1);
   aiOverride = {};
+
+
+  console.log('\nround 2: after a mid-qualify hand-off, a SHORT real answer is still the answer (same as no hand-off)');
+  const SHORT = ['R15', 'Y16', '368', 'RS150', 'nak beli', 'harga berapa?', 'ada stok?', 'yg tu', 'itu', 'Cash', 'jual', 'beli', 'xmax'];
+  let d2 = 0;
+  for (const kind of ['workshop', 'admin']){
+    for (const a of SHORT){
+      aiOverride = { 'Morning': 'greeting', 'zontes 368g v1 problem, boleh troubleshoot ke?': 'workshop', 'tukar nama motor berapa kos': 'admin' };
+      const c0 = fresh(); larkRows = [];
+      await say(c0, 'Morning'); await say(c0, a); const r0 = sent.length > 0, l0 = larkRows.length;
+      const c1 = fresh();
+      await say(c1, 'Morning'); await say(c1, kind === 'workshop' ? 'zontes 368g v1 problem, boleh troubleshoot ke?' : 'tukar nama motor berapa kos');
+      larkRows = []; await say(c1, a); const r1 = sent.length > 0, l1 = larkRows.length;
+      if (r0 !== r1 || l0 !== l1){ d2++; console.log(`     ≠ ${kind} "${a}" control reply=${r0} lark=${l0} | after reply=${r1} lark=${l1}`); }
+    }
+  }
+  aiOverride = {};
+  ok(`🚨 0 of ${SHORT.length * 2} short answers differ after a mid-qualify hand-off`, d2 === 0);
+
+  console.log('\nround 2: "call me" is a request to us, not a thank-you');
+  for (const a of ['ok call saya', 'ok whatsapp saya', 'ok contact saya', 'ya text saya', 'ok you call', 'Tq boss, nanti saya call']){
+    c = fresh(); await say(c, 'Morning boss, klu nk service zontes boleh walk in?');
+    const c0 = fresh(); await say(c0, a); const r0 = sent.length > 0;
+    await say(c, a); ok(`"${a}" after hand-off → handled like a fresh customer (not silenced as an ack)`, (sent.length > 0) === r0);
+  }
 
   console.log('\nnothing changes without a hand-off');
   c = fresh();
