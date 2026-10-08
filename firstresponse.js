@@ -1129,8 +1129,12 @@ function isPureAck(text){
   const words = t.replace(/[\p{Extended_Pictographic}\p{Emoji_Modifier}\uFE0F\u200D\s!.,~]+/gu, ' ').trim().split(/\s+/).filter(Boolean);
   if (!words.length) return true;                                   // emoji / punctuation only
   if (words.length > 8) return false;
-  let ack = 0, contact = false, them = false;
+  let ack = 0, contact = false, them = false, verbSeen = false;
   for (const w of words){
+    // "ok workshop call saya" / "dorang call saya": first person AFTER a contact verb = the customer
+    // is waiting to BE called, and nobody was asked to. Normal flow. ("ok sy wasap dorang" — sy first — stays an ack.)
+    if (verbSeen && /^(?:saya|sy|aku|me)$/i.test(w)) return false;
+    if (/^(?:call|calls|wasap|whatsapp|wassap|ws|contact|text)$/i.test(w)) verbSeen = true;
     if (ACK_WORD.test(w)) ack++;
     else if (ACK_CONTACT.test(w)) contact = true;
     else if (ACK_THEM.test(w)) them = true;

@@ -221,7 +221,8 @@ const SALES = /berminat motor apa|Which bike are you interested|nak \*beli\* mot
   ok(`🚨 0 of ${SHORT.length * 2} short answers differ after a mid-qualify hand-off`, d2 === 0);
 
   console.log('\nround 2: "call me" is a request to us, not a thank-you');
-  for (const a of ['ok call saya', 'ok whatsapp saya', 'ok contact saya', 'ya text saya', 'ok you call', 'Tq boss, nanti saya call']){
+  for (const a of ['ok call saya', 'ok whatsapp saya', 'ok contact saya', 'ya text saya', 'ok you call', 'Tq boss, nanti saya call',
+                   'ok workshop call saya', 'ok dorang call saya', 'tq workshop contact saya', 'ya dorang call saya nanti', 'ok bos, admin whatsapp saya']){
     c = fresh(); await say(c, 'Morning boss, klu nk service zontes boleh walk in?');
     const c0 = fresh(); await say(c0, a); const r0 = sent.length > 0;
     await say(c, a); ok(`"${a}" after hand-off → handled like a fresh customer (not silenced as an ack)`, (sent.length > 0) === r0);
