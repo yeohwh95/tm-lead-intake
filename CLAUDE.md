@@ -2,6 +2,27 @@
 
 WhatsApp lead → AI extract → Lark CRM + notify the assigned salesperson. **LIVE.**
 
+## 🔧 WORKSHOP NUMBERS + "Tq" AFTER A HAND-OFF — 2026-10-08 (branch `workshop-route-2026-10-08`, NOT deployed)
+
+**(3)** TM sent 3 workshop numbers (Kapar 60105491324 · Klang 60127974828 · Honda Impian X Kapar
+60143593259; env `TM_WORKSHOP_KAPAR/KLANG/HONDA`). Benjamin chose **customer picks**: the workshop reply
+lists all three links (Honda bike ⇒ Honda Impian first). **Nobody is DM'd**, so the reply no longer says
+"saya dah hantar mesej" — the old holding reply promised a hand-off that never happened.
+
+**(4)** Real chat +60123698855, 6 Oct 11:34: service question → workshop reply → **"Tq" got the SALES
+greeting** → "Nk servis" got "nak beli atau jual?". 🔑 **Root cause: the workshop and admin branches
+return BEFORE `state.greeted` is stamped, so the next message was a brand-new conversation.** Stamping
+`greeted` is NOT the fix (the 7-day guard would then swallow "nak beli motor baru"). Instead
+`state.handoff` remembers the hand-off for `TM_HANDOFF_QUIET_MS` (24h): thanks/ok/emoji, and (after
+workshop) more service talk, get silence; anything with a buy/sell/loan/test-ride signal runs the normal
+flow. Admin had the identical hole and gets the same memory. `workshop` also joins `admin` as
+`notAnAnswer`, so "nak servis" in reply to "which bike?" no longer assigns a sales rep.
+
+Proof: `workshop_handoff_test.js` 32/32 (13/32 on the old file); suite 1361 → 1393, nothing else moved.
+Replay of the 5 real hand-off chats in the box-66 capture (3–6 Oct) + group alerts: the old-code
+simulation reproduces the live replies word for word; new code fixes the 6 Oct chat, others unchanged
+apart from the new workshop text.
+
 ## 🚨 TWO FIXES, 21 Sep — one Harith reported, one nobody could see
 
 Harith in the project group: *"auto bot salah assign kepada admin"*. The reported bug was real. The

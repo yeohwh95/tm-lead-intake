@@ -1077,9 +1077,10 @@ async function gateSweep(){
 // no SLA clock for admin (it is not a sales lead), and the customer is told BOTH that admin will
 // contact them AND the number they can use themselves.
 //
-// 🚨 `workshop` is deliberately NOT a category yet. TM named it but never sent a contact, and routing
-// to a destination that does not exist is worse than leaving those enquiries where they are. Add the
-// category and the number in the SAME change, never one without the other.
+// 🚨 `workshop` (2026-10-08): TM sent the three workshop numbers in the project group and Benjamin
+// chose CUSTOMER PICKS — the customer is given all three links and contacts the nearest one. Nobody
+// is DM'd, so the reply must never say "saya dah hantar mesej" (the old holding reply did, while no
+// number existed — a promise nobody was told about). Honda bikes see Honda Impian first.
 //
 // WHY THIS EXISTS AT ALL (2026-08-21, +601127171062): "Nk tnye berapa kos nk tukar nama motor sikal
 // ye tuan" — a plain, readable question. The regex had no rule for it and the LLM had no category to
@@ -1093,6 +1094,35 @@ const ADMIN_DISPLAY = process.env.TM_ADMIN_DISPLAY  || '+60 11-1666 1324';
 // (the 7-day re-greet guard would otherwise swallow it — that guard is for SALES touches).
 const ADMIN_COOLDOWN_MS = Number(process.env.TM_ADMIN_COOLDOWN_MS || 24 * 3600 * 1000);
 
+// ---------- AFTER A HAND-OFF, DON'T START SELLING (2026-10-08) -----------------------------------
+// Real chat, +60123698855, 6 Oct: "klu nk service zontes boleh walk in?" → workshop reply ✅ →
+// "Tq" → the SALES greeting ("berminat motor apa ya?") → "Nk servis" → "nak beli atau jual?".
+// Root cause: the workshop/admin branches return BEFORE `state.greeted` is stamped, so the very next
+// message was a brand-new conversation. Stamping `greeted` is NOT the fix — that turns on the 7-day
+// one-touch guard and would swallow the same customer saying "nak beli motor baru" tomorrow.
+// So a separate, narrow memory: for HANDOFF_QUIET_MS after a hand-off, a thank-you / ok / emoji, or
+// (after a workshop hand-off) another service question, gets silence. Anything with a buying,
+// selling, loan or test-ride signal goes through the normal flow exactly as before — never lose a buyer.
+const HANDOFF_QUIET_MS = Number(process.env.TM_HANDOFF_QUIET_MS || 24 * 3600 * 1000);
+const RE_ACK_ONLY = /^[\s!.,~?🙏👍😊🙂👌❤️♥️🤝😁😀🫡]*(?:(?:ok(?:ay|ey|k|ie)?|noted|tq(?:vm|sm)?|ty|thx|thanks?(?:\s*(?:you|u))?|terima\s*kasih|trima\s*kasih|tenkiu|tengkiu|baik(?:lah)?|alright|orait|sure|set|mantap|nice|good|sip|ya|ye|yes|yup|okla|ok\s*la|noted\s*with\s*thanks|bos+|boss|bro|bang|tuan|sis|banyak(?:2|\s*banyak)?|sangat|ya+)[\s!.,~?🙏👍😊🙂👌❤️♥️🤝😁😀🫡]*)+$/i;
+const RE_WORKSHOP_WORDS = /servis|service|repair|baiki|bengkel|workshop|spare\s?parts?|\bparts?\b|minyak\s*hitam|tukar\s*minyak|oil\s*change|tayar|tyre|tire|brek|brake|walk\s*-?\s*in|rosak|problem\s*enjin|enjin|chain|rantai/i;
+const RE_BUY_SIGNAL = /\bbeli\b|\bbuy\b|harga|price|berapa|\bbrp\b|how much|stok|stock|ready|available|ansuran|bulanan|deposit|\bdp\b|loan|jual|sell|trade|tukar\s*motor|test\s*ride|booking|book\b|baru|new\s+bike/i;
+function handoffQuiet(jid, cat, text, hasImage, now){
+  const h = (state.handoff || {})[jid];
+  if (!h || now - (h.ts || 0) >= HANDOFF_QUIET_MS || hasImage) return false;
+  if (cat === 'sell' || cat === 'loan' || cat === 'testride' || cat === 'chasing' || cat === 'hiring') return false;
+  const t = String(text || '').trim();
+  if (RE_BUY_SIGNAL.test(t)) return false;
+  if (!t || RE_ACK_ONLY.test(t)) return true;                       // "Tq" / "ok bos" / 🙏
+  if (h.kind === 'workshop' && (cat === 'workshop' || RE_WORKSHOP_WORDS.test(t))) return true;   // "Nk servis"
+  return false;
+}
+function markHandoff(jid, kind, now){
+  state.handoff = state.handoff || {};
+  for (const k of Object.keys(state.handoff)) if (now - (state.handoff[k].ts || 0) >= HANDOFF_QUIET_MS) delete state.handoff[k];
+  state.handoff[jid] = { ts: now, kind };
+}
+
 // Deliberately does NOT promise a time - we do not know when the rep will call, and a promise the
 // shop cannot keep is exactly what put this customer here in the first place.
 const chaseAck = (lang) => lang === 'en'
@@ -1101,9 +1131,24 @@ const chaseAck = (lang) => lang === 'en'
 const hiringAck = (lang) => lang === 'en'
   ? `Thanks for your interest in joining us! \u{1F64F} I've passed your message to our team - they'll get back to you.`
   : `Terima kasih kerana berminat untuk sertai kami! \u{1F64F} Saya dah hantar mesej tuan kepada team kami, mereka akan hubungi tuan.`;
-const workshopAck = (lang) => lang === 'en'
-  ? `Thanks! \u{1F64F} For parts, service and repair our workshop team handles that - I've passed your message to them.`
-  : `Terima kasih tuan! \u{1F64F} Untuk parts, servis & repair, team workshop kami yang uruskan - saya dah hantar mesej tuan kepada mereka.`;
+// The three workshops, in TM's own names. Env-overridable (`TM_WORKSHOP_KAPAR` etc.) so a changed
+// number never needs a code change; the defaults are what TM posted on 8 Oct.
+const waDigits = (v, d) => String(v || d).replace(/\D/g, '');
+const WORKSHOPS = [
+  { key: 'kapar', name: 'WORKSHOP TMM KAPAR',             phone: waDigits(process.env.TM_WORKSHOP_KAPAR, '60105491324') },
+  { key: 'klang', name: 'WORKSHOP TMM KLANG',             phone: waDigits(process.env.TM_WORKSHOP_KLANG, '60127974828') },
+  { key: 'honda', name: 'WORKSHOP HONDA IMPIAN X KAPAR',  phone: waDigits(process.env.TM_WORKSHOP_HONDA, '60143593259') },
+];
+// "Is this a Honda?" — the brand, or a model name that is only ever a Honda. Deliberately NOT the
+// ambiguous ones (`beat`, `dash`, `wave` alone are ordinary words).
+const RE_HONDA = /\bhonda\b|\brs\s?150|\brsx\b|\badv\s?1[56]0|\bvario\b|\bpcx\b|\bcbr|\bcrf|\bnss\b|\bforza\b|\bex\s?5\b|\bwave\s?\d|\bcb\s?\d{3}|\bdash\s?125|\bbeat\s?110|\bicon\b|\bscoopy\b|\bstylo\b/i;
+const workshopOrder = (text) => RE_HONDA.test(String(text || ''))
+  ? [WORKSHOPS[2], WORKSHOPS[0], WORKSHOPS[1]] : WORKSHOPS.slice();
+const workshopList = (text) => workshopOrder(text).map(w => `\u{1F527} ${w.name}\n\u{1F517} https://wa.me/${w.phone}`).join('\n\n');
+const workshopAck = (lang, text) => (lang === 'en'
+  ? `Thanks! \u{1F64F} Parts, service and repair are handled by our workshop team. Please WhatsApp the workshop nearest to you:\n\n`
+  : `Terima kasih tuan! \u{1F64F} Untuk parts, servis & repair, team workshop kami yang uruskan. Boleh terus WhatsApp workshop yang paling dekat dengan tuan:\n\n`)
+  + workshopList(text);
 const adminAck = (lang) => (lang === 'en'
   ? `Thank you! \u{1F64F} Ownership transfer / insurance / roadtax is handled by our admin team. `
     + `Admin will contact you.\n\nOr you can WhatsApp our admin directly:\n`
@@ -1195,7 +1240,21 @@ async function flush(jid){
   // US, so the second is overwhelmingly the likely one — a bare ad link is exactly this shape and
   // is a real ad-click lead. Dropping a buyer costs the sale; a stray robot message costs a rep one
   // glance. **Known and accepted:** an OTP landing mid-flow still becomes a lead.
-  const notAnAnswer = (cat === 'admin');
+  // `workshop` joins `admin` for the same reason (2026-10-08): "nak servis" in answer to "which
+  // bike?" is not a bike — it used to be collapsed into `product` and assigned a SALES rep.
+  const notAnAnswer = (cat === 'admin' || cat === 'workshop');
+
+  // After a hand-off, a thank-you or another service line gets silence — BEFORE the qualify block,
+  // because inside it a "Tq" counts as a vague answer and triggers the buy-or-sell question.
+  if (handoffQuiet(jid, cat, text, b.hasImage, now)){
+    const h = state.handoff[jid];
+    D.log(`FR 🤫 after ${h.kind} hand-off, staying quiet: "${String(text).slice(0, 40)}" (${jid.slice(0,22)})`);
+    if (h.kind === 'workshop' && cat === 'workshop')
+      frLogEvent('workshop', jid, { has_phone: !!b.phone, cat, phone: b.phone || '', want: String(text).slice(0, 120), recordId: null, note: 'repeat_after_handoff' });
+    else
+      frLogEvent('repeat', jid, { has_phone: !!b.phone, cat, phone: b.phone || '', want: String(text).slice(0, 120), recordId: null, note: 'after_handoff' });
+    return;
+  }
   if (q && !notAnAnswer && now - q.ts < PENDING_MODEL_MS){
     // ── They answered something we asked for ──────────────────────────────────────────────────
     // phase 'detail' = the off-hours qualification (model + cash/loan), lead ALREADY parked.
@@ -1327,18 +1386,22 @@ async function flush(jid){
     return;
   }
 
-  // ---- HIRING / WORKSHOP: recognised, answered and flagged - but NOT yet routed -----------------
-  // There is no HR or workshop WhatsApp number from TM yet. Rather than pretend, the customer gets
-  // an honest holding reply and the internal group is told so a human picks it up. The moment a
-  // number arrives this becomes the same shape as the admin hand-off below.
+  // ---- HIRING / WORKSHOP ------------------------------------------------------------------------
+  // HIRING: no HR number from TM yet, so an honest holding reply + the group is told.
+  // WORKSHOP (2026-10-08): the customer is handed all three workshop links and picks (Benjamin's
+  // call). Nobody is DM'd; the group still sees it. The chat is then remembered as handed off so a
+  // "Tq" does not restart the sales funnel — see handoffQuiet().
   if (cat === 'hiring' || cat === 'workshop'){
-    try { await D.waSend(sendTarget(jid, b.phone), cat === 'hiring' ? hiringAck(lang) : workshopAck(lang)); }
+    if (cat === 'workshop'){ markHandoff(jid, 'workshop', now); persist(); }   // BEFORE any await
+    try { await D.waSend(sendTarget(jid, b.phone), cat === 'hiring' ? hiringAck(lang) : workshopAck(lang, text)); }
     catch(e){ D.log('FR ' + cat + ' ack send err:', String(e.message||e).slice(0,60)); }
     const who = b.phone ? ('+' + b.phone) : jid.slice(0, 22);
     try {
       await D.alertReview(`${cat === 'hiring' ? '\u{1F4BC} *Job enquiry*' : '\u{1F527} *Workshop enquiry*'}\n\u{1F464} ${who}\n`
         + `\u{1F4AC} "${String(text).slice(0,120)}"\n` + (b.phone ? `\u{1F449} https://wa.me/${b.phone}\n` : '')
-        + `\nNo ${cat === 'hiring' ? 'HR' : 'workshop'} number is set up yet, so nobody was messaged automatically. Please pass this on.`);
+        + (cat === 'hiring'
+          ? `\nNo HR number is set up yet, so nobody was messaged automatically. Please pass this on.`
+          : `\nThe customer was given the 3 workshop numbers (${workshopOrder(text).map(w => w.name.replace(/^WORKSHOP\s+/, '')).join(' / ')}) to contact directly. No workshop was messaged.`));
     } catch(e){ D.log('FR ' + cat + ' alert err:', String(e.message||e).slice(0,60)); }
     // Written as two LITERAL calls rather than passing the variable: leadsummary_test greps this
     // file for literal outcome strings to prove every outcome the bot writes has a reporting
@@ -1359,6 +1422,7 @@ async function flush(jid){
       return;
     }
     state.adminNotified[jid] = now;
+    markHandoff(jid, 'admin', now);        // same "Tq → sales greeting" hole as workshop — see handoffQuiet()
     persist();
 
     // 1) The customer. A hand-off line only — never an answer (TM: "takut if the bot answer it will be wrong").
