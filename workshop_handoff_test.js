@@ -176,6 +176,32 @@ const SALES = /berminat motor apa|Which bike are you interested|nak \*beli\* mot
   }
   aiOverride = {};
 
+
+  console.log('\nhand-off MID-QUALIFY (real chat 8 Oct): a later "Hello?" is not the bike answer');
+  aiOverride = { 'Morning': 'greeting', 'zontes 368g v1 problem, boleh troubleshoot ke?': 'workshop', 'Hello?': 'greeting',
+                 'nak ambik xmax': 'product', 'roadtax motor saya dah expired': 'admin' };
+  c = fresh(); larkRows = [];
+  r = await say(c, 'Morning');
+  ok('"Morning" → asked which bike', /berminat motor apa/.test(r));
+  r = await say(c, 'zontes 368g v1 problem, boleh troubleshoot ke?');
+  ok('mid-qualify service question → workshop links', /wa\.me\/60105491324/.test(r));
+  r = await say(c, 'Hello?');
+  ok('🚨 "Hello?" → NOT "nak beli atau jual?"', !SALES.test(r) && sent.length === 0);
+  ok('no Lark lead from "Hello?"', larkRows.length === 0);
+  c = fresh(); larkRows = [];
+  await say(c, 'Morning'); await say(c, 'zontes 368g v1 problem, boleh troubleshoot ke?');
+  r = await say(c, 'nak ambik xmax');
+  ok('🚨 …but "nak ambik xmax" after the links still becomes a lead', larkRows.length === 1);
+  console.log('  admin mid-qualify keeps the question open (2026-09-08), same "Hello?" guard');
+  c = fresh(); larkRows = [];
+  await say(c, 'Morning'); r = await say(c, 'roadtax motor saya dah expired');
+  ok('mid-qualify admin question → admin hand-off', /admin/i.test(r) && larkRows.length === 0);
+  r = await say(c, 'Hello?');
+  ok('🚨 "Hello?" after admin → NOT "nak beli atau jual?"', !SALES.test(r) && sent.length === 0);
+  r = await say(c, 'nak ambik xmax');
+  ok('a bike named after admin → still a lead', larkRows.length === 1);
+  aiOverride = {};
+
   console.log('\nnothing changes without a hand-off');
   c = fresh();
   r = await say(c, 'Hi');

@@ -1144,6 +1144,14 @@ function markHandoff(jid, kind, now){
   state.handoff = state.handoff || {};
   for (const k of Object.keys(state.handoff)) if (now - (state.handoff[k].ts || 0) >= HANDOFF_QUIET_MS) delete state.handoff[k];
   state.handoff[jid] = { ts: now, kind };
+  // Hand-off MID-QUALIFY (real chat 8 Oct: "Morning" → which bike? → "zontes 368g v1 problem, boleh
+  // troubleshoot ke?" → links → "Hello?" 35 min later was taken as the bike answer → "nak beli atau
+  // jual?"). The open question is NOT deleted: the customer is already greeted, so with no qualify
+  // entry a later "nak ambik xmax" would hit the 7-day one-touch guard and be swallowed. Instead it
+  // is marked, and a vague line ("Hello?", "Hi") no longer counts as the answer — a real bike still does.
+  // Same for admin, which keeps its entry alive on purpose (2026-09-08: an admin question does not
+  // tell us which bike) and had the same "Hello? → buy or sell?" hole.
+  if (state.qualify && state.qualify[jid]) state.qualify[jid].afterHandoff = true;
 }
 
 // Deliberately does NOT promise a time - we do not know when the rep will call, and a promise the
@@ -1279,7 +1287,8 @@ async function flush(jid){
     else                       frLogEvent('admin_handoff', jid, { has_phone: !!b.phone, cat, phone: b.phone || '', want: String(text).slice(0, 120), recordId: null, note: 'after_handoff' });
     return;
   }
-  if (q && !notAnAnswer && now - q.ts < PENDING_MODEL_MS){
+  const vagueAfterHandoff = !!(q && q.afterHandoff && VAGUE(text) && !b.hasImage);
+  if (q && !notAnAnswer && !vagueAfterHandoff && now - q.ts < PENDING_MODEL_MS){
     // ── They answered something we asked for ──────────────────────────────────────────────────
     // phase 'detail' = the off-hours qualification (model + cash/loan), lead ALREADY parked.
     // phase 'model'  = the in-window greeting flow, nothing written yet.
